@@ -442,6 +442,8 @@ toBackendExpr = case _ of
     lvl <- currentLevel
     make $ Abs (NonEmptyArray.singleton (Tuple (Just arg) lvl)) (intro [ arg ] lvl (toBackendExpr body))
   ExprApp _ a b
+    | ExprVar (Ann { meta: Just IsNewtype }) id <- a -> do
+        toBackendExpr b
     | otherwise ->
         make $ App (toBackendExpr a) (NonEmptyArray.singleton (toBackendExpr b))
   ExprLet _ binds body ->
