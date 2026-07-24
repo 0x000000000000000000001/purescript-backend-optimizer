@@ -36,5 +36,8 @@
   "bugs": {
     "url": "https://github.com/aristanetworks/purescript-backend-optimizer/issues"
   },
-  "homepage": "https://github.com/aristanetworks/purescript-backend-optimizer#readme"
+  "homepage": "https://github.com/aristanetworks/purescript-backend-optimizer#readme",
+  "devDependencies": {
+    "purescript": "github:0x000000000000000000001/purescript-npm"
+  }
 }

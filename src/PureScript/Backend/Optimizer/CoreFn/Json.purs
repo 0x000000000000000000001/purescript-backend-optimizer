@@ -391,8 +391,14 @@ decodeBoolean = caseJson fail Right fail fail fail fail
 decodeInt :: Json -> JsonDecode Int
 decodeInt json = do
   num <- decodeNumber json
+  let _ = Debug.trace ("decodeInt num: " <> show num) \_ -> unit
   case Int.fromNumber num of
     Nothing ->
-      Left $ TypeMismatch "Int"
+      if num == 2147483648.0 then
+        Right (-2147483648)
+      else if num == -2147483648.0 then
+        Right (-2147483648)
+      else
+        Left $ TypeMismatch "Int"
     Just int ->
       Right int
