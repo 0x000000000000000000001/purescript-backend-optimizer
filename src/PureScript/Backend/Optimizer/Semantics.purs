@@ -296,6 +296,8 @@ instance Eval f => Eval (BackendSyntax f) where
       NeutCtorDef (Qualified (Just (unwrap env).currentModule) tag) ct ty tag fields
     CtorSaturated qual ct ty tag fields ->
       guardFailOver snd (map (eval env) <$> fields) $ NeutData qual ct ty tag
+    Typed _ a ->
+      eval env a
 
 instance Eval BackendExpr where
   eval = go

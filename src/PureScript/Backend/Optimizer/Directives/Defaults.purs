@@ -29,6 +29,30 @@ defaultDirectives =
 
   Control.Category.categoryFn.identity always
 
+  Data.Ring.sub always
+  Data.Ring.ringInt always
+  Test.Polymorphism.intMonoidish always
+  Test.Polymorphism.polyLoop always
+  Test.Polymorphism.polyLoop1 always
+  Data.Semiring.add always
+  Data.Semiring.semiringInt always
+  Data.Ord.compare always
+  Data.Ord.lessThan always
+  Data.Ord.greaterThan always
+  Data.Ord.lessThanOrEq always
+  Data.Ord.greaterThanOrEq always
+  Data.Ord.ordInt always
+  Data.Eq.eq always
+  Data.Eq.notEq always
+  Data.Eq.eqInt always
+
+  Test.RBTree.lessThan always
+  Test.RBTree.greaterThan always
+  Test.RBTree.max always
+
+  Test.LazyEvaluation.force always
+  Test.LazyEvaluation.defer always
+
   Control.Monad.ap arity=1
   Control.Monad.lift1 arity=1
   Control.Monad.whenM arity=1

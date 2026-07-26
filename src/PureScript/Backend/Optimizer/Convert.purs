@@ -70,8 +70,8 @@ import Data.Traversable (class Foldable, Accum, foldr, for, mapAccumL, mapAccumR
 import Data.TraversableWithIndex (forWithIndex)
 import Data.Tuple (Tuple(..), fst, snd)
 import Partial.Unsafe (unsafeCrashWith, unsafePartial)
-import PureScript.Backend.Optimizer.Analysis (BackendAnalysis, analyze, analyzeEffectBlock)
-import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Comment, ConstructorType(..), Expr(..), Guard(..), Ident(..), Literal(..), Meta(..), Module(..), ModuleName(..), ProperName, Qualified(..), ReExport, findProp, propKey, propValue, qualifiedModuleName, unQualified)
+import PureScript.Backend.Optimizer.Analysis (BackendAnalysis, analyze, analyzeEffectBlock, analysisOf)
+import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Comment, ConstructorType(..), DataDecl, Expr(..), Guard(..), Ident(..), Literal(..), Meta(..), Module(..), ModuleName(..), ProperName, Qualified(..), ReExport, exprAnn, findProp, propKey, propValue, qualifiedModuleName, unQualified)
 import PureScript.Backend.Optimizer.Directives (DirectiveHeaderResult, parseDirectiveHeader)
 import PureScript.Backend.Optimizer.Semantics (BackendExpr(..), BackendSemantics, Ctx(..), DataTypeMeta, Env(..), EvalRef(..), ExternImpl(..), ExternSpine, InlineAccessor(..), InlineDirective(..), InlineDirectiveMap, NeutralExpr(..), build, evalExternFromImpl, evalExternRefFromImpl, freeze, optimize)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
@@ -94,6 +94,7 @@ type BackendModule =
   , bindings :: Array (BackendBindingGroup Ident NeutralExpr)
   , exports :: Set Ident
   , reExports :: Set ReExport
+  , dataDecls :: Array DataDecl
   , foreign :: Set Ident
   , implementations :: BackendImplementations
   , directives :: InlineDirectiveMap
@@ -202,6 +203,7 @@ toBackendModule (Module mod) env = do
   Tuple moduleBindings.accum.optimizationSteps $
     { name: mod.name
     , comments: mod.comments
+    , dataDecls: mod.dataDecls
     , imports: usedImports
     , dataTypes: Map.filter (Array.any (isBindingUsed usedBindings.accum) <<< Map.toUnfoldable <<< _.constructors) dataTypes
     , bindings: usedBindings.value
@@ -248,8 +250,16 @@ toTopLevelBackendBinding group env (Binding _ ident cfn) = do
   let qualifiedIdent = Qualified (Just env.currentModule) ident
   let backendExpr = toBackendExpr cfn env
   let enableTracing = Set.member qualifiedIdent env.traceIdents
+  let
+    mbType = case backendExpr of
+      ExprSyntax _ (Typed ty _) -> Just ty
+      _ -> Nothing
   let Tuple mbSteps optimizedExpr = optimize enableTracing (getCtx env) evalEnv qualifiedIdent env.rewriteLimit backendExpr
-  let Tuple impl expr' = toExternImpl env group optimizedExpr
+  let
+    optimizedExprWithTy = case mbType of
+      Just ty -> ExprSyntax (analysisOf optimizedExpr) (Typed ty optimizedExpr)
+      Nothing -> optimizedExpr
+  let Tuple impl expr' = toExternImpl env group optimizedExprWithTy
   { accum: env
       { implementations = Map.insert qualifiedIdent impl env.implementations
       , moduleImplementations = Map.insert qualifiedIdent impl env.moduleImplementations
@@ -409,95 +419,102 @@ currentLevel :: ConvertM Level
 currentLevel env = Level env.currentLevel
 
 toBackendExpr :: Expr Ann -> ConvertM BackendExpr
-toBackendExpr = case _ of
-  ExprVar _ qi -> do
-    { currentModule, toLevel } <- ask
-    case qi of
-      Qualified Nothing ident | Just lvl <- Map.lookup ident toLevel ->
-        buildM (Local (Just ident) lvl)
-      Qualified (Just mn) ident | mn == currentModule, Just lvl <- Map.lookup ident toLevel ->
-        buildM (Local (Just ident) lvl)
-      Qualified (Just (ModuleName "Prim")) (Ident "undefined") ->
-        buildM PrimUndefined
-      Qualified Nothing ident ->
-        buildM (Var (Qualified (Just currentModule) ident))
-      _ ->
-        buildM (Var qi)
-  ExprLit _ lit ->
-    buildM <<< Lit =<< traverse toBackendExpr lit
-  ExprConstructor _ ty name fields -> do
-    { dataTypes } <- ask
-    let
-      ct = case Map.lookup ty dataTypes of
-        Just { constructors } | Map.size constructors == 1 -> ProductType
-        _ -> SumType
-    buildM (CtorDef ct ty name fields)
-  ExprAccessor _ a field ->
-    buildM <<< flip Accessor (GetProp field) =<< toBackendExpr a
-  ExprUpdate _ a bs ->
-    join $ (\x y -> buildM (Update x y))
-      <$> toBackendExpr a
-      <*> traverse (traverse toBackendExpr) bs
-  ExprAbs _ arg body -> do
-    lvl <- currentLevel
-    make $ Abs (NonEmptyArray.singleton (Tuple (Just arg) lvl)) (intro [ arg ] lvl (toBackendExpr body))
-  ExprApp _ a b
-    | ExprVar (Ann { meta: Just IsNewtype }) id <- a -> do
-        toBackendExpr b
-    | otherwise ->
-        make $ App (toBackendExpr a) (NonEmptyArray.singleton (toBackendExpr b))
-  ExprLet _ binds body ->
-    foldr go (toBackendExpr body) binds
-    where
-    go bind' next = case bind' of
-      NonRec (Binding _ ident expr) ->
-        makeLet (Just ident) (toBackendExpr expr) \_ -> next
-      Rec bindings | Just bindings' <- NonEmptyArray.fromArray bindings -> do
-        lvl <- currentLevel
-        let idents = (\(Binding _ ident _) -> ident) <$> bindings'
-        join $ (\x y -> buildM (LetRec lvl x y))
-          <$> intro idents lvl (traverse toBackendBinding bindings')
-          <*> intro idents lvl next
-      Rec _ ->
-        unsafeCrashWith "CoreFn empty Rec binding group"
-  ExprCase _ exprs alts ->
-    foldr
-      ( \expr next idents ->
-          makeLet Nothing (toBackendExpr expr) \tmp ->
-            next (Array.snoc idents tmp)
-      )
-      ( \idents ->
-          toInitialCaseRows idents alts \caseRows ->
-            buildCaseTreeFromRows caseRows
-      )
-      exprs
-      []
+toBackendExpr expr = do
+  let Ann ann = exprAnn expr
+  backendExpr <- go expr
+  pure case ann.type of
+    Just t -> ExprSyntax (analysisOf backendExpr) (Typed t backendExpr)
+    Nothing -> backendExpr
   where
-  toInitialCaseRows :: Array Level -> Array (CaseAlternative Ann) -> (Array CaseRow -> ConvertM BackendExpr) -> ConvertM BackendExpr
-  toInitialCaseRows idents alts useCaseRowsCb =
-    foldr
-      ( \(CaseAlternative bs g) mainCb caseRows -> do
-          patterns <- Array.zipWithA (\ident b -> { column: ident, pattern: _ } <$> binderToPattern b) idents bs
-          let
-            args = Array.sort $ foldMap patternVars patterns
-            buildCaseRow guardFn = { patterns, guardFn, vars: SemigroupMap Map.empty }
+  go = case _ of
+    ExprVar _ qi -> do
+      { currentModule, toLevel } <- ask
+      case qi of
+        Qualified Nothing ident | Just lvl <- Map.lookup ident toLevel ->
+          buildM (Local (Just ident) lvl)
+        Qualified (Just mn) ident | mn == currentModule, Just lvl <- Map.lookup ident toLevel ->
+          buildM (Local (Just ident) lvl)
+        Qualified (Just (ModuleName "Prim")) (Ident "undefined") ->
+          buildM PrimUndefined
+        Qualified Nothing ident ->
+          buildM (Var (Qualified (Just currentModule) ident))
+        _ ->
+          buildM (Var qi)
+    ExprLit _ lit ->
+      buildM <<< Lit =<< traverse toBackendExpr lit
+    ExprConstructor _ ty name fields -> do
+      { dataTypes } <- ask
+      let
+        ct = case Map.lookup ty dataTypes of
+          Just { constructors } | Map.size constructors == 1 -> ProductType
+          _ -> SumType
+      buildM (CtorDef ct ty name fields)
+    ExprAccessor _ a field ->
+      buildM <<< flip Accessor (GetProp field) =<< toBackendExpr a
+    ExprUpdate _ a bs ->
+      join $ (\x y -> buildM (Update x y))
+        <$> toBackendExpr a
+        <*> traverse (traverse toBackendExpr) bs
+    ExprAbs _ arg body -> do
+      lvl <- currentLevel
+      make $ Abs (NonEmptyArray.singleton (Tuple (Just arg) lvl)) (intro [ arg ] lvl (toBackendExpr body))
+    ExprApp _ a b
+      | ExprVar (Ann { meta: Just IsNewtype }) id <- a -> do
+          toBackendExpr b
+      | otherwise ->
+          make $ App (toBackendExpr a) (NonEmptyArray.singleton (toBackendExpr b))
+    ExprLet _ binds body ->
+      foldr go (toBackendExpr body) binds
+      where
+      go bind' next = case bind' of
+        NonRec (Binding _ ident expr) ->
+          makeLet (Just ident) (toBackendExpr expr) \_ -> next
+        Rec bindings | Just bindings' <- NonEmptyArray.fromArray bindings -> do
+          lvl <- currentLevel
+          let idents = (\(Binding _ ident _) -> ident) <$> bindings'
+          join $ (\x y -> buildM (LetRec lvl x y))
+            <$> intro idents lvl (traverse toBackendBinding bindings')
+            <*> intro idents lvl next
+        Rec _ ->
+          unsafeCrashWith "CoreFn empty Rec binding group"
+    ExprCase _ exprs alts ->
+      foldr
+        ( \expr next idents ->
+            makeLet Nothing (toBackendExpr expr) \tmp ->
+              next (Array.snoc idents tmp)
+        )
+        ( \idents ->
+            toInitialCaseRows idents alts \caseRows ->
+              buildCaseTreeFromRows caseRows
+        )
+        exprs
+        []
+    where
+    toInitialCaseRows :: Array Level -> Array (CaseAlternative Ann) -> (Array CaseRow -> ConvertM BackendExpr) -> ConvertM BackendExpr
+    toInitialCaseRows idents alts useCaseRowsCb =
+      foldr
+        ( \(CaseAlternative bs g) mainCb caseRows -> do
+            patterns <- Array.zipWithA (\ident b -> { column: ident, pattern: _ } <$> binderToPattern b) idents bs
+            let
+              args = Array.sort $ foldMap patternVars patterns
+              buildCaseRow guardFn = { patterns, guardFn, vars: SemigroupMap Map.empty }
 
-          case g of
-            Unconditional e ->
-              makeLet Nothing (makeUncurriedAbs args (\_ -> toBackendExpr e)) \tmp ->
-                mainCb $ Array.snoc caseRows $ buildCaseRow $ UnconditionalFn tmp
-            Guarded gs ->
-              foldr
-                ( \(Guard pred body) cb xs ->
-                    makeLet Nothing (makeUncurriedAbs args (\_ -> toBackendExpr body)) \tmp ->
-                      cb $ Array.snoc xs (Tuple pred tmp)
-                )
-                ( \xs ->
-                    case NonEmptyArray.fromArray xs of
-                      Nothing -> unsafeCrashWith "CoreFn empty Guarded"
-                      Just xs' ->
-                        mainCb $ Array.snoc caseRows $ buildCaseRow $ GuardedFn xs'
-                )
+            case g of
+              Unconditional e ->
+                makeLet Nothing (makeUncurriedAbs args (\_ -> toBackendExpr e)) \tmp ->
+                  mainCb $ Array.snoc caseRows $ buildCaseRow $ UnconditionalFn tmp
+              Guarded gs ->
+                foldr
+                  ( \(Guard pred body) cb xs ->
+                      makeLet Nothing (makeUncurriedAbs args (\_ -> toBackendExpr body)) \tmp ->
+                        cb $ Array.snoc xs (Tuple pred tmp)
+                  )
+                  ( \xs ->
+                      case NonEmptyArray.fromArray xs of
+                        Nothing -> unsafeCrashWith "CoreFn empty Guarded"
+                        Just xs' ->
+                          mainCb $ Array.snoc caseRows $ buildCaseRow $ GuardedFn xs'
+                  )
                 gs
                 []
       )

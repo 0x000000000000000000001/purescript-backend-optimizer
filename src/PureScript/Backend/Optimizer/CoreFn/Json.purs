@@ -27,7 +27,7 @@ import Foreign.Object (Object)
 import Foreign.Object as Object
 import Partial.Unsafe (unsafePartial)
 import Prelude as Prelude
-import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Comment(..), ConstructorType(..), Expr(..), Guard(..), Ident(..), Import(..), Literal(..), Meta(..), Module(..), ModuleName(..), Prop(..), ProperName(..), Qualified(..), ReExport(..), SourcePos, SourceSpan, emptySpan)
+import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Comment(..), ConstructorType(..), DataConstructor, DataDecl, Expr(..), ExprType(..), Guard(..), Ident(..), Import(..), Literal(..), Meta(..), Module(..), ModuleName(..), Prop(..), ProperName(..), Qualified(..), ReExport(..), SourcePos, SourceSpan, emptySpan)
 import Safe.Coerce (coerce)
 import Unsafe.Coerce (unsafeCoerce)
 
@@ -107,13 +107,58 @@ decodeMeta json = do
     _ ->
       throwError $ TypeMismatch "Meta"
 
+decodeExprType :: Json -> JsonDecode ExprType
+decodeExprType json = decodeStr <|> decodeObj
+  where
+  decodeStr = do
+    str <- decodeString json
+    case str of
+      "Int" -> pure Int
+      "Number" -> pure Number
+      "String" -> pure String
+      "Char" -> pure Char
+      "Boolean" -> pure Boolean
+      "Any" -> pure Any
+      _ -> throwError $ TypeMismatch "ExprType"
+
+  decodeObj _ = do
+    obj <- decodeJObject json
+    case Object.lookup "Func" obj of
+      Just funcJson -> do
+        funcObj <- decodeJObject funcJson
+        args <- getField (decodeArray decodeExprType) funcObj "args"
+        ret <- getField decodeExprType funcObj "ret"
+        pure (Func args ret)
+      Nothing -> case Object.lookup "Record" obj of
+        Just recordJson -> do
+          recordObj <- decodeJObject recordJson
+          let entries = Object.toArrayWithKey Tuple recordObj
+          parsedEntries <- traverse (\(Tuple k v) -> Tuple k <$> decodeExprType v) entries
+          pure (Record parsedEntries)
+        Nothing -> case Object.lookup "Array" obj of
+          Just arrayJson -> do
+            innerType <- decodeExprType arrayJson
+            pure (Array innerType)
+          Nothing -> case Object.lookup "ADT" obj of
+            Just adtJson -> do
+              adtObj <- decodeJObject adtJson
+              adtPath <- getField (decodeArray decodeString) adtObj "path"
+              adtArgs <- getField (decodeArray decodeExprType) adtObj "args"
+              pure (ADT adtPath adtArgs)
+            Nothing -> case Object.lookup "TypeVar" obj of
+              Just tvJson -> do
+                tv <- decodeString tvJson
+                pure (TypeVar tv)
+              Nothing -> throwError $ TypeMismatch "ExprType"
+
 decodeAnn :: String -> Json -> JsonDecode Ann
 decodeAnn _path json = do
   obj <- decodeJObject json
   -- Currently disabled because spans are not used and are a performance drain.
   -- span <- getField (decodeSourceSpan path) obj "sourceSpan"
   meta <- getFieldOptional' decodeMeta obj "meta"
-  pure $ Ann { span: emptySpan, meta }
+  type_ <- getFieldOptional' decodeExprType obj "type"
+  pure $ Ann { span: emptySpan, meta, type: type_ }
 
 decodeImport :: forall a. (Json -> JsonDecode a) -> Json -> JsonDecode (Import a)
 decodeImport decodeAnn' json = do
@@ -121,6 +166,21 @@ decodeImport decodeAnn' json = do
   ann <- getField decodeAnn' obj "annotation"
   mod <- getField decodeModuleName obj "moduleName"
   pure $ Import ann mod
+
+decodeDataConstructor :: Json -> JsonDecode DataConstructor
+decodeDataConstructor json = do
+  obj <- decodeJObject json
+  constructorName <- getField decodeString obj "constructorName"
+  fieldTypes <- getField (decodeArray decodeExprType) obj "fieldTypes"
+  pure { constructorName, fieldTypes }
+
+decodeDataDecl :: Json -> JsonDecode DataDecl
+decodeDataDecl json = do
+  obj <- decodeJObject json
+  typeName <- getField decodeString obj "typeName"
+  typeVars <- getField (decodeArray decodeString) obj "typeVars"
+  constructors <- getField (decodeArray decodeDataConstructor) obj "constructors"
+  pure { typeName, typeVars, constructors }
 
 decodeModule :: Json -> JsonDecode (Module Ann)
 decodeModule = decodeModule' decodeAnn
@@ -134,6 +194,7 @@ decodeModule' decodeAnn' json = do
   imports <- getField (decodeArray (decodeImport (decodeAnn' path))) obj "imports"
   exports <- getField (decodeArray decodeIdent) obj "exports"
   reExports <- getField decodeReExports obj "reExports"
+  dataDecls <- getField (decodeArray decodeDataDecl) obj "dataDecls"
   decls <- getField (decodeArray (decodeBind (decodeAnn' path))) obj "decls"
   foreign_ <- getField (decodeArray decodeIdent) obj "foreign"
   comments <- getField (decodeArray decodeComment) obj "comments"
@@ -144,6 +205,7 @@ decodeModule' decodeAnn' json = do
     , imports
     , exports
     , reExports
+    , dataDecls
     , decls: decls
     , foreign: foreign_
     , comments
@@ -394,9 +456,7 @@ decodeInt json = do
   case Int.fromNumber num of
     Nothing ->
       if num == 2147483648.0 then
-        Right (-2147483648)
-      else if num == -2147483648.0 then
-        Right (-2147483648)
+        Right bottom
       else
         Left $ TypeMismatch "Int"
     Just int ->

@@ -8,6 +8,7 @@ import Data.Maybe (Maybe(..))
 import Data.Newtype (class Newtype)
 import Data.String.CodeUnits as SCU
 import Data.Traversable (class Traversable, sequenceDefault, traverse)
+import Data.Tuple (Tuple)
 
 newtype Ident = Ident String
 
@@ -52,7 +53,24 @@ type SourceSpan =
 newtype Ann = Ann
   { span :: SourceSpan
   , meta :: Maybe Meta
+  , type :: Maybe ExprType
   }
+
+data ExprType
+  = Int
+  | Number
+  | String
+  | Char
+  | Boolean
+  | Array ExprType
+  | Func (Array ExprType) ExprType
+  | Record (Array (Tuple String ExprType))
+  | ADT (Array String) (Array ExprType)
+  | TypeVar String
+  | Any
+
+derive instance eqExprType :: Eq ExprType
+derive instance ordExprType :: Ord ExprType
 
 data Meta
   = IsConstructor ConstructorType (Array Ident)
@@ -76,6 +94,17 @@ data Comment
   = LineComment String
   | BlockComment String
 
+type DataConstructor =
+  { constructorName :: String
+  , fieldTypes :: Array ExprType
+  }
+
+type DataDecl =
+  { typeName :: String
+  , typeVars :: Array String
+  , constructors :: Array DataConstructor
+  }
+
 newtype Module a = Module
   { name :: ModuleName
   , path :: String
@@ -83,6 +112,7 @@ newtype Module a = Module
   , imports :: Array (Import a)
   , exports :: Array Ident
   , reExports :: Array ReExport
+  , dataDecls :: Array DataDecl
   , decls :: Array (Bind a)
   , foreign :: Array Ident
   , comments :: Array Comment
@@ -207,6 +237,7 @@ emptyAnn :: Ann
 emptyAnn = Ann
   { span: emptySpan
   , meta: Nothing
+  , type: Nothing
   }
 
 emptySpan :: SourceSpan
