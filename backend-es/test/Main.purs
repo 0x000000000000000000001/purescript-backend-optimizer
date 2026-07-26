@@ -146,6 +146,7 @@ runSnapshotTests { accept, filter, traceIdents } = do
             let padding = power " " (SCU.length total - SCU.length index)
             Console.log $ "[" <> padding <> index <> " of " <> total <> "] Building " <> unwrap name
             pure coreFnMod
+          , onSkipModule: \_ _ -> pure Nothing
         , traceIdents
         }
       allSteps <- liftEffect (Ref.read stepsRef)
