@@ -132,7 +132,7 @@ runSnapshotTests { accept, filter, traceIdents } = do
             let testFilePath = Path.concat [ testFileDir, "index.js" ]
             mkdirp testFileDir
             FS.writeTextFile UTF8 testFilePath formatted
-            unless (Set.isEmpty backendMod.foreign) do
+            unless (Map.isEmpty backendMod.foreign) do
               let foreignSiblingPath = fromMaybe path (String.stripSuffix (Pattern (Path.extname path)) path) <> ".js"
               let foreignOutputPath = Path.concat [ testFileDir, "foreign.js" ]
               copyFile foreignSiblingPath foreignOutputPath

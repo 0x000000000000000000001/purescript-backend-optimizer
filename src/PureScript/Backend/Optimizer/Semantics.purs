@@ -404,6 +404,9 @@ evalApp env hd spine = go env hd (List.fromFoldable spine)
       SemLetRec vals \nextVals ->
         makeLet Nothing (k nextVals) \nextFn ->
           go (bindLocal (bindLocal env' (Group nextVals)) (One nextFn)) nextFn args
+    NeutCtorDef qual ct ty tag fields, args
+      | Array.length fields == List.length args ->
+          unsafeCrashWith "CRASH CtorDef"
     fn, List.Nil ->
       fn
     fn, args ->

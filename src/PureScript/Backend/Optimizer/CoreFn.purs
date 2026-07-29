@@ -4,6 +4,7 @@ import Prelude
 
 import Data.Array as Array
 import Data.Foldable (class Foldable, foldMap, foldlDefault, foldrDefault)
+import Data.Map (Map)
 import Data.Maybe (Maybe(..))
 import Data.Newtype (class Newtype)
 import Data.String.CodeUnits as SCU
@@ -114,7 +115,7 @@ newtype Module a = Module
   , reExports :: Array ReExport
   , dataDecls :: Array DataDecl
   , decls :: Array (Bind a)
-  , foreign :: Array Ident
+  , foreign :: Map Ident (Maybe ExprType)
   , comments :: Array Comment
   }
 

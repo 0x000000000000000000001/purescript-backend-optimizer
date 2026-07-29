@@ -18,7 +18,8 @@ import Data.Either (Either(..), note)
 import Data.Enum (toEnum)
 import Data.Foldable (intercalate)
 import Data.Int as Int
-import Data.Maybe (Maybe(..))
+import Data.Map as Map
+import Data.Maybe (Maybe(..), fromMaybe)
 import Data.String.CodePoints (CodePoint, fromCodePointArray)
 import Data.String.CodeUnits as SCU
 import Data.Traversable (traverse)
@@ -178,7 +179,8 @@ decodeDataDecl :: Json -> JsonDecode DataDecl
 decodeDataDecl json = do
   obj <- decodeJObject json
   typeName <- getField decodeString obj "typeName"
-  typeVars <- getField (decodeArray decodeString) obj "typeVars"
+  mbTypeVars <- getFieldOptional' (decodeArray decodeString) obj "typeVars"
+  let typeVars = fromMaybe [] mbTypeVars
   constructors <- getField (decodeArray decodeDataConstructor) obj "constructors"
   pure { typeName, typeVars, constructors }
 
@@ -196,7 +198,17 @@ decodeModule' decodeAnn' json = do
   reExports <- getField decodeReExports obj "reExports"
   dataDecls <- getField (decodeArray decodeDataDecl) obj "dataDecls"
   decls <- getField (decodeArray (decodeBind (decodeAnn' path))) obj "decls"
-  foreign_ <- getField (decodeArray decodeIdent) obj "foreign"
+  foreign_arr <- getField (decodeArray decodeIdent) obj "foreign"
+  foreign_anns <- fromMaybe Object.empty <$> getFieldOptional' decodeJObject obj "foreignAnnotations"
+  foreign_list <- traverse (\ident@(Ident identName) ->
+    case Object.lookup identName foreign_anns of
+      Just annJson -> do
+        Ann { type: type_ } <- decodeAnn path annJson
+        pure (Tuple ident type_)
+      Nothing ->
+        pure (Tuple ident Nothing)
+    ) foreign_arr
+  let foreign_ = Map.fromFoldable foreign_list
   comments <- getField (decodeArray decodeComment) obj "comments"
   pure $ Module
     { name
@@ -246,11 +258,11 @@ decodeExpr decAnn json = do
     "Constructor" -> do
       tyn <- getField decodeProperName obj "typeName"
       con <- getField decodeIdent obj "constructorName"
-      is <- getField (decodeArray decodeString) obj "fieldNames"
+      is <- getField (decodeArray decodeStringLiteral) obj "fieldNames"
       pure $ ExprConstructor ann tyn con is
     "Accessor" -> do
       e <- getField (decodeExpr decAnn) obj "expression"
-      f <- getField decodeString obj "fieldName"
+      f <- getField decodeStringLiteral obj "fieldName"
       pure $ ExprAccessor ann e f
     "ObjectUpdate" -> do
       e <- getField (decodeExpr decAnn) obj "expression"
@@ -350,7 +362,7 @@ decodeRecord = decodeArray <<< decodeProp
     arr <- decodeJArray json
     case arr of
       [ a, b ] -> do
-        prop <- decodeString a
+        prop <- decodeStringLiteral a
         value <- decoder b
         pure $ Prop prop value
       _ ->

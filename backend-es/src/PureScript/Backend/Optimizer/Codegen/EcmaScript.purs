@@ -29,7 +29,7 @@ codegenModule options implementations mod = do
       ( \bs { bindings } ->
           foldr (flip Map.insert 1 <<< fst) bs bindings
       )
-      (foldr (flip Map.insert 1) Map.empty mod.foreign)
+      (foldr (flip Map.insert 1) Map.empty (Map.keys mod.foreign))
       mod.bindings
 
     inlineApp :: CodegenEnv -> Qualified Ident -> InlineSpine TcoExpr -> Maybe EsExpr
@@ -60,7 +60,7 @@ codegenModule options implementations mod = do
     exportsByPath = dataTypeExports <> bindingExports
 
     foreignImports :: Array EsIdent
-    foreignImports = toEsIdent <$> Set.toUnfoldable mod.foreign
+    foreignImports = toEsIdent <$> Array.fromFoldable (Map.keys mod.foreign)
 
     modBindings :: Array EsExpr
     modBindings = codegenTopLevelBindingGroup codegenEnv =<< mod.bindings
@@ -78,7 +78,7 @@ codegenModule options implementations mod = do
       , EsStatement <<< uncurry (codegenCtorForType options) <$> dataTypes
       , EsStatement <$> modBindings
       , (\(Tuple p es) -> EsExport es p) <$> Map.toUnfoldable (unwrap exportsByPath)
-      , Monoid.guard (not (Set.isEmpty mod.foreign)) [ EsExportAllFrom (esForeignModulePath mod.name) ]
+      , Monoid.guard (not (Map.isEmpty mod.foreign)) [ EsExportAllFrom (esForeignModulePath mod.name) ]
       ]
 
   Monoid.guard (not (Array.null mod.comments))
