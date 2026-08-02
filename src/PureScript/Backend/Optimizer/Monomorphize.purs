@@ -18,6 +18,15 @@ import PureScript.Backend.Optimizer.Substitute (unify, substituteExprType)
 
 type InstantiationMap = Map String (Set ExprType)
 
+defaultToAny :: ExprType -> ExprType
+defaultToAny = case _ of
+  TypeVar _ -> Any
+  Array t -> Array (defaultToAny t)
+  Func args ret -> Func (map defaultToAny args) (defaultToAny ret)
+  Record props -> Record (map (\(Tuple k v) -> Tuple k (defaultToAny v)) props)
+  ADT names args -> ADT names (map defaultToAny args)
+  t -> t
+
 mangleType :: ExprType -> String
 mangleType Int = "Int"
 mangleType Number = "Number"
@@ -83,7 +92,7 @@ collectExpr modName acc expr = case expr of
         let qualName = case mbMod of
               Just mod -> unwrap mod <> "." <> name
               Nothing -> modName <> "." <> name
-        in Map.insertWith Set.union qualName (Set.singleton t) acc
+        in Map.insertWith Set.union qualName (Set.singleton (defaultToAny t)) acc
       Nothing -> acc
   ExprApp _ _ _ ->
     let
@@ -93,17 +102,27 @@ collectExpr modName acc expr = case expr of
     in case f of
       ExprVar (Ann ann) (Qualified mbMod (Ident name)) ->
         case ann.type of
-          Just genericType@(Func fArgs _) ->
+          Just genericType@(Func fArgs fRet) ->
             let
               argTypes = Array.mapMaybe inferExprType args
-              subst = Array.foldl (\substAcc (Tuple fArg xTy) -> unify fArg xTy substAcc) Map.empty (Array.zip fArgs argTypes)
+              substArgs = Array.foldl (\substAcc (Tuple fArg xTy) -> unify fArg xTy substAcc) Map.empty (Array.zip fArgs argTypes)
+              
+              appType = let (Ann exprAnn) = getExprAnn expr in exprAnn.type
+              subst = case appType of
+                Just t ->
+                  let remainingType = if Array.length args < Array.length fArgs then
+                                        Func (Array.drop (Array.length args) fArgs) fRet
+                                      else fRet
+                  in unify remainingType t substArgs
+                Nothing -> substArgs
+                
               instType = substituteExprType subst genericType
               qualName = case mbMod of
                 Just mod -> unwrap mod <> "." <> name
                 Nothing -> modName <> "." <> name
             in
               if Map.isEmpty subst then acc2
-              else Map.insertWith Set.union qualName (Set.singleton instType) acc2
+              else Map.insertWith Set.union qualName (Set.singleton (defaultToAny instType)) acc2
           _ -> acc2
       _ -> acc2
 

@@ -15,6 +15,7 @@ import PureScript.Backend.Optimizer.Analysis (BackendAnalysis(..))
 import PureScript.Backend.Optimizer.Convert (BackendModule)
 import PureScript.Backend.Optimizer.CoreFn (Ident, ModuleName(..), Qualified(..))
 import PureScript.Backend.Optimizer.Semantics (ExternImpl)
+import Data.Foldable (foldl)
 
 -- | Computes the set of reachable modules starting from a list of entry modules.
 moduleReachability :: Array ModuleName -> Map ModuleName BackendModule -> Set ModuleName
@@ -27,26 +28,34 @@ moduleReachability entryMods modulesMap =
         seen
       else
         let
-          newDepsArray = Array.concatMap getModuleDeps unvisited
           newSeen = Set.union seen (Set.fromFoldable unvisited)
-          nextUnvisited = Array.filter (\dep -> not (Set.member dep newSeen)) newDepsArray
+          
+          -- Use a Set to accumulate new dependencies to avoid huge arrays
+          newDepsSet = foldl (\acc modName -> Set.union acc (getModuleDeps modName)) Set.empty unvisited
+          
+          nextUnvisitedSet = Set.difference newDepsSet newSeen
         in
-          go newSeen nextUnvisited
+          go newSeen (Array.fromFoldable nextUnvisitedSet)
 
-    getModuleDeps :: ModuleName -> Array ModuleName
+    getModuleDeps :: ModuleName -> Set ModuleName
     getModuleDeps modName =
       case Map.lookup modName modulesMap of
         Just backendMod ->
           let
-            -- Collect all dependencies of all identifiers in this module
-            allDeps = Array.concatMap (\(Tuple _ (Tuple (BackendAnalysis analysis) _)) -> Array.fromFoldable analysis.deps) (Map.toUnfoldable backendMod.implementations :: Array (Tuple (Qualified Ident) (Tuple BackendAnalysis ExternImpl)))
+            impls = Map.toUnfoldable backendMod.implementations :: Array (Tuple (Qualified Ident) (Tuple BackendAnalysis ExternImpl))
             
-            -- Also add explicit imports just in case there are side-effect only imports
-            explicitImports = Array.fromFoldable backendMod.imports
+            -- Accumulate module names directly into a Set to avoid massive intermediate arrays
+            allMods = foldl (\acc (Tuple _ (Tuple (BackendAnalysis analysis) _)) -> 
+                        foldl (\acc2 (Qualified mbMod _) -> 
+                          case mbMod of
+                            Just m -> Set.insert m acc2
+                            Nothing -> acc2
+                        ) acc analysis.deps
+                      ) Set.empty impls
             
-            -- Extract ModuleNames from the qualified idents
-            implicitImports = Array.mapMaybe (\(Qualified mbMod _) -> mbMod) allDeps
+            explicitImports = backendMod.imports
           in
-            explicitImports <> implicitImports
+            Set.union explicitImports allMods
         Nothing ->
-          []
+          Set.empty
+

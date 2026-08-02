@@ -39,15 +39,22 @@ import PureScript.Backend.Optimizer.Semantics (InlineDirectiveMap)
 readCoreFnModule :: String -> Aff (Maybe (Module Ann))
 readCoreFnModule filePath = do
   statRes <- attempt (FS.stat filePath)
-  if isRight statRes then do
-    contents <- FS.readTextFile UTF8 filePath
-    case jsonParser contents >>= (lmap printJsonDecodeError <<< decodeModule) of
-      Left err -> do
-        liftEffect $ Console.error $ "Failed to decode " <> filePath <> ": " <> err
+  case statRes of
+    Right stat -> do
+      if Stats.isFile stat then do
+        contents <- FS.readTextFile UTF8 filePath
+        case jsonParser contents >>= (lmap printJsonDecodeError <<< decodeModule) of
+          Left err -> do
+            liftEffect $ Console.error $ "Failed to decode " <> filePath <> ": " <> err
+            pure Nothing
+          Right mod -> pure (Just mod)
+      else do
         pure Nothing
-      Right mod -> pure (Just mod)
-  else
-    pure Nothing
+    Left err -> do
+      let errStr = show err
+      if String.contains (Pattern "ENOENT") errStr then pure unit else
+        liftEffect $ Console.error $ "Failed to stat " <> filePath <> ": " <> errStr
+      pure Nothing
 
 -- | Reads and sorts all CoreFn modules from an output directory (e.g. "output")
 coreFnModulesFromOutput :: String -> Aff (List.List (Module Ann))
@@ -69,6 +76,7 @@ type CLIArgs =
   { mbMainModule :: Maybe String
   , mbAutoloadPath :: Maybe String
   , mbFfiDir :: Maybe String
+  , mbOutputDir :: Maybe String
   , bundle :: Boolean
   }
 
@@ -83,6 +91,7 @@ parseCLIArgs argsRaw =
     { mbMainModule: getArg "--main"
     , mbAutoloadPath: getArg "--autoload-path"
     , mbFfiDir: getArg "--ffi"
+    , mbOutputDir: getArg "--output"
     , bundle: isJust (Array.elemIndex "--bundle" args)
     }
 
