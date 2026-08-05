@@ -23,7 +23,7 @@ import Data.String as String
 import Data.Tuple (Tuple(..), fst, snd)
 import Partial.Unsafe (unsafeCrashWith)
 import PureScript.Backend.Optimizer.Analysis (class HasAnalysis, BackendAnalysis(..), Capture(..), Complexity(..), ResultTerm(..), Usage(..), analysisOf, bound, bump, complex, resultOf, updated, withResult, withRewrite)
-import PureScript.Backend.Optimizer.CoreFn (ConstructorType, Ident(..), Literal(..), ModuleName, Prop(..), ProperName, Qualified(..), findProp, propKey, propValue)
+import PureScript.Backend.Optimizer.CoreFn (ConstructorType, ExprType, Ident(..), Literal(..), ModuleName, Prop(..), ProperName, Qualified(..), findProp, propKey, propValue)
 import PureScript.Backend.Optimizer.Syntax (class HasSyntax, BackendAccessor(..), BackendEffect, BackendOperator(..), BackendOperator1(..), BackendOperator2(..), BackendOperatorNum(..), BackendOperatorOrd(..), BackendSyntax(..), Level(..), Pair(..), syntaxOf)
 import PureScript.Backend.Optimizer.Utils (foldl1Array, foldr1Array)
 
@@ -36,7 +36,8 @@ data MkFn a
   | MkFnNext (Maybe Ident) (a -> MkFn a)
 
 data BackendSemantics
-  = SemRef EvalRef (Array ExternSpine) (Lazy BackendSemantics)
+  = SemTyped ExprType BackendSemantics
+  | SemRef EvalRef (Array ExternSpine) (Lazy BackendSemantics)
   | SemLam (Maybe Ident) (BackendSemantics -> BackendSemantics)
   | SemMkFn (MkFn BackendSemantics)
   | SemMkEffectFn (MkFn BackendSemantics)
@@ -296,8 +297,8 @@ instance Eval f => Eval (BackendSyntax f) where
       NeutCtorDef (Qualified (Just (unwrap env).currentModule) tag) ct ty tag fields
     CtorSaturated qual ct ty tag fields ->
       guardFailOver snd (map (eval env) <$> fields) $ NeutData qual ct ty tag
-    Typed _ a ->
-      eval env a
+    Typed t a ->
+      SemTyped t (eval env a)
 
 instance Eval BackendExpr where
   eval = go
@@ -387,6 +388,10 @@ evalApp :: Env -> BackendSemantics -> Spine BackendSemantics -> BackendSemantics
 evalApp env hd spine = go env hd (List.fromFoldable spine)
   where
   go env' = case _, _ of
+    SemTyped _ fn, args ->
+      go env' fn args
+    fn, List.Cons (SemTyped _ arg) args ->
+      go env' fn (List.Cons arg args)
     _, List.Cons (NeutFail err) _ ->
       NeutFail err
     NeutFail err, _ ->
@@ -414,6 +419,8 @@ evalApp env hd spine = go env hd (List.fromFoldable spine)
 
 evalUncurriedApp :: Env -> BackendSemantics -> Spine BackendSemantics -> BackendSemantics
 evalUncurriedApp env hd spine = case hd of
+  SemTyped _ a ->
+    evalUncurriedApp env a spine
   SemMkFn mk ->
     evalUncurriedBeta NeutUncurriedApp mk spine
   SemRef ref sp sem ->
@@ -430,6 +437,8 @@ evalUncurriedApp env hd spine = case hd of
 
 evalUncurriedEffectApp :: Env -> BackendSemantics -> Spine BackendSemantics -> BackendSemantics
 evalUncurriedEffectApp env hd spine = case hd of
+  SemTyped _ a ->
+    evalUncurriedEffectApp env a spine
   SemMkEffectFn mk ->
     evalUncurriedBeta NeutUncurriedEffectApp mk spine
   SemLet ident val k ->
@@ -495,6 +504,8 @@ neutralApp hd spine
 
 evalAccessor :: Env -> BackendSemantics -> BackendAccessor -> BackendSemantics
 evalAccessor env lhs accessor = floatLet lhs case _ of
+  SemTyped _ a ->
+    evalAccessor env a accessor
   SemRef ref spine sem ->
     evalRef env ref spine (ExternAccessor accessor) sem
   NeutLit (LitRecord props)
@@ -523,6 +534,8 @@ evalAccessor env lhs accessor = floatLet lhs case _ of
 
 evalUpdate :: BackendSemantics -> Array (Prop BackendSemantics) -> BackendSemantics
 evalUpdate lhs props = floatLet lhs case _ of
+  SemTyped _ a ->
+    evalUpdate a props
   NeutLit (LitRecord props') ->
     NeutLit (LitRecord (NonEmptyArray.head <$> Array.groupAllBy (comparing propKey) (props <> props')))
   NeutUpdate r props' ->
@@ -624,6 +637,8 @@ floatLetWith = go
 
 deref :: BackendSemantics -> BackendSemantics
 deref = case _ of
+  SemTyped ty a ->
+    SemTyped ty (deref a)
   SemRef _ _ sem ->
     force sem
   sem ->
@@ -869,6 +884,10 @@ isAssocPrimOp = case _ of
 
 evalAssocOp :: Env -> Either (Qualified Ident) BackendOperator2 -> BackendSemantics -> BackendSemantics -> BackendSemantics
 evalAssocOp env op1 = case _, _ of
+  SemTyped _ a, b ->
+    evalAssocOp env op1 a b
+  a, SemTyped _ b ->
+    evalAssocOp env op1 a b
   SemAssocOp op2 as, SemAssocOp op3 bs
     | op1 == op2
     , op2 == op3 ->
@@ -1179,6 +1198,8 @@ quote :: Ctx -> BackendSemantics -> BackendExpr
 quote = go
   where
   go ctx = case _ of
+    SemTyped ty a ->
+      build ctx $ Typed ty (go ctx a)
     -- Block constructors
     SemLet ident binding k -> do
       let Tuple level ctx' = nextLevel ctx
@@ -1616,6 +1637,30 @@ shouldInlineExternAppArg :: Usage -> BackendSemantics -> Boolean
 shouldInlineExternAppArg (Usage u) = case _ of
   SemLam _ _ -> u.captured <= CaptureBranch && u.total > 0 && u.call == u.total
   _ -> false
+
+isEffectSemantics :: BackendSemantics -> Boolean
+isEffectSemantics = case _ of
+  SemTyped _ a ->
+    isEffectSemantics a
+  SemMkEffectFn _ ->
+    true
+  SemEffectBind _ _ _ ->
+    true
+  SemEffectPure _ ->
+    true
+  SemEffectDefer _ ->
+    true
+  _ ->
+    false
+
+isPartialAssocOp :: BackendSemantics -> Boolean
+isPartialAssocOp = case _ of
+  SemTyped _ a ->
+    isPartialAssocOp a
+  SemAssocOp _ _ ->
+    true
+  _ ->
+    false
 
 shouldInlineExternAccessor :: Qualified Ident -> BackendAnalysis -> NeutralExpr -> BackendAccessor -> Boolean
 shouldInlineExternAccessor _ (BackendAnalysis s) _ _ =
