@@ -141,9 +141,12 @@ instance HasAnalysis BackendExpr where
     ExprRewrite s _ -> s
 
 instance HasSyntax BackendExpr where
-  syntaxOf = case _ of
-    ExprSyntax _ s -> Just s
-    _ -> Nothing
+  syntaxOf = go
+    where
+    go = case _ of
+      ExprSyntax _ (Typed _ a) -> go a
+      ExprSyntax _ s -> Just s
+      _ -> Nothing
 
 data LocalBinding a = One a | Group (NonEmptyArray (Tuple Ident (Lazy a)))
 
