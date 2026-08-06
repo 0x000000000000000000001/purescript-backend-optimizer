@@ -189,10 +189,15 @@ type TcoRefBinding =
 
 tcoRefBinding :: TcoRef -> TcoExpr -> Maybe TcoRefBinding
 tcoRefBinding ref (TcoExpr _ expr) = case expr of
-  Abs args (TcoExpr analysis _) ->
-    Just { ref, analysis, arity: NonEmptyArray.length args }
-  UncurriedAbs args (TcoExpr analysis _) ->
-    Just { ref, analysis, arity: Array.length args }
+  Abs args inner ->
+    case tcoRefBinding ref inner of
+      Just child -> Just { ref, analysis: child.analysis, arity: NonEmptyArray.length args + child.arity }
+      Nothing -> Just { ref, analysis: tcoAnalysisOf inner, arity: NonEmptyArray.length args }
+  UncurriedAbs args inner ->
+    case tcoRefBinding ref inner of
+      Just child -> Just { ref, analysis: child.analysis, arity: Array.length args + child.arity }
+      Nothing -> Just { ref, analysis: tcoAnalysisOf inner, arity: Array.length args }
+  Typed _ inner -> tcoRefBinding ref inner
   _ ->
     Nothing
 
@@ -203,7 +208,7 @@ tcoEnvGroup :: (Ident -> TcoRef) -> NonEmptyArray (Tuple Ident NeutralExpr) -> T
 tcoEnvGroup toTcoRef = fold <<< traverse go <<< NonEmptyArray.toArray
   where
   go (Tuple ident (NeutralExpr expr)) =
-    Tuple (toTcoRef ident) <$> syntacticArity expr
+    Tuple (toTcoRef ident) <$> syntacticArity (NeutralExpr expr)
 
 localTcoRefBindings :: Level -> NonEmptyArray (Tuple Ident TcoExpr) -> Maybe (NonEmptyArray TcoRefBinding)
 localTcoRefBindings level = tcoRefBindings \ident -> TcoLocal (Just ident) level
@@ -230,12 +235,18 @@ tcoRoleJoins env analysis group = do
   guard (isTailCalledIn analysis group)
   Array.nub $ foldMap (\b -> Array.mapMaybe (\(Tuple ref arity) -> ref <$ (guard =<< isUniformTailCall b.analysis ref arity)) env) group
 
-syntacticArity :: forall a. BackendSyntax a -> Maybe Int
-syntacticArity = case _ of
-  Abs args _ ->
-    Just $ NonEmptyArray.length args
-  UncurriedAbs args _ ->
-    Just $ Array.length args
+syntacticArity :: NeutralExpr -> Maybe Int
+syntacticArity (NeutralExpr expr) = case expr of
+  Abs args inner ->
+    case syntacticArity inner of
+      Just childArity -> Just (NonEmptyArray.length args + childArity)
+      Nothing -> Just (NonEmptyArray.length args)
+  UncurriedAbs args inner ->
+    case syntacticArity inner of
+      Just childArity -> Just (Array.length args + childArity)
+      Nothing -> Just (Array.length args)
+  Typed _ inner ->
+    syntacticArity inner
   _ ->
     Nothing
 
@@ -245,35 +256,28 @@ analyze env (NeutralExpr expr) = case expr of
     TcoExpr (tcoCall (TcoTopLevel ident) 0 mempty) $ Var ident
   Local ident level ->
     TcoExpr (tcoCall (TcoLocal ident level) 0 mempty) $ Local ident level
-  App hd@(NeutralExpr (Local ident level)) tl -> do
+  App hd tl | Just (Tuple ref arity) <- unwrapAppHead hd (NonEmptyArray.length tl) -> do
     let hd' = analyze env hd
     let tl' = overTcoAnalysis tcoNoTailCalls <<< analyze env <$> tl
-    let analysis2 = tcoCall (TcoLocal ident level) (NonEmptyArray.length tl') (foldMap tcoAnalysisOf tl')
+    let analysis2 = tcoCall ref arity (foldMap tcoAnalysisOf tl')
     TcoExpr analysis2 $ App hd' tl'
-  App hd@(NeutralExpr (Var ident)) tl -> do
+  UncurriedApp hd tl | Just (Tuple ref arity) <- unwrapAppHead hd (Array.length tl) -> do
     let hd' = analyze env hd
     let tl' = overTcoAnalysis tcoNoTailCalls <<< analyze env <$> tl
-    let analysis2 = tcoCall (TcoTopLevel ident) (NonEmptyArray.length tl') (foldMap tcoAnalysisOf tl')
-    TcoExpr analysis2 $ App hd' tl'
-  UncurriedApp hd@(NeutralExpr (Local ident level)) tl -> do
-    let hd' = analyze env hd
-    let tl' = overTcoAnalysis tcoNoTailCalls <<< analyze env <$> tl
-    let analysis2 = tcoCall (TcoLocal ident level) (Array.length tl') (foldMap tcoAnalysisOf tl')
+    let analysis2 = tcoCall ref arity (foldMap tcoAnalysisOf tl')
     TcoExpr analysis2 $ UncurriedApp hd' tl'
-  UncurriedApp hd@(NeutralExpr (Var ident)) tl -> do
-    let hd' = analyze env hd
-    let tl' = overTcoAnalysis tcoNoTailCalls <<< analyze env <$> tl
-    let analysis2 = tcoCall (TcoTopLevel ident) (Array.length tl') (foldMap tcoAnalysisOf tl')
-    TcoExpr analysis2 $ UncurriedApp hd' tl'
-  PrimEffect (EffectRefRead ref@(NeutralExpr (Local ident level))) -> do
+  PrimEffect (EffectRefRead ref) | Just refId <- unwrapRefHead ref -> do
     let ref' = analyze env ref
-    let analysis = tcoRefEffect (TcoLocal ident level) mempty
+    let analysis = tcoRefEffect refId mempty
     TcoExpr analysis $ PrimEffect (EffectRefRead ref')
-  PrimEffect (EffectRefWrite ref@(NeutralExpr (Local ident level)) val) -> do
+  PrimEffect (EffectRefWrite ref val) | Just refId <- unwrapRefHead ref -> do
     let ref' = analyze env ref
     let val' = analyze env val
-    let analysis = tcoRefEffect (TcoLocal ident level) $ tcoAnalysisOf val'
+    let analysis = tcoRefEffect refId $ tcoAnalysisOf val'
     TcoExpr analysis $ PrimEffect (EffectRefWrite ref' val')
+  Typed ty inner -> do
+    let inner' = analyze env inner
+    TcoExpr (tcoAnalysisOf inner') (Typed ty inner')
   Branch branches def -> do
     let branches' = map (\(Pair a b) -> Pair (overTcoAnalysis tcoNoTailCalls (analyze env a)) (analyze env b)) branches
     let def' = analyze env def
@@ -310,3 +314,20 @@ analyze env (NeutralExpr expr) = case expr of
   _ -> do
     let expr' = analyze env <$> expr
     TcoExpr (tcoNoTailCalls (foldMap tcoAnalysisOf expr')) expr'
+
+unwrapAppHead :: NeutralExpr -> Int -> Maybe (Tuple TcoRef Int)
+unwrapAppHead (NeutralExpr expr) arity = case expr of
+  Local ident level -> Just (Tuple (TcoLocal ident level) arity)
+  Var ident -> Just (Tuple (TcoTopLevel ident) arity)
+  Typed _ inner -> unwrapAppHead inner arity
+  App fn args -> unwrapAppHead fn (arity + NonEmptyArray.length args)
+  UncurriedApp fn args -> unwrapAppHead fn (arity + Array.length args)
+  UncurriedEffectApp fn args -> unwrapAppHead fn (arity + Array.length args)
+  _ -> Nothing
+
+unwrapRefHead :: NeutralExpr -> Maybe TcoRef
+unwrapRefHead (NeutralExpr expr) = case expr of
+  Local ident level -> Just (TcoLocal ident level)
+  Typed _ inner -> unwrapRefHead inner
+  _ -> Nothing
+
