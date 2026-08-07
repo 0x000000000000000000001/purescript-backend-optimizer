@@ -165,7 +165,6 @@ defaultDirectives =
 
   Control.Monad.ST.Internal.modify arity=2
   Effect.applyEffect.apply arity=2
-  Effect.Ref.modify arity=2
   Record.Builder.build arity=1
   Record.Builder.rename arity=8
   """

@@ -74,10 +74,6 @@ coreForeignSemantics = Map.fromFoldable semantics
     , data_string_codePoints_toCodePointArray
     , effect_bindE
     , effect_pureE
-    , effect_ref_modify
-    , effect_ref_new
-    , effect_ref_read
-    , effect_ref_write
     , effect_unsafe_unsafePerformEffect
     , partial_unsafe_unsafePartial
     , record_builder_copyRecord
