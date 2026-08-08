@@ -29,13 +29,16 @@ defaultDirectives =
 
   Control.Category.categoryFn.identity always
 
+  Data.Ring.negate always
   Data.Ring.sub always
   Data.Ring.ringInt always
+  Data.Ring.ringNumber always
   Test.Polymorphism.intMonoidish always
   Test.Polymorphism.polyLoop always
   Test.Polymorphism.polyLoop1 always
   Data.Semiring.add always
   Data.Semiring.semiringInt always
+  Data.Semiring.semiringNumber always
   Data.Ord.compare always
   Data.Ord.lessThan always
   Data.Ord.greaterThan always

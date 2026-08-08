@@ -640,8 +640,8 @@ floatLetWith = go
 
 deref :: BackendSemantics -> BackendSemantics
 deref = case _ of
-  SemTyped ty a ->
-    SemTyped ty (deref a)
+  SemTyped _ a ->
+    deref a
   SemRef _ _ sem ->
     force sem
   sem ->
