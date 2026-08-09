@@ -1,0 +1,10 @@
+--- src/PureScript/Backend/Optimizer/Semantics.purs
++++ src/PureScript/Backend/Optimizer/Semantics.purs
+@@ -825,7 +825,6 @@
+ 
+ evalPrimOpNumNumber :: BackendOperatorNum -> BackendSemantics -> BackendSemantics -> Maybe BackendSemantics
+-evalPrimOpNumNumber op x y | let _ = Debug.trace { msg: "evalPrimOpNumNumber", op, x, y, dx: deref x, dy: deref y } (\_ -> unit) = Nothing
+ evalPrimOpNumNumber op x y
++  | _ <- Debug.trace { msg: "evalPrimOpNumNumber", op, x, y, dx: deref x, dy: deref y } (\_ -> unit)
+   | NeutLit (LitNumber a) <- deref x
+   , NeutLit (LitNumber b) <- deref y =

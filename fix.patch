@@ -1,0 +1,18 @@
+--- src/PureScript/Backend/Optimizer/Semantics.purs
++++ src/PureScript/Backend/Optimizer/Semantics.purs
+@@ -825,8 +825,9 @@
+ 
+ evalPrimOpNumNumber :: BackendOperatorNum -> BackendSemantics -> BackendSemantics -> Maybe BackendSemantics
+-evalPrimOpNumNumber op x y = trace { msg: "evalPrimOpNumNumber", op, x, y, dx: deref x, dy: deref y } \_ ->
+-  if NeutLit (LitNumber a) <- deref x
+-  , NeutLit (LitNumber b) <- deref y then
++evalPrimOpNumNumber op x y
++  | NeutLit (LitNumber a) <- deref x
++  , NeutLit (LitNumber b) <- deref y =
+       Just $ liftNumber case op of
+         OpAdd -> a + b
+         OpMultiply -> a * b
+         OpSubtract -> a - b
+         OpDivide -> a / b
+-  | otherwise = Nothing
++  | otherwise = Nothing
