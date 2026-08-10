@@ -23,7 +23,11 @@ defaultToAny = case _ of
   TypeVar _ -> Any
   Array t -> Array (defaultToAny t)
   Func args ret -> Func (map defaultToAny args) (defaultToAny ret)
-  Record props -> Record (map (\(Tuple k v) -> Tuple k (defaultToAny v)) props)
+  Record row -> Record (defaultToAny row)
+  Row props tail -> Row (map (\(Tuple k v) -> Tuple k (defaultToAny v)) props) (map defaultToAny tail)
+  TypeApp c args -> TypeApp (defaultToAny c) (map defaultToAny args)
+  ForAll vars body -> ForAll vars (defaultToAny body)
+  ConstrainedType constraints body -> ConstrainedType (map (\(Tuple c a) -> Tuple c (map defaultToAny a)) constraints) (defaultToAny body)
   ADT names args -> ADT names (map defaultToAny args)
   t -> t
 
@@ -33,9 +37,16 @@ mangleType Number = "Number"
 mangleType String = "String"
 mangleType Char = "Char"
 mangleType Boolean = "Boolean"
+mangleType Unit = "Unit"
+mangleType Any = "Any"
+mangleType (TypeLevelString s) = "TypeLevelString_" <> s
 mangleType (Array t) = "Array_" <> mangleType t
 mangleType (Func args ret) = "Func_" <> String.joinWith "_" (map mangleType args) <> "_" <> mangleType ret
-mangleType (Record props) = "Record_" <> String.joinWith "_" (map (\(Tuple k v) -> k <> "_" <> mangleType v) props)
+mangleType (Record row) = "Record_" <> mangleType row
+mangleType (Row props tail) = "Row_" <> String.joinWith "_" (map (\(Tuple k v) -> k <> "_" <> mangleType v) props) <> "_" <> maybe "Empty" mangleType tail
+mangleType (TypeApp c args) = "TypeApp_" <> mangleType c <> "_" <> String.joinWith "_" (map mangleType args)
+mangleType (ForAll vars body) = "ForAll_" <> String.joinWith "_" vars <> "_" <> mangleType body
+mangleType (ConstrainedType constraints body) = "ConstrainedType_" <> String.joinWith "_" (map (\(Tuple c a) -> String.joinWith "_" c <> "_" <> String.joinWith "_" (map mangleType a)) constraints) <> "_" <> mangleType body
 mangleType (ADT names args) = "ADT_" <> String.joinWith "_" names <> (if Array.length args == 0 then "" else "_" <> String.joinWith "_" (map mangleType args))
 mangleType (TypeVar name) = "Var_" <> name
 mangleType Any = "Any"

@@ -63,12 +63,18 @@ data ExprType
   | String
   | Char
   | Boolean
-  | Array ExprType
-  | Func (Array ExprType) ExprType
-  | Record (Array (Tuple String ExprType))
-  | ADT (Array String) (Array ExprType)
-  | TypeVar String
+  | Unit
   | Any
+  | TypeLevelString String
+  | Array ExprType
+  | TypeVar String
+  | ADT (Array String) (Array ExprType)
+  | TypeApp ExprType (Array ExprType)
+  | Func (Array ExprType) ExprType
+  | Row (Array (Tuple String ExprType)) (Maybe ExprType)
+  | Record ExprType
+  | ForAll (Array String) ExprType
+  | ConstrainedType (Array (Tuple (Array String) (Array ExprType))) ExprType
 
 derive instance eqExprType :: Eq ExprType
 derive instance ordExprType :: Ord ExprType

@@ -28,8 +28,13 @@ unify (Func args1 ret1) (Func args2 ret2) acc =
     acc' = foldl (\acc'' (Tuple t1 t2) -> unify t1 t2 acc'') acc (Array.zip args1' args2')
   in unify ret1 ret2 acc'
 unify (Array t1) (Array t2) acc = unify t1 t2 acc
-unify (Record props1) (Record props2) acc =
+unify (Record row1) (Record row2) acc = unify row1 row2 acc
+unify (Row props1 _) (Row props2 _) acc =
   foldl (\acc' (Tuple (Tuple _ t1) (Tuple _ t2)) -> unify t1 t2 acc') acc (Array.zip props1 props2)
+unify (TypeApp c1 a1) (TypeApp c2 a2) acc =
+  foldl (\acc' (Tuple t1 t2) -> unify t1 t2 acc') (unify c1 c2 acc) (Array.zip a1 a2)
+unify (ForAll _ b1) (ForAll _ b2) acc = unify b1 b2 acc
+unify (ConstrainedType _ b1) (ConstrainedType _ b2) acc = unify b1 b2 acc
 unify _ _ acc = acc
 
 substituteExprType :: Map String ExprType -> ExprType -> ExprType
@@ -39,7 +44,11 @@ substituteExprType subst t = case t of
     Nothing -> t
   Func args ret -> Func (map (substituteExprType subst) args) (substituteExprType subst ret)
   Array inner -> Array (substituteExprType subst inner)
-  Record props -> Record (map (\(Tuple k v) -> Tuple k (substituteExprType subst v)) props)
+  Record row -> Record (substituteExprType subst row)
+  Row props tail -> Row (map (\(Tuple k v) -> Tuple k (substituteExprType subst v)) props) (map (substituteExprType subst) tail)
+  TypeApp c args -> TypeApp (substituteExprType subst c) (map (substituteExprType subst) args)
+  ForAll vars body -> ForAll vars (substituteExprType subst body)
+  ConstrainedType constraints body -> ConstrainedType (map (\(Tuple c a) -> Tuple c (map (substituteExprType subst) a)) constraints) (substituteExprType subst body)
   _ -> t
 
 setTcoExprType :: ExprType -> TcoExpr -> TcoExpr
