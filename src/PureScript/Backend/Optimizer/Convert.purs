@@ -71,7 +71,7 @@ import Data.TraversableWithIndex (forWithIndex)
 import Data.Tuple (Tuple(..), fst, snd)
 import Partial.Unsafe (unsafeCrashWith, unsafePartial)
 import PureScript.Backend.Optimizer.Analysis (BackendAnalysis, analyze, analyzeEffectBlock, analysisOf)
-import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Comment, ConstructorType(..), DataDecl, Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Meta(..), Module(..), ModuleName(..), ProperName, Qualified(..), ReExport, exprAnn, findProp, propKey, propValue, qualifiedModuleName, unQualified)
+import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), ClassDecl, Comment, ConstructorType(..), DataDecl, Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Meta(..), Module(..), ModuleName(..), ProperName, Qualified(..), ReExport, exprAnn, findProp, propKey, propValue, qualifiedModuleName, unQualified)
 import PureScript.Backend.Optimizer.Directives (DirectiveHeaderResult, parseDirectiveHeader)
 import PureScript.Backend.Optimizer.Semantics (BackendExpr(..), BackendSemantics, Ctx(..), DataTypeMeta, Env(..), EvalRef(..), ExternImpl(..), ExternSpine, InlineAccessor(..), InlineDirective(..), InlineDirectiveMap, NeutralExpr(..), build, evalExternFromImpl, evalExternRefFromImpl, freeze, optimize)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
@@ -95,6 +95,7 @@ type BackendModule =
   , exports :: Set Ident
   , reExports :: Set ReExport
   , dataDecls :: Array DataDecl
+  , classDecls :: Array ClassDecl
   , foreign :: Map Ident (Maybe ExprType)
   , implementations :: BackendImplementations
   , directives :: InlineDirectiveMap
@@ -204,6 +205,7 @@ toBackendModule (Module mod) env = do
     { name: mod.name
     , comments: mod.comments
     , dataDecls: mod.dataDecls
+    , classDecls: mod.classDecls
     , imports: usedImports
     , dataTypes: Map.filter (Array.any (isBindingUsed usedBindings.accum) <<< Map.toUnfoldable <<< _.constructors) dataTypes
     , bindings: usedBindings.value

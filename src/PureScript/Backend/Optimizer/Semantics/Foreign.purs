@@ -86,10 +86,6 @@ coreForeignSemantics = Map.fromFoldable semantics
     , record_unsafe_unsafeGet
     , record_unsafe_unsafeHas
     , record_unsafe_unsafeSet
-    , test_data_undefinedOr_compareUndefinedOrImpl
-    , test_data_undefinedOr_defined
-    , test_data_undefinedOr_eqUndefinedOrImpl
-    , test_data_undefinedOr_undefined
     , unsafe_coerce_unsafeCoerce
     ]
       <> map data_function_uncurried_mkFn oneToTen
@@ -599,51 +595,6 @@ record_unsafe_union_unsafeUnionFn = Tuple (qualified "Record.Unsafe.Union" "unsa
       Just $ NeutLit (LitRecord (NonEmptyArray.head <$> Array.groupAllBy (comparing propKey) (props1 <> props2)))
     _ ->
       Nothing
-
-test_data_undefinedOr_undefined :: ForeignSemantics
-test_data_undefinedOr_undefined = Tuple (qualified "Test.Data.UndefinedOr" "undefined") go
-  where
-  go _ _ = case _ of
-    [] ->
-      Just NeutPrimUndefined
-    _ ->
-      Nothing
-
-test_data_undefinedOr_defined :: ForeignSemantics
-test_data_undefinedOr_defined = Tuple (qualified "Test.Data.UndefinedOr" "defined") go
-  where
-  go _ _ = case _ of
-    [ ExternApp [ a ] ] ->
-      Just a
-    _ ->
-      Nothing
-
-test_data_undefinedOr_eqUndefinedOrImpl :: ForeignSemantics
-test_data_undefinedOr_eqUndefinedOrImpl = Tuple (qualified "Test.Data.UndefinedOr" "eqUndefinedOrImpl") go
-  where
-  go env _ = case _ of
-    [ ExternApp [ eqFn, a, b ] ] ->
-      Just $ goEq env eqFn a b
-    [ ExternApp [ eqFn, a ] ] ->
-      Just $ SemLam Nothing \b ->
-        goEq env eqFn a b
-    [ ExternApp [ eqFn ] ] ->
-      Just $ SemLam Nothing \a ->
-        SemLam Nothing \b ->
-          goEq env eqFn a b
-    [] ->
-      Just $ SemLam Nothing \eqFn ->
-        SemLam Nothing \a ->
-          SemLam Nothing \b ->
-            goEq env eqFn a b
-    _ ->
-      Nothing
-
-  goEq env eqFn a b = case a, b of
-    NeutPrimUndefined, NeutPrimUndefined -> NeutLit (LitBoolean true)
-    NeutPrimUndefined, _ -> NeutLit (LitBoolean false)
-    _, NeutPrimUndefined -> NeutLit (LitBoolean false)
-    _, _ -> evalApp env eqFn [ a, b ]
 
 test_data_undefinedOr_compareUndefinedOrImpl :: ForeignSemantics
 test_data_undefinedOr_compareUndefinedOrImpl = Tuple (qualified "Test.Data.UndefinedOr" "compareUndefinedOrImpl") go
