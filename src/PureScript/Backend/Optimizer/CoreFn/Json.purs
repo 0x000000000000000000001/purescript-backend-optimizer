@@ -331,8 +331,8 @@ decodeExpr decAnn json = do
       ExprLit ann <$> getField (decodeLiteral (decodeExpr decAnn)) obj "value"
     "Constructor" -> do
       tyn <- getField decodeProperName obj "typeName"
-      con <- getField decodeIdent obj "constructorName"
-      is <- getField (decodeArray decodeStringLiteral) obj "fieldNames"
+      con <- getField decodeIdent obj "name" <|> \_ -> getField decodeIdent obj "constructorName"
+      is <- getField (decodeArray decodeStringLiteral) obj "fields" <|> \_ -> getField (decodeArray decodeStringLiteral) obj "fieldNames"
       pure $ ExprConstructor ann tyn con is
     "Accessor" -> do
       e <- getField (decodeExpr decAnn) obj "expression"
@@ -394,7 +394,7 @@ decodeBinder decAnn json = do
       BinderLit ann <$> getField (decodeLiteral (decodeBinder decAnn)) obj "literal"
     "ConstructorBinder" -> do
       tyn <- getField (decodeQualified decodeProperName) obj "typeName"
-      ctn <- getField (decodeQualified decodeIdent) obj "constructorName"
+      ctn <- getField (decodeQualified decodeIdent) obj "name" <|> \_ -> getField (decodeQualified decodeIdent) obj "constructorName"
       binders <- getField (decodeArray (decodeBinder decAnn)) obj "binders"
       pure $ BinderConstructor ann tyn ctn binders
     "NamedBinder" -> do
