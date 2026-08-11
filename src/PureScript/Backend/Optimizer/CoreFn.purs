@@ -102,14 +102,21 @@ data Comment
   | BlockComment String
 
 type DataConstructor =
-  { constructorName :: String
-  , fieldTypes :: Array ExprType
+  { name :: String
+  , fields :: Array ExprType
   }
 
 type DataDecl =
-  { typeName :: String
-  , typeVars :: Array String
+  { name :: String
+  , vars :: Array String
   , constructors :: Array DataConstructor
+  }
+
+type ClassDecl =
+  { name :: String
+  , vars :: Array String
+  , superclasses :: Array (Tuple (Array String) (Array ExprType))
+  , methods :: Array (Tuple String ExprType)
   }
 
 newtype Module a = Module
@@ -120,6 +127,7 @@ newtype Module a = Module
   , exports :: Array Ident
   , reExports :: Array ReExport
   , dataDecls :: Array DataDecl
+  , classDecls :: Array ClassDecl
   , decls :: Array (Bind a)
   , foreign :: Map Ident (Maybe ExprType)
   , comments :: Array Comment

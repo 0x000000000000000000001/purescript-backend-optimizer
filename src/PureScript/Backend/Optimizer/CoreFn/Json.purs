@@ -28,7 +28,7 @@ import Foreign.Object (Object)
 import Foreign.Object as Object
 import Partial.Unsafe (unsafePartial)
 import Prelude as Prelude
-import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Comment(..), ConstructorType(..), DataConstructor, DataDecl, Expr(..), ExprType(..), Guard(..), Ident(..), Import(..), Literal(..), Meta(..), Module(..), ModuleName(..), Prop(..), ProperName(..), Qualified(..), ReExport(..), SourcePos, SourceSpan, emptySpan)
+import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), ClassDecl, Comment(..), ConstructorType(..), DataConstructor, DataDecl, Expr(..), ExprType(..), Guard(..), Ident(..), Import(..), Literal(..), Meta(..), Module(..), ModuleName(..), Prop(..), ProperName(..), Qualified(..), ReExport(..), SourcePos, SourceSpan, emptySpan)
 import Safe.Coerce (coerce)
 import Unsafe.Coerce (unsafeCoerce)
 
@@ -192,16 +192,26 @@ decodeExprType json = decodeStr <|> decodeObj
                     pure (ConstrainedType constraints body)
                   _ -> throwError $ TypeMismatch "ExprType"
 
-  decodeField j = do
-    o <- decodeJObject j
-    l <- getField decodeString o "label"
-    t <- getField decodeExprType o "type"
-    pure (Tuple l t)
-  decodeConstraint j = do
-    o <- decodeJObject j
-    fqn <- getField (decodeArray decodeString) o "fqn"
-    args <- getField (decodeArray decodeExprType) o "args"
-    pure (Tuple fqn args)
+decodeField :: Json -> JsonDecode (Tuple String ExprType)
+decodeField j = do
+  o <- decodeJObject j
+  l <- getField decodeString o "label"
+  t <- getField decodeExprType o "type"
+  pure (Tuple l t)
+
+decodeMethod :: Json -> JsonDecode (Tuple String ExprType)
+decodeMethod j = do
+  o <- decodeJObject j
+  name <- getField decodeString o "name"
+  t <- getField decodeExprType o "type"
+  pure (Tuple name t)
+
+decodeConstraint :: Json -> JsonDecode (Tuple (Array String) (Array ExprType))
+decodeConstraint j = do
+  o <- decodeJObject j
+  fqn <- getField (decodeArray decodeString) o "fqn"
+  args <- getField (decodeArray decodeExprType) o "args"
+  pure (Tuple fqn args)
 
 decodeAnn :: String -> Json -> JsonDecode Ann
 decodeAnn _path json = do
@@ -222,18 +232,28 @@ decodeImport decodeAnn' json = do
 decodeDataConstructor :: Json -> JsonDecode DataConstructor
 decodeDataConstructor json = do
   obj <- decodeJObject json
-  constructorName <- getField decodeString obj "constructorName"
-  fieldTypes <- getField (decodeArray decodeExprType) obj "fieldTypes"
-  pure { constructorName, fieldTypes }
+  name <- getField decodeString obj "name" <|> \_ -> getField decodeString obj "constructorName"
+  fields <- getField (decodeArray decodeExprType) obj "fields" <|> \_ -> getField (decodeArray decodeExprType) obj "fieldTypes"
+  pure { name, fields }
 
 decodeDataDecl :: Json -> JsonDecode DataDecl
 decodeDataDecl json = do
   obj <- decodeJObject json
-  typeName <- getField decodeString obj "typeName"
-  mbTypeVars <- getFieldOptional' (decodeArray decodeString) obj "typeVars"
-  let typeVars = fromMaybe [] mbTypeVars
+  name <- getField decodeString obj "name" <|> \_ -> getField decodeString obj "typeName"
+  mbTypeVars <- getFieldOptional' (decodeArray decodeString) obj "vars" <|> \_ -> getFieldOptional' (decodeArray decodeString) obj "typeVars"
+  let vars = fromMaybe [] mbTypeVars
   constructors <- getField (decodeArray decodeDataConstructor) obj "constructors"
-  pure { typeName, typeVars, constructors }
+  pure { name, vars, constructors }
+
+decodeClassDecl :: Json -> JsonDecode ClassDecl
+decodeClassDecl json = do
+  obj <- decodeJObject json
+  name <- getField decodeString obj "name"
+  mbVars <- getFieldOptional' (decodeArray decodeString) obj "vars"
+  let vars = fromMaybe [] mbVars
+  superclasses <- getField (decodeArray decodeConstraint) obj "superclasses"
+  methods <- getField (decodeArray decodeMethod) obj "methods"
+  pure { name, vars, superclasses, methods }
 
 decodeModule :: Json -> JsonDecode (Module Ann)
 decodeModule = decodeModule' decodeAnn
@@ -248,6 +268,8 @@ decodeModule' decodeAnn' json = do
   exports <- getField (decodeArray decodeIdent) obj "exports"
   reExports <- getField decodeReExports obj "reExports"
   dataDecls <- getField (decodeArray decodeDataDecl) obj "dataDecls"
+  mbClassDecls <- getFieldOptional' (decodeArray decodeClassDecl) obj "classDecls"
+  let classDecls = fromMaybe [] mbClassDecls
   decls <- getField (decodeArray (decodeBind (decodeAnn' path))) obj "decls"
   foreign_arr <- getField (decodeArray decodeIdent) obj "foreign"
   foreign_anns <- fromMaybe Object.empty <$> getFieldOptional' decodeJObject obj "foreignAnnotations"
@@ -259,7 +281,7 @@ decodeModule' decodeAnn' json = do
       Nothing ->
         pure (Tuple ident Nothing)
     ) foreign_arr
-  let foreign_ = Map.fromFoldable foreign_list
+  let foreignMap = Map.fromFoldable foreign_list
   comments <- getField (decodeArray decodeComment) obj "comments"
   pure $ Module
     { name
@@ -269,8 +291,9 @@ decodeModule' decodeAnn' json = do
     , exports
     , reExports
     , dataDecls
-    , decls: decls
-    , foreign: foreign_
+    , classDecls
+    , decls
+    , foreign: foreignMap
     , comments
     }
 
