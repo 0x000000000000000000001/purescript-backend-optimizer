@@ -8,7 +8,7 @@ import PureScript.Backend.Optimizer.Substitute (unify)
 
 main :: Effect Unit
 main = do
-  let genericType = Func [ADT ["Data.Void.Void"] []] (TypeVar "a")
-      concrete = Func [ADT ["Data.Void.Void"] []] (ADT ["Data.Argonaut.Core.Json"] [])
+  let genericType = Func [ADT "Data.Void.Void" ["Data.Void.Void"] []] (TypeVar "a")
+      concrete = Func [ADT "Data.Void.Void" ["Data.Void.Void"] []] (ADT "Data.Argonaut.Core.Json" ["Data.Argonaut.Core.Json"] [])
       subst = unify genericType concrete Map.empty
   Console.log $ "subst is empty? " <> show (Map.isEmpty subst)

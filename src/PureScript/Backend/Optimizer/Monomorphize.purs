@@ -28,7 +28,7 @@ defaultToAny = case _ of
   TypeApp c args -> TypeApp (defaultToAny c) (map defaultToAny args)
   ForAll vars body -> ForAll vars (defaultToAny body)
   ConstrainedType constraints body -> ConstrainedType (map (\(Tuple c a) -> Tuple c (map defaultToAny a)) constraints) (defaultToAny body)
-  ADT names args -> ADT names (map defaultToAny args)
+  ADT fn names args -> ADT fn names (map defaultToAny args)
   t -> t
 
 mangleType :: ExprType -> String
@@ -47,7 +47,7 @@ mangleType (Row props tail) = "Row_" <> String.joinWith "_" (map (\(Tuple k v) -
 mangleType (TypeApp c args) = "TypeApp_" <> mangleType c <> "_" <> String.joinWith "_" (map mangleType args)
 mangleType (ForAll vars body) = "ForAll_" <> String.joinWith "_" vars <> "_" <> mangleType body
 mangleType (ConstrainedType constraints body) = "ConstrainedType_" <> String.joinWith "_" (map (\(Tuple c a) -> String.joinWith "_" c <> "_" <> String.joinWith "_" (map mangleType a)) constraints) <> "_" <> mangleType body
-mangleType (ADT names args) = "ADT_" <> String.joinWith "_" names <> (if Array.length args == 0 then "" else "_" <> String.joinWith "_" (map mangleType args))
+mangleType (ADT _ names args) = "ADT_" <> String.joinWith "_" names <> (if Array.length args == 0 then "" else "_" <> String.joinWith "_" (map mangleType args))
 mangleType (TypeVar name) = "Var_" <> name
 mangleType Any = "Any"
 

@@ -109,47 +109,89 @@ decodeMeta json = do
       throwError $ TypeMismatch "Meta"
 
 decodeExprType :: Json -> JsonDecode ExprType
-decodeExprType json = do
-  obj <- decodeJObject json
-  typ <- getField decodeString obj "type"
-  case typ of
-    "Int" -> pure Int
-    "Number" -> pure Number
-    "String" -> pure String
-    "Char" -> pure Char
-    "Boolean" -> pure Boolean
-    "Unit" -> pure Unit
-    "Any" -> pure Any
-    "TypeLevelString" -> TypeLevelString <$> getField decodeString obj "value"
-    "Array" -> Array <$> getField decodeExprType obj "element"
-    "TypeVar" -> TypeVar <$> getField decodeString obj "name"
-    "Adt" -> do
-      fqn <- getField (decodeArray decodeString) obj "fqn"
-      args <- getField (decodeArray decodeExprType) obj "args"
-      pure (ADT fqn args)
-    "TypeApp" -> do
-      constructor <- getField decodeExprType obj "constructor"
-      args <- getField (decodeArray decodeExprType) obj "args"
-      pure (TypeApp constructor args)
-    "Func" -> do
-      args <- getField (decodeArray decodeExprType) obj "args"
-      ret <- getField decodeExprType obj "ret"
-      pure (Func args ret)
-    "Row" -> do
-      fields <- getField (decodeArray decodeField) obj "fields"
-      tail <- getFieldOptional' decodeExprType obj "tail"
-      pure (Row fields tail)
-    "Record" -> Record <$> getField decodeExprType obj "row"
-    "ForAll" -> do
-      vars <- getField (decodeArray decodeString) obj "vars"
-      body <- getField decodeExprType obj "body"
-      pure (ForAll vars body)
-    "ConstrainedType" -> do
-      constraints <- getField (decodeArray decodeConstraint) obj "constraints"
-      body <- getField decodeExprType obj "body"
-      pure (ConstrainedType constraints body)
-    _ -> throwError $ TypeMismatch "ExprType"
+decodeExprType json = decodeStr <|> decodeObj
   where
+  decodeStr = do
+    str <- decodeString json
+    case str of
+      "Int" -> pure Int
+      "Number" -> pure Number
+      "String" -> pure String
+      "Char" -> pure Char
+      "Boolean" -> pure Boolean
+      "Unit" -> pure Unit
+      "Any" -> pure Any
+      _ -> throwError $ TypeMismatch "ExprType"
+
+  decodeObj _ = do
+    obj <- decodeJObject json
+    case Object.lookup "Func" obj of
+      Just funcJson -> do
+        funcObj <- decodeJObject funcJson
+        args <- getField (decodeArray decodeExprType) funcObj "args"
+        ret <- getField decodeExprType funcObj "ret"
+        pure (Func args ret)
+      Nothing -> case Object.lookup "Record" obj of
+        Just recordJson -> do
+          recordObj <- decodeJObject recordJson
+          let entries = Object.toArrayWithKey Tuple recordObj
+          parsedEntries <- traverse (\(Tuple k v) -> Tuple k <$> decodeExprType v) entries
+          pure (Record (Row parsedEntries Nothing))
+        Nothing -> case Object.lookup "Array" obj of
+          Just arrayJson -> do
+            innerType <- decodeExprType arrayJson
+            pure (Array innerType)
+          Nothing -> case Object.lookup "ADT" obj of
+            Just adtJson -> do
+              adtObj <- decodeJObject adtJson
+              adtPath <- getField (decodeArray decodeString) adtObj "path"
+              adtArgs <- getField (decodeArray decodeExprType) adtObj "args"
+              pure (ADT (intercalate "." adtPath) adtPath adtArgs)
+            Nothing -> case Object.lookup "TypeVar" obj of
+              Just tvJson -> do
+                tv <- decodeString tvJson
+                pure (TypeVar tv)
+              Nothing -> do
+                -- Fallback to the original "type" field decoding
+                typ <- getField decodeString obj "type"
+                case typ of
+                  "Int" -> pure Int
+                  "Number" -> pure Number
+                  "String" -> pure String
+                  "Char" -> pure Char
+                  "Boolean" -> pure Boolean
+                  "Unit" -> pure Unit
+                  "Any" -> pure Any
+                  "TypeLevelString" -> TypeLevelString <$> getField decodeString obj "value"
+                  "Array" -> Array <$> getField decodeExprType obj "element"
+                  "TypeVar" -> TypeVar <$> getField decodeString obj "name"
+                  "Adt" -> do
+                    fqn <- getField (decodeArray decodeString) obj "fqn"
+                    args <- getField (decodeArray decodeExprType) obj "args"
+                    pure (ADT (intercalate "." fqn) fqn args)
+                  "TypeApp" -> do
+                    constructor <- getField decodeExprType obj "constructor"
+                    args <- getField (decodeArray decodeExprType) obj "args"
+                    pure (TypeApp constructor args)
+                  "Func" -> do
+                    args <- getField (decodeArray decodeExprType) obj "args"
+                    ret <- getField decodeExprType obj "ret"
+                    pure (Func args ret)
+                  "Row" -> do
+                    fields <- getField (decodeArray decodeField) obj "fields"
+                    tail <- getFieldOptional' decodeExprType obj "tail"
+                    pure (Row fields tail)
+                  "Record" -> Record <$> getField decodeExprType obj "row"
+                  "ForAll" -> do
+                    vars <- getField (decodeArray decodeString) obj "vars"
+                    body <- getField decodeExprType obj "body"
+                    pure (ForAll vars body)
+                  "ConstrainedType" -> do
+                    constraints <- getField (decodeArray decodeConstraint) obj "constraints"
+                    body <- getField decodeExprType obj "body"
+                    pure (ConstrainedType constraints body)
+                  _ -> throwError $ TypeMismatch "ExprType"
+
   decodeField j = do
     o <- decodeJObject j
     l <- getField decodeString o "label"

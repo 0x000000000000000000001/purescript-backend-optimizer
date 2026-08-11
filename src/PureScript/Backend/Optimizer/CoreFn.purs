@@ -68,7 +68,7 @@ data ExprType
   | TypeLevelString String
   | Array ExprType
   | TypeVar String
-  | ADT (Array String) (Array ExprType)
+  | ADT String (Array String) (Array ExprType)
   | TypeApp ExprType (Array ExprType)
   | Func (Array ExprType) ExprType
   | Row (Array (Tuple String ExprType)) (Maybe ExprType)
