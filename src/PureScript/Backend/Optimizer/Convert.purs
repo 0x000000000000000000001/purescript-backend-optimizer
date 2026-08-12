@@ -424,7 +424,9 @@ toBackendExpr :: Expr Ann -> ConvertM BackendExpr
 toBackendExpr expr = do
   let Ann ann = exprAnn expr
   backendExpr <- go expr
-  pure case ann.type of
+  pure case case ann.type of
+               Just t -> Just t
+               Nothing -> inferExprType expr of
     Just t -> ExprSyntax (analysisOf backendExpr) (Typed t backendExpr)
     Nothing -> backendExpr
   where
@@ -1028,3 +1030,17 @@ make a = buildM =<< sequence a
 
 toBackendBinding :: Binding Ann -> ConvertM (Tuple Ident BackendExpr)
 toBackendBinding (Binding _ ident expr) = Tuple ident <$> toBackendExpr expr
+
+inferExprType :: Expr Ann -> Maybe ExprType
+inferExprType (ExprApp _ fn _) = case exprAnn fn of
+  Ann { type: Just ty } -> getReturnType ty
+  _ -> case inferExprType fn of
+         Just ty -> getReturnType ty
+         Nothing -> Nothing
+inferExprType _ = Nothing
+
+getReturnType :: ExprType -> Maybe ExprType
+getReturnType (ForAll _ t) = getReturnType t
+getReturnType (ConstrainedType _ t) = getReturnType t
+getReturnType (Func _ ret) = Just ret
+getReturnType _ = Nothing

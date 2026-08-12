@@ -1,4 +1,14 @@
-module PureScript.Backend.Optimizer.Monomorphize where
+module PureScript.Backend.Optimizer.Monomorphize
+  ( InstantiationMap
+  , collectInstantiations
+  , collectAllTypes
+  , mangleType
+  , defaultToAny
+  , collectAppSpine
+  , getExprAnn
+  , inferExprType
+  , monomorphize
+  ) where
 
 import Prelude
 
@@ -178,3 +188,148 @@ collectTypesFromAlt (CaseAlternative _ (Guarded guards)) acc = foldl (\a (Guard 
 
 collectAllTypes :: Module Ann -> Set ExprType
 collectAllTypes (Module m) = foldl (\a b -> collectTypesFromBind b a) Set.empty m.decls
+-- We need a function to map Ann
+mapAnn :: (ExprType -> ExprType) -> Ann -> Ann
+mapAnn f (Ann ann) = Ann (ann { type = map f ann.type })
+
+-- We need a recursive rewriter for Expr
+rewriteExpr :: (ExprType -> ExprType) -> Expr Ann -> Expr Ann
+rewriteExpr f = go
+  where
+  go expr = case expr of
+    ExprVar ann q -> ExprVar (mapAnn f ann) q
+    ExprLit ann lit -> ExprLit (mapAnn f ann) (map go lit)
+    ExprApp ann e1 e2 -> ExprApp (mapAnn f ann) (go e1) (go e2)
+    ExprAbs ann id e -> ExprAbs (mapAnn f ann) id (go e)
+    ExprLet ann binds e -> ExprLet (mapAnn f ann) (map goBind binds) (go e)
+    ExprCase ann exprs alts -> ExprCase (mapAnn f ann) (map go exprs) (map goAlt alts)
+    ExprConstructor ann t c ids -> ExprConstructor (mapAnn f ann) t c ids
+    ExprAccessor ann e prop -> ExprAccessor (mapAnn f ann) (go e) prop
+    ExprUpdate ann e props -> ExprUpdate (mapAnn f ann) (go e) (map goProp props)
+
+  goBind (NonRec b) = NonRec (goBinding b)
+  goBind (Rec bs) = Rec (map goBinding bs)
+
+  goBinding (Binding ann id e) = Binding (mapAnn f ann) id (go e)
+
+  goAlt (CaseAlternative binders cg) = CaseAlternative binders (goCaseGuard cg)
+
+  goCaseGuard (Unconditional e) = Unconditional (go e)
+  goCaseGuard (Guarded guards) = Guarded (map goGuard guards)
+
+  goGuard (Guard e1 e2) = Guard (go e1) (go e2)
+
+  goProp (Prop p e) = Prop p (go e)
+
+monomorphize :: InstantiationMap -> Module Ann -> Module Ann
+monomorphize instMap (Module m) = 
+  let modNameStr = unwrap m.name
+  in Module (m { decls = Array.concatMap (monomorphizeBind modNameStr instMap) m.decls })
+
+monomorphizeBind :: String -> InstantiationMap -> Bind Ann -> Array (Bind Ann)
+monomorphizeBind modName instMap (NonRec binding) =
+  map NonRec (monomorphizeBinding modName instMap binding)
+monomorphizeBind modName instMap (Rec bindings) =
+  -- For recursive bindings, we monomorphize each binding and flatten them into a single Rec.
+  [ Rec (Array.concatMap (monomorphizeBinding modName instMap) bindings) ]
+
+monomorphizeBinding :: String -> InstantiationMap -> Binding Ann -> Array (Binding Ann)
+monomorphizeBinding modName instMap (Binding ann (Ident name) expr) =
+  let qualName = modName <> "." <> name
+  in case Map.lookup qualName instMap of
+    Just typeSet ->
+      map (\ty ->
+        let
+          genericType = let (Ann annRec) = getExprAnn expr in fromMaybe Any annRec.type
+          subst = unify genericType ty Map.empty
+          substFn t = substituteExprType subst t
+          
+          specializedExpr = rewriteExpr substFn (monomorphizeExpr modName instMap expr)
+          newName = Ident (name <> "_" <> mangleType ty)
+        in Binding (mapAnn substFn ann) newName specializedExpr
+      ) (Array.fromFoldable typeSet)
+    Nothing ->
+      [ Binding ann (Ident name) (monomorphizeExpr modName instMap expr) ]
+
+monomorphizeExpr :: String -> InstantiationMap -> Expr Ann -> Expr Ann
+monomorphizeExpr modName instMap expr = case expr of
+  ExprApp (Ann ann) _ _ ->
+    let
+      { f, args } = collectAppSpine expr
+      f' = monomorphizeExpr modName instMap f
+      args' = map (monomorphizeExpr modName instMap) args
+    in case f' of
+      ExprVar (Ann varAnn) (Qualified mbMod (Ident name)) ->
+        case varAnn.type of
+          Just genericType@(Func fArgs fRet) ->
+            let
+              argTypes = Array.mapMaybe inferExprType args'
+              substArgs = Array.foldl (\substAcc (Tuple fArg xTy) -> unify fArg xTy substAcc) Map.empty (Array.zip fArgs argTypes)
+              
+              appType = ann.type
+              subst = case appType of
+                Just t ->
+                  let remainingType = if Array.length args' < Array.length fArgs then
+                                        Func (Array.drop (Array.length args') fArgs) fRet
+                                      else fRet
+                  in unify remainingType t substArgs
+                Nothing -> substArgs
+                
+              instType = substituteExprType subst genericType
+              qualName = case mbMod of
+                Just mod -> unwrap mod <> "." <> name
+                Nothing -> modName <> "." <> name
+            in
+              if Map.isEmpty subst then
+                -- No substitution means it's not instantiated with polymorphic types, or it's not a polymorphic function.
+                -- Just rebuild the application
+                rebuildApp (Ann ann) f' args'
+              else case Map.lookup qualName instMap of
+                Just _ ->
+                  let specializedName = Ident (name <> "_" <> mangleType (defaultToAny instType))
+                      specializedVar = ExprVar (Ann varAnn) (Qualified mbMod specializedName)
+                  in rebuildApp (Ann ann) specializedVar args'
+                Nothing ->
+                  rebuildApp (Ann ann) f' args'
+          _ -> rebuildApp (Ann ann) f' args'
+      _ -> rebuildApp (Ann ann) f' args'
+
+  ExprVar ann q -> ExprVar ann q
+  ExprLit ann lit -> ExprLit ann (map (monomorphizeExpr modName instMap) lit)
+  ExprAbs ann id e -> ExprAbs ann id (monomorphizeExpr modName instMap e)
+  ExprLet ann binds e -> ExprLet ann (map (monomorphizeBindLocal modName instMap) binds) (monomorphizeExpr modName instMap e)
+  ExprCase ann exprs alts -> ExprCase ann (map (monomorphizeExpr modName instMap) exprs) (map (monomorphizeAlt modName instMap) alts)
+  ExprConstructor ann t c ids -> ExprConstructor ann t c ids
+  ExprAccessor ann e prop -> ExprAccessor ann (monomorphizeExpr modName instMap e) prop
+  ExprUpdate ann e props -> ExprUpdate ann (monomorphizeExpr modName instMap e) (map (monomorphizeProp modName instMap) props)
+
+monomorphizeBindLocal :: String -> InstantiationMap -> Bind Ann -> Bind Ann
+monomorphizeBindLocal modName instMap (NonRec b) = NonRec (monomorphizeBindingLocal modName instMap b)
+monomorphizeBindLocal modName instMap (Rec bs) = Rec (map (monomorphizeBindingLocal modName instMap) bs)
+
+monomorphizeBindingLocal :: String -> InstantiationMap -> Binding Ann -> Binding Ann
+monomorphizeBindingLocal modName instMap (Binding ann id e) = Binding ann id (monomorphizeExpr modName instMap e)
+
+monomorphizeAlt :: String -> InstantiationMap -> CaseAlternative Ann -> CaseAlternative Ann
+monomorphizeAlt modName instMap (CaseAlternative binders cg) = CaseAlternative binders (monomorphizeCaseGuard modName instMap cg)
+
+monomorphizeCaseGuard :: String -> InstantiationMap -> CaseGuard Ann -> CaseGuard Ann
+monomorphizeCaseGuard modName instMap (Unconditional e) = Unconditional (monomorphizeExpr modName instMap e)
+monomorphizeCaseGuard modName instMap (Guarded guards) = Guarded (map (monomorphizeGuard modName instMap) guards)
+
+monomorphizeGuard :: String -> InstantiationMap -> Guard Ann -> Guard Ann
+monomorphizeGuard modName instMap (Guard e1 e2) = Guard (monomorphizeExpr modName instMap e1) (monomorphizeExpr modName instMap e2)
+
+monomorphizeProp :: String -> InstantiationMap -> Prop (Expr Ann) -> Prop (Expr Ann)
+monomorphizeProp modName instMap (Prop p e) = Prop p (monomorphizeExpr modName instMap e)
+
+rebuildApp :: Ann -> Expr Ann -> Array (Expr Ann) -> Expr Ann
+rebuildApp finalAnn f args = 
+  -- We have to rebuild the ExprApp spine. 
+  -- We don't have intermediate annotations for the spine readily available, but we can reuse getExprAnn to approximate, or just dummy ones.
+  -- Actually, the optimizer reconstructs applications all the time.
+  case Array.uncons args of
+    Nothing -> f
+    Just { head, tail } -> 
+      let firstApp = ExprApp finalAnn f head
+      in Array.foldl (\acc arg -> ExprApp finalAnn acc arg) firstApp tail
