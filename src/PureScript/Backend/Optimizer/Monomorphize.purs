@@ -26,7 +26,15 @@ import Data.String.Pattern (Pattern(..), Replacement(..))
 import Data.Array as Array
 import PureScript.Backend.Optimizer.Substitute (unify, substituteExprType)
 
-type InstantiationMap = Map String (Set ExprType)
+type InstantiationMap = Map String (Map ExprType { dictArgs :: Array (Expr Ann) })
+
+isStatic :: Expr Ann -> Boolean
+isStatic = case _ of
+  ExprVar _ (Qualified (Just _) _) -> true
+  ExprVar _ (Qualified Nothing _) -> false
+  ExprApp _ f arg -> isStatic f && isStatic arg
+  ExprAccessor _ e _ -> isStatic e
+  _ -> false
 
 defaultToAny :: ExprType -> ExprType
 defaultToAny = case _ of
@@ -105,6 +113,16 @@ collectAppSpine = go []
   go args (ExprApp _ f x) = go (Array.cons x args) f
   go args f = { f, args }
 
+partitionArgs :: ExprType -> Array (Expr Ann) -> { dictArgs :: Array (Expr Ann), normalArgs :: Array (Expr Ann) }
+partitionArgs (ConstrainedType constraints body) args =
+  let
+    numDicts = Array.length constraints
+    dictArgs = Array.take numDicts args
+    normalArgs = Array.drop numDicts args
+  in { dictArgs, normalArgs }
+partitionArgs (ForAll _ body) args = partitionArgs body args
+partitionArgs _ args = { dictArgs: [], normalArgs: args }
+
 collectExpr :: String -> InstantiationMap -> Expr Ann -> InstantiationMap
 collectExpr modName acc expr = case expr of
   ExprVar (Ann ann) (Qualified mbMod (Ident name)) ->
@@ -113,7 +131,7 @@ collectExpr modName acc expr = case expr of
         let qualName = case mbMod of
               Just mod -> unwrap mod <> "." <> name
               Nothing -> modName <> "." <> name
-        in Map.insertWith Set.union qualName (Set.singleton (defaultToAny t)) acc
+        in Map.insertWith Map.union qualName (Map.singleton (defaultToAny t) { dictArgs: [] }) acc
       Nothing -> acc
   ExprApp _ _ _ ->
     let
@@ -141,9 +159,11 @@ collectExpr modName acc expr = case expr of
               qualName = case mbMod of
                 Just mod -> unwrap mod <> "." <> name
                 Nothing -> modName <> "." <> name
+                
+              { dictArgs } = partitionArgs genericType args
             in
               if Map.isEmpty subst then acc2
-              else Map.insertWith Set.union qualName (Set.singleton (defaultToAny instType)) acc2
+              else Map.insertWith Map.union qualName (Map.singleton (defaultToAny instType) { dictArgs }) acc2
           _ -> acc2
       _ -> acc2
 
@@ -166,6 +186,9 @@ collectAlt modName acc (CaseAlternative _ cg) = case cg of
 collectGuard :: String -> InstantiationMap -> Guard Ann -> InstantiationMap
 collectGuard modName acc (Guard e1 e2) = collectExpr modName (collectExpr modName acc e1) e2
 
+collectAllTypes :: Module Ann -> Set ExprType
+collectAllTypes (Module m) = foldl (\a b -> collectTypesFromBind b a) Set.empty m.decls
+
 collectTypesFromExpr :: Expr Ann -> Set ExprType -> Set ExprType
 collectTypesFromExpr expr acc = case expr of
   ExprVar (Ann ann) _ -> maybe acc (\t -> Set.insert t acc) ann.type
@@ -186,13 +209,9 @@ collectTypesFromAlt :: CaseAlternative Ann -> Set ExprType -> Set ExprType
 collectTypesFromAlt (CaseAlternative _ (Unconditional e)) acc = collectTypesFromExpr e acc
 collectTypesFromAlt (CaseAlternative _ (Guarded guards)) acc = foldl (\a (Guard e1 e2) -> collectTypesFromExpr e2 (collectTypesFromExpr e1 a)) acc guards
 
-collectAllTypes :: Module Ann -> Set ExprType
-collectAllTypes (Module m) = foldl (\a b -> collectTypesFromBind b a) Set.empty m.decls
--- We need a function to map Ann
 mapAnn :: (ExprType -> ExprType) -> Ann -> Ann
 mapAnn f (Ann ann) = Ann (ann { type = map f ann.type })
 
--- We need a recursive rewriter for Expr
 rewriteExpr :: (ExprType -> ExprType) -> Expr Ann -> Expr Ann
 rewriteExpr f = go
   where
@@ -221,6 +240,23 @@ rewriteExpr f = go
 
   goProp (Prop p e) = Prop p (go e)
 
+applyDicts :: Array (Expr Ann) -> Expr Ann -> Expr Ann
+applyDicts args body = go args body
+  where
+  go dicts e = case Array.uncons dicts of
+    Nothing -> e
+    Just { head: d, tail: ds' } ->
+      if isStatic d then
+        case e of
+          ExprAbs ann id b ->
+            let body' = go ds' b
+            in ExprLet (getExprAnn body') [NonRec (Binding (getExprAnn d) id d)] body'
+          _ -> e
+      else
+        case e of
+          ExprAbs ann id b -> ExprAbs ann id (go ds' b)
+          _ -> e
+
 monomorphize :: InstantiationMap -> Module Ann -> Module Ann
 monomorphize instMap (Module m) = 
   let modNameStr = unwrap m.name
@@ -230,24 +266,25 @@ monomorphizeBind :: String -> InstantiationMap -> Bind Ann -> Array (Bind Ann)
 monomorphizeBind modName instMap (NonRec binding) =
   map NonRec (monomorphizeBinding modName instMap binding)
 monomorphizeBind modName instMap (Rec bindings) =
-  -- For recursive bindings, we monomorphize each binding and flatten them into a single Rec.
   [ Rec (Array.concatMap (monomorphizeBinding modName instMap) bindings) ]
 
 monomorphizeBinding :: String -> InstantiationMap -> Binding Ann -> Array (Binding Ann)
 monomorphizeBinding modName instMap (Binding ann (Ident name) expr) =
   let qualName = modName <> "." <> name
   in case Map.lookup qualName instMap of
-    Just typeSet ->
-      map (\ty ->
+    Just typeMap ->
+      map (\(Tuple ty info) ->
         let
           genericType = let (Ann annRec) = getExprAnn expr in fromMaybe Any annRec.type
           subst = unify genericType ty Map.empty
           substFn t = substituteExprType subst t
           
-          specializedExpr = rewriteExpr substFn (monomorphizeExpr modName instMap expr)
+          exprWithDicts = applyDicts info.dictArgs expr
+          
+          specializedExpr = rewriteExpr substFn (monomorphizeExpr modName instMap exprWithDicts)
           newName = Ident (name <> "_" <> mangleType ty)
         in Binding (mapAnn substFn ann) newName specializedExpr
-      ) (Array.fromFoldable typeSet)
+      ) (Map.toUnfoldable typeMap) <> [ Binding ann (Ident name) (monomorphizeExpr modName instMap expr) ]
     Nothing ->
       [ Binding ann (Ident name) (monomorphizeExpr modName instMap expr) ]
 
@@ -279,16 +316,17 @@ monomorphizeExpr modName instMap expr = case expr of
               qualName = case mbMod of
                 Just mod -> unwrap mod <> "." <> name
                 Nothing -> modName <> "." <> name
+                
+              { dictArgs, normalArgs } = partitionArgs genericType args'
+              filteredArgs = Array.filter (\d -> not (isStatic d)) dictArgs <> normalArgs
             in
               if Map.isEmpty subst then
-                -- No substitution means it's not instantiated with polymorphic types, or it's not a polymorphic function.
-                -- Just rebuild the application
                 rebuildApp (Ann ann) f' args'
               else case Map.lookup qualName instMap of
                 Just _ ->
                   let specializedName = Ident (name <> "_" <> mangleType (defaultToAny instType))
                       specializedVar = ExprVar (Ann varAnn) (Qualified mbMod specializedName)
-                  in rebuildApp (Ann ann) specializedVar args'
+                  in rebuildApp (Ann ann) specializedVar filteredArgs
                 Nothing ->
                   rebuildApp (Ann ann) f' args'
           _ -> rebuildApp (Ann ann) f' args'
@@ -325,9 +363,6 @@ monomorphizeProp modName instMap (Prop p e) = Prop p (monomorphizeExpr modName i
 
 rebuildApp :: Ann -> Expr Ann -> Array (Expr Ann) -> Expr Ann
 rebuildApp finalAnn f args = 
-  -- We have to rebuild the ExprApp spine. 
-  -- We don't have intermediate annotations for the spine readily available, but we can reuse getExprAnn to approximate, or just dummy ones.
-  -- Actually, the optimizer reconstructs applications all the time.
   case Array.uncons args of
     Nothing -> f
     Just { head, tail } -> 
