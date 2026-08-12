@@ -1,0 +1,23 @@
+--- src/PureScript/Backend/Optimizer/Monomorphize.purs
++++ src/PureScript/Backend/Optimizer/Monomorphize.purs
+@@ -10,6 +10,7 @@
+   , getExprAnn
+   , inferExprType
+   , monomorphize
++  , extractFuncType
+   ) where
+ 
+ import Prelude
+@@ -108,6 +109,12 @@
+       _ -> Nothing
+   _ -> let (Ann ann) = getExprAnn expr in ann.type
+ 
++extractFuncType :: ExprType -> Maybe { fArgs :: Array ExprType, fRet :: ExprType }
++extractFuncType = case _ of
++  Func fArgs fRet -> Just { fArgs, fRet }
++  ForAll _ body -> extractFuncType body
++  ConstrainedType _ body -> extractFuncType body
++  _ -> Nothing
++
+ collectAppSpine :: Expr Ann -> { f :: Expr Ann, args :: Array (Expr Ann) }
+ collectAppSpine = go []

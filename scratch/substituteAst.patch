@@ -1,0 +1,19 @@
+--- src/PureScript/Backend/Optimizer/Monomorphize.purs
++++ src/PureScript/Backend/Optimizer/Monomorphize.purs
+@@ -24,7 +24,7 @@
+ import Data.String.Pattern (Pattern(..), Replacement(..))
+ import Data.Array as Array
+-import PureScript.Backend.Optimizer.Substitute (unify, substituteExprType)
++import PureScript.Backend.Optimizer.Substitute (unify, substituteExprType, substituteAst)
+ 
+ type InstantiationMap = Map String (Map ExprType { dictArgs :: Array (Expr Ann) })
+@@ -249,8 +249,8 @@
+       if isStatic d then
+         case e of
+           ExprAbs ann id b ->
+-            let body' = go ds' b
+-            in ExprLet (getExprAnn body') [NonRec (Binding (getExprAnn d) id d)] body'
++            let body' = substituteAst (Map.singleton id d) (go ds' b)
++            in body'
+           _ -> e
+       else

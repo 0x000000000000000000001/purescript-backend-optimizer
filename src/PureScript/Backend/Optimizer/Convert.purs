@@ -71,7 +71,7 @@ import Data.TraversableWithIndex (forWithIndex)
 import Data.Tuple (Tuple(..), fst, snd)
 import Partial.Unsafe (unsafeCrashWith, unsafePartial)
 import PureScript.Backend.Optimizer.Analysis (BackendAnalysis, analyze, analyzeEffectBlock, analysisOf)
-import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), ClassDecl, Comment, ConstructorType(..), DataDecl, Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Meta(..), Module(..), ModuleName(..), ProperName, Qualified(..), ReExport, exprAnn, findProp, propKey, propValue, qualifiedModuleName, unQualified)
+import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), ClassDecl, Comment, ConstructorType(..), DataDecl, Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Meta(..), Module(..), ModuleName(..), ProperName(..), Qualified(..), ReExport, exprAnn, findProp, propKey, propValue, qualifiedModuleName, unQualified)
 import PureScript.Backend.Optimizer.Directives (DirectiveHeaderResult, parseDirectiveHeader)
 import PureScript.Backend.Optimizer.Semantics (BackendExpr(..), BackendSemantics, Ctx(..), DataTypeMeta, Env(..), EvalRef(..), ExternImpl(..), ExternSpine, InlineAccessor(..), InlineDirective(..), InlineDirectiveMap, NeutralExpr(..), build, evalExternFromImpl, evalExternRefFromImpl, freeze, optimize)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
@@ -126,13 +126,10 @@ toBackendModule (Module mod) env = do
 
     ctors :: Array (Tuple ProperName (Tuple Ident (Array String)))
     ctors = do
-      Binding _ _ value <- mod.decls >>= case _ of
-        Rec bindings -> bindings
-        NonRec binding -> pure binding
-      case value of
-        ExprConstructor _ dataTy ctor fields ->
-          pure $ Tuple dataTy (Tuple ctor fields)
-        _ -> []
+      decl <- mod.dataDecls
+      ctor <- decl.constructors
+      let fieldNames = Array.mapWithIndex (\i _ -> "value" <> show i) ctor.fields
+      pure $ Tuple (ProperName decl.name) (Tuple (Ident ctor.name) fieldNames)
 
     dataTypes :: Map ProperName DataTypeMeta
     dataTypes = ctors
@@ -663,8 +660,13 @@ binderToPattern = case _ of
     { dataTypes, implementations } <- ask
     case importedCtorFields implementations <|> localCtorFields dataTypes of
       Just fields -> pure fields
-      Nothing -> unsafeCrashWith "Invariant broken: could not determine pattern matched constructor's fields during conversion."
+      Nothing -> unsafeCrashWith ("Invariant broken: could not determine pattern matched constructor's fields during conversion. ty=" <> showQualProper ty <> " ctor=" <> showQualIdent ctor)
     where
+    showQualProper (Qualified mn (ProperName pn)) = showMn mn <> "." <> pn
+    showQualIdent (Qualified mn (Ident id)) = showMn mn <> "." <> id
+    showMn (Just (ModuleName m)) = m
+    showMn Nothing = "Nothing"
+
     importedCtorFields implementations = case Map.lookup ctor implementations of
       Just (Tuple _ (ExternCtor _ _ _ _ fields)) -> Just fields
       _ -> Nothing
