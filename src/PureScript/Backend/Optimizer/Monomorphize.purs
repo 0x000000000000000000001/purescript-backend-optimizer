@@ -20,7 +20,7 @@ import Data.Set (Set)
 import Data.Set as Set
 import Data.Foldable (foldl, class Foldable)
 import Data.Maybe (Maybe(..), fromMaybe, maybe)
-import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Expr(..), ExprType(..), Guard(..), Module(..), Prop(..), Ident(..), Qualified(..), unQualified, qualifiedModuleName, ModuleName(..))
+import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Expr(..), ExprType(..), Guard(..), Module(..), Prop(..), Ident(..), Qualified(..), unQualified, qualifiedModuleName, ModuleName(..), Literal(..))
 import Data.Newtype (unwrap)
 import Data.Tuple (Tuple(..))
 import Data.String as String
@@ -214,33 +214,63 @@ collectTypesFromAlt (CaseAlternative _ (Guarded guards)) acc = foldl (\a (Guard 
 mapAnn :: (ExprType -> ExprType) -> Ann -> Ann
 mapAnn f (Ann ann) = Ann (ann { type = map f ann.type })
 
-rewriteExpr :: (ExprType -> ExprType) -> Expr Ann -> Expr Ann
-rewriteExpr f = go
+rewriteExpr :: Map String (Binding Ann) -> Map Ident (Expr Ann) -> (ExprType -> ExprType) -> Expr Ann -> Expr Ann
+rewriteExpr globalAstMap = goLocals
   where
-  go expr = case expr of
-    ExprVar ann q -> ExprVar (mapAnn f ann) q
-    ExprLit ann lit -> ExprLit (mapAnn f ann) (map go lit)
-    ExprApp ann e1 e2 -> ExprApp (mapAnn f ann) (go e1) (go e2)
-    ExprAbs ann id e -> ExprAbs (mapAnn f ann) id (go e)
-    ExprLet ann binds e -> ExprLet (mapAnn f ann) (map goBind binds) (go e)
-    ExprCase ann exprs alts -> ExprCase (mapAnn f ann) (map go exprs) (map goAlt alts)
-    ExprConstructor ann t c ids -> ExprConstructor (mapAnn f ann) t c ids
-    ExprAccessor ann e prop -> ExprAccessor (mapAnn f ann) (go e) prop
-    ExprUpdate ann e props -> ExprUpdate (mapAnn f ann) (go e) (map goProp props)
+  goLocals locals f = go
+    where
+    go expr = case expr of
+      ExprVar ann q -> ExprVar (mapAnn f ann) q
+      ExprLit ann lit -> ExprLit (mapAnn f ann) (map go lit)
+      ExprApp ann e1 e2 -> ExprApp (mapAnn f ann) (go e1) (go e2)
+      ExprAbs ann id e -> ExprAbs (mapAnn f ann) id (goLocals (Map.delete id locals) f e)
+      ExprLet ann binds e -> 
+        let 
+          binds' = map goBind binds
+          newLocals = foldl (\acc b -> case b of
+            NonRec (Binding _ ident val) -> Map.insert ident val acc
+            _ -> acc) locals binds'
+        in ExprLet (mapAnn f ann) binds' (goLocals newLocals f e)
+      ExprCase ann exprs alts -> ExprCase (mapAnn f ann) (map go exprs) (map goAlt alts)
+      ExprConstructor ann t c ids -> ExprConstructor (mapAnn f ann) t c ids
+      ExprAccessor ann e prop -> 
+        let e' = go e
+        in case resolveDict e' of
+          Just (LitRecord props) ->
+            case Array.find (\(Prop p _) -> p == prop) props of
+              Just (Prop _ val) -> go val
+              Nothing -> ExprAccessor (mapAnn f ann) e' prop
+          _ -> ExprAccessor (mapAnn f ann) e' prop
+      ExprUpdate ann e props -> ExprUpdate (mapAnn f ann) (go e) (map goProp props)
 
-  goBind (NonRec b) = NonRec (goBinding b)
-  goBind (Rec bs) = Rec (map goBinding bs)
+    resolveDict :: Expr Ann -> Maybe (Literal (Expr Ann))
+    resolveDict e = case e of
+      ExprLit _ lit@(LitRecord _) -> Just lit
+      ExprVar _ (Qualified mbMod ident) ->
+        case mbMod of
+          Nothing -> case Map.lookup ident locals of
+            Just val -> resolveDict val
+            Nothing -> Nothing
+          Just (ModuleName mn) ->
+            let fullName = mn <> "." <> (\(Ident n) -> n) ident
+            in case Map.lookup fullName globalAstMap of
+              Just (Binding _ _ val) -> resolveDict val
+              Nothing -> Nothing
+      _ -> Nothing
 
-  goBinding (Binding ann id e) = Binding (mapAnn f ann) id (go e)
+    goBind (NonRec b) = NonRec (goBinding b)
+    goBind (Rec bs) = Rec (map goBinding bs)
 
-  goAlt (CaseAlternative binders cg) = CaseAlternative binders (goCaseGuard cg)
+    goBinding (Binding ann id e) = Binding (mapAnn f ann) id (go e)
 
-  goCaseGuard (Unconditional e) = Unconditional (go e)
-  goCaseGuard (Guarded guards) = Guarded (map goGuard guards)
+    goAlt (CaseAlternative binders cg) = CaseAlternative binders (goCaseGuard cg)
 
-  goGuard (Guard e1 e2) = Guard (go e1) (go e2)
+    goCaseGuard (Unconditional e) = Unconditional (go e)
+    goCaseGuard (Guarded guards) = Guarded (map goGuard guards)
 
-  goProp (Prop p e) = Prop p (go e)
+    goGuard (Guard e1 e2) = Guard (go e1) (go e2)
+
+    goProp (Prop p e) = Prop p (go e)
 
 applyDicts :: Array (Expr Ann) -> Expr Ann -> Expr Ann
 applyDicts args body = go args body
@@ -288,9 +318,9 @@ monomorphize globalAstMap instMap (Module m) =
                       exprWithDicts = applyDicts info.dictArgs expr
                       resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
                       
-                      specializedExpr = rewriteExpr substFn (monomorphizeExpr modNameStr instMap Map.empty resolvedExpr)
+                      specializedExpr = rewriteExpr globalAstMap Map.empty substFn (monomorphizeExpr modNameStr instMap Map.empty resolvedExpr)
                       newName = Ident (name <> "__" <> hashString (mangleType ty))
-                      newBinding = NonRec (Binding (mapAnn substFn ann) newName specializedExpr)
+                      newBinding = NonRec (Binding (mapAnn (\t -> stripTypeVariables (substFn t)) ann) newName specializedExpr)
                     in Just newBinding
                   else Nothing
                 ) (Map.toUnfoldable typeMap)
@@ -345,6 +375,7 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
                 Nothing -> substArgs
                 
               instType = substituteExprType subst genericType
+              substFn t = substituteExprType subst t
               qualName = case mbMod of
                 Just mod -> unwrap mod <> "." <> name
                 Nothing -> modName <> "." <> name
@@ -359,7 +390,8 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
               else let specializedName = Ident (name <> "__" <> hashString (mangleType (defaultToAny instType)))
                    in case Map.lookup qualName instMap of
                 Just _ ->
-                  let specializedVar = ExprVar (Ann varAnn) (Qualified Nothing specializedName)
+                  let newAnn = varAnn { type = map (\t -> stripTypeVariables (substFn t)) varAnn.type }
+                      specializedVar = ExprVar (Ann newAnn) (Qualified Nothing specializedName)
                   in rebuildApp (Ann ann) specializedVar filteredArgs
                 Nothing ->
                   rebuildApp (Ann ann) f' args'
@@ -428,6 +460,12 @@ hasTypeVariables Unit = false
 hasTypeVariables (TypeLevelString _) = false
 hasTypeVariables (ADT _ _ args) = Array.any hasTypeVariables args
 hasTypeVariables Any = false
+
+
+stripTypeVariables :: ExprType -> ExprType
+stripTypeVariables (ForAll _ t) = stripTypeVariables t
+stripTypeVariables (ConstrainedType _ t) = stripTypeVariables t
+stripTypeVariables t = t
 
 resolveGlobals :: String -> Set Ident -> Expr Ann -> Expr Ann
 resolveGlobals definerMod = go
@@ -520,7 +558,7 @@ transitiveCollect globalAstMap initialMap = loop initialMap
                 in
                   foldl (\acc3 caller -> 
                     let 
-                      substitutedExpr = rewriteExpr substFn resolvedExpr
+                      substitutedExpr = rewriteExpr globalAstMap Map.empty substFn resolvedExpr
                       specializedExpr = monomorphizeExpr caller currentMap Map.empty substitutedExpr
                     in collectExpr caller acc3 substitutedExpr
                   ) acc2 (Set.toUnfoldable info.callers :: Array String)

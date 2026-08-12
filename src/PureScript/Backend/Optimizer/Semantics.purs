@@ -388,70 +388,95 @@ snocApp prev next = case Array.last prev of
     Array.snoc prev (ExternApp [ next ])
 
 evalApp :: Env -> BackendSemantics -> Spine BackendSemantics -> BackendSemantics
-evalApp env hd spine = go env hd (List.fromFoldable spine)
+evalApp env hd spine = go Nothing env hd (List.fromFoldable spine)
   where
-  go env' = case _, _ of
-    SemTyped _ fn, args ->
-      go env' fn args
-    fn, List.Cons (SemTyped _ arg) args ->
-      go env' fn (List.Cons arg args)
+  go mbTy env' = case _, _ of
+    SemTyped ty fn, args ->
+      go (Just ty) env' fn args
     _, List.Cons (NeutFail err) _ ->
       NeutFail err
     NeutFail err, _ ->
       NeutFail err
     SemLam _ k, List.Cons arg args ->
       makeLet Nothing arg \nextArg ->
-        go env' (k nextArg) args
+        go Nothing env' (k nextArg) args
     SemRef ref sp sem, List.Cons arg args ->
-      go env' (evalRef env' ref sp (ExternApp [ arg ]) sem) args
+      let
+        fn = case mbTy of
+          Just ty -> SemTyped ty (SemRef ref sp sem)
+          Nothing -> SemRef ref sp sem
+      in
+        go Nothing env' (evalRef env' ref sp (ExternApp [ arg ]) sem) args
     SemLet ident val k, args ->
       SemLet ident val \nextVal ->
         makeLet Nothing (k nextVal) \nextFn ->
-          go (bindLocal (bindLocal env' (One nextVal)) (One nextFn)) nextFn args
+          go mbTy (bindLocal (bindLocal env' (One nextVal)) (One nextFn)) nextFn args
     SemLetRec vals k, args ->
       SemLetRec vals \nextVals ->
         makeLet Nothing (k nextVals) \nextFn ->
-          go (bindLocal (bindLocal env' (Group nextVals)) (One nextFn)) nextFn args
+          go mbTy (bindLocal (bindLocal env' (Group nextVals)) (One nextFn)) nextFn args
     NeutCtorDef qual ct ty tag fields, args
       | Array.length fields == List.length args ->
           unsafeCrashWith "CRASH CtorDef"
     fn, List.Nil ->
-      fn
+      case mbTy of
+        Just ty -> SemTyped ty fn
+        Nothing -> fn
     fn, args ->
-      NeutApp fn (List.toUnfoldable args)
+      let 
+        fn' = case mbTy of
+          Just ty -> SemTyped ty fn
+          Nothing -> fn
+      in
+        NeutApp fn' (List.toUnfoldable args)
 
 evalUncurriedApp :: Env -> BackendSemantics -> Spine BackendSemantics -> BackendSemantics
-evalUncurriedApp env hd spine = case hd of
-  SemTyped _ a ->
-    evalUncurriedApp env a spine
-  SemMkFn mk ->
-    evalUncurriedBeta NeutUncurriedApp mk spine
-  SemRef ref sp sem ->
-    guardFailOver identity spine \spine' ->
-      evalRef env ref sp (ExternUncurriedApp spine') sem
-  SemLet ident val k ->
-    SemLet ident val \nextVal ->
-      makeLet Nothing (k nextVal) \nextFn ->
-        evalUncurriedApp (bindLocal (bindLocal env (One nextVal)) (One nextFn)) nextFn spine
-  NeutFail err ->
-    NeutFail err
-  _ ->
-    guardFailOver identity spine (NeutUncurriedApp hd)
+evalUncurriedApp env hd spine = go Nothing hd
+  where
+  go mbTy = case _ of
+    SemTyped ty a ->
+      go (Just ty) a
+    SemMkFn mk ->
+      evalUncurriedBeta NeutUncurriedApp mk spine
+    SemRef ref sp sem ->
+      guardFailOver identity spine \spine' ->
+        let fn = case mbTy of
+              Just ty -> SemTyped ty (SemRef ref sp sem)
+              Nothing -> SemRef ref sp sem
+        in evalRef env ref sp (ExternUncurriedApp spine') sem
+    SemLet ident val k ->
+      SemLet ident val \nextVal ->
+        makeLet Nothing (k nextVal) \nextFn ->
+          evalUncurriedApp (bindLocal (bindLocal env (One nextVal)) (One nextFn)) nextFn spine
+    NeutFail err ->
+      NeutFail err
+    hd' ->
+      let 
+        finalHd = case mbTy of
+          Just ty -> SemTyped ty hd'
+          Nothing -> hd'
+      in guardFailOver identity spine (NeutUncurriedApp finalHd)
 
 evalUncurriedEffectApp :: Env -> BackendSemantics -> Spine BackendSemantics -> BackendSemantics
-evalUncurriedEffectApp env hd spine = case hd of
-  SemTyped _ a ->
-    evalUncurriedEffectApp env a spine
-  SemMkEffectFn mk ->
-    evalUncurriedBeta NeutUncurriedEffectApp mk spine
-  SemLet ident val k ->
-    SemLet ident val \nextVal ->
-      makeLet Nothing (k nextVal) \nextFn ->
-        evalUncurriedEffectApp (bindLocal (bindLocal env (One nextVal)) (One nextFn)) nextFn spine
-  NeutFail err ->
-    NeutFail err
-  _ ->
-    guardFailOver identity spine (NeutUncurriedEffectApp hd)
+evalUncurriedEffectApp env hd spine = go Nothing hd
+  where
+  go mbTy = case _ of
+    SemTyped ty a ->
+      go (Just ty) a
+    SemMkEffectFn mk ->
+      evalUncurriedBeta NeutUncurriedEffectApp mk spine
+    SemLet ident val k ->
+      SemLet ident val \nextVal ->
+        makeLet Nothing (k nextVal) \nextFn ->
+          evalUncurriedEffectApp (bindLocal (bindLocal env (One nextVal)) (One nextFn)) nextFn spine
+    NeutFail err ->
+      NeutFail err
+    hd' ->
+      let
+        finalHd = case mbTy of
+          Just ty -> SemTyped ty hd'
+          Nothing -> hd'
+      in guardFailOver identity spine (NeutUncurriedEffectApp finalHd)
 
 evalUncurriedBeta :: (BackendSemantics -> Spine BackendSemantics -> BackendSemantics) -> MkFn BackendSemantics -> Spine BackendSemantics -> BackendSemantics
 evalUncurriedBeta fn mk spine = go mk (List.fromFoldable spine)
