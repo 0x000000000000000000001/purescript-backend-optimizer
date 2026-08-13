@@ -18,15 +18,19 @@ import Data.Newtype (unwrap)
 
 
 unify :: ExprType -> ExprType -> Map String ExprType -> Map String ExprType
-unify (TypeVar a) concrete acc = Map.insert a concrete acc
-unify (Func args1 ret1) (Func args2 ret2) acc =
+unify (ForAll _ t1) t2 subst = unify t1 t2 subst
+unify t1 (ForAll _ t2) subst = unify t1 t2 subst
+unify (ConstrainedType _ t1) t2 subst = unify t1 t2 subst
+unify t1 (ConstrainedType _ t2) subst = unify t1 t2 subst
+unify (Func args1 ret1) (Func args2 ret2) subst =
   let
     len1 = Array.length args1
     len2 = Array.length args2
     args1' = if len1 > len2 then Array.drop (len1 - len2) args1 else args1
     args2' = if len2 > len1 then Array.drop (len2 - len1) args2 else args2
-    acc' = foldl (\acc'' (Tuple t1 t2) -> unify t1 t2 acc'') acc (Array.zip args1' args2')
+    acc' = foldl (\acc'' (Tuple t1 t2) -> unify t1 t2 acc'') subst (Array.zip args1' args2')
   in unify ret1 ret2 acc'
+unify (TypeVar a) concrete acc = Map.insert a concrete acc
 unify (Array t1) (Array t2) acc = unify t1 t2 acc
 unify (Record row1) (Record row2) acc = unify row1 row2 acc
 unify (Row props1 _) (Row props2 _) acc =

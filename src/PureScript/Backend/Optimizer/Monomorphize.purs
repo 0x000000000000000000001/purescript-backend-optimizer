@@ -126,6 +126,8 @@ partitionArgs (ConstrainedType constraints body) args =
 partitionArgs (ForAll _ body) args = partitionArgs body args
 partitionArgs _ args = { dictArgs: [], normalArgs: args }
 
+
+
 stripStaticConstraints :: Array (Expr Ann) -> ExprType -> ExprType
 stripStaticConstraints dictArgs = case _ of
   ConstrainedType constraints body ->
@@ -309,7 +311,9 @@ rewriteExpr globalAstMap = goLocals
 
     goBinding (Binding ann id e) = Binding (mapAnn f ann) id (go e)
 
-    goAlt (CaseAlternative binders cg) = CaseAlternative binders (goCaseGuard cg)
+    goAlt (CaseAlternative binders cg) = CaseAlternative (map goBinder binders) (goCaseGuard cg)
+
+    goBinder binder = map (mapAnn f) binder
 
     goCaseGuard (Unconditional e) = Unconditional (go e)
     goCaseGuard (Guarded guards) = Guarded (map goGuard guards)
@@ -353,54 +357,57 @@ monomorphize globalAstMap instMap mod@(Module m) =
               Just (Binding ann (Ident name) expr) ->
                 Array.mapMaybe (\(Tuple ty info) ->
                   if hasTypeVariables ty then Nothing
-                  else if Set.member modNameStr info.callers then
+                  else
                     let
                       definerMod = case String.split (Pattern ".") qualName of
                         parts -> String.joinWith "." (fromMaybe [] (Array.init parts))
-                      
-                      genericType = let (Ann annRec) = getExprAnn expr in fromMaybe Any annRec.type
-                      subst = unify genericType ty Map.empty
-                      substFn t = stripStaticConstraints info.dictArgs (substituteExprType subst t)
-                      
-                      exprWithDicts = applyDicts info.dictArgs expr
-                      resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
-                      
-                      specializedExpr = rewriteExpr globalAstMap Map.empty substFn (monomorphizeExpr modNameStr instMap Map.empty resolvedExpr)
-                      isAbs = case specializedExpr of
-                                    ExprAbs _ _ _ -> "ExprAbs"
-                                    ExprCase _ _ _ -> "ExprCase"
-                                    ExprVar _ _ -> "ExprVar"
-                                    ExprApp _ _ _ -> "ExprApp"
-                                    ExprLet _ _ _ -> "ExprLet"
-                                    ExprAccessor _ _ _ -> "ExprAccessor"
-                                    _ -> "Other"
+                    in if modNameStr == definerMod then
+                      let
+                        genericType = let (Ann annRec) = getExprAnn expr in fromMaybe Any annRec.type
+                        subst = unify genericType ty Map.empty
+                        substFn t = stripStaticConstraints info.dictArgs (substituteExprType subst t)
+                        
+                        exprWithDicts = applyDicts info.dictArgs expr
+                        resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
+                        
+                        specializedExpr = rewriteExpr globalAstMap Map.empty substFn (monomorphizeExpr modNameStr instMap Map.empty resolvedExpr)
+                        isAbs = case specializedExpr of
+                                      ExprAbs _ _ _ -> "ExprAbs"
+                                      ExprCase _ _ _ -> "ExprCase"
+                                      ExprVar _ _ -> "ExprVar"
+                                      ExprApp _ _ _ -> "ExprApp"
+                                      ExprLet _ _ _ -> "ExprLet"
+                                      ExprAccessor _ _ _ -> "ExprAccessor"
+                                      _ -> "Other"
 
-                      etaExpandedExpr = case specializedExpr of
-                        ExprAbs _ _ _ -> specializedExpr
-                        _ | Array.length info.dictArgs == 0 -> specializedExpr
-                        _ -> 
-                          let finalTy = stripTypeVariables (substFn ty)
-                          in case extractFuncType finalTy of
-                            Just { fArgs } ->
-                              let
-                                idents = Array.mapWithIndex (\i _ -> Ident ("__eta" <> show i)) fArgs
-                                vars = map (\id -> ExprVar ann (Qualified Nothing id)) idents
-                                app = foldl (\acc v -> ExprApp ann acc v) specializedExpr vars
-                              in Array.foldr (\id acc -> ExprAbs ann id acc) app idents
-                            Nothing -> specializedExpr
+                        etaExpandedExpr = case specializedExpr of
+                          ExprAbs _ _ _ -> specializedExpr
+                          _ | Array.length info.dictArgs == 0 -> specializedExpr
+                          _ -> 
+                            let 
+                              finalTy = stripTypeVariables (substFn ty)
+                              monomorphizedAnn = mapAnn (\t -> finalTy) ann
+                            in case extractFuncType finalTy of
+                              Just { fArgs } ->
+                                let
+                                  idents = Array.mapWithIndex (\i _ -> Ident ("__eta" <> show i)) fArgs
+                                  vars = map (\id -> ExprVar monomorphizedAnn (Qualified Nothing id)) idents
+                                  app = foldl (\acc v -> ExprApp monomorphizedAnn acc v) specializedExpr vars
+                                in Array.foldr (\id acc -> ExprAbs monomorphizedAnn id acc) app idents
+                              Nothing -> specializedExpr
                             
-                      newName = Ident (name <> "__" <> hashString (mangleType ty))
-                      newBinding = NonRec (Binding (mapAnn (\t -> stripTypeVariables (substFn t)) ann) newName etaExpandedExpr)
-                    in Just newBinding
-                  else Nothing
-                ) (Map.toUnfoldable typeMap)
+                        newName = Ident (name <> "__" <> hashString (mangleType ty))
+                        newBinding = NonRec (Binding (mapAnn (\t -> stripTypeVariables (substFn t)) ann) newName etaExpandedExpr)
+                      in Just newBinding
+                    else Nothing
+                ) (Map.toUnfoldable typeMap :: Array _)
               Nothing -> []
           in processBinding
         ) (Map.toUnfoldable instMap)
         
       finalDecls = decls' <> injectedBinds
-      newIdents = Array.filter (\(Ident name) -> String.contains (Pattern "__") name) (getBindIdents finalDecls)
-  in Module (m { decls = finalDecls, exports = m.exports <> newIdents })
+      newIdents = getBindIdents finalDecls
+  in Module (m { decls = finalDecls, exports = newIdents })
 
 monomorphizeBind :: String -> InstantiationMap -> Map Ident (Expr Ann) -> Bind Ann -> Array (Bind Ann)
 monomorphizeBind modName instMap localDicts (NonRec binding) =
@@ -492,7 +499,9 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
                    in case Map.lookup qualName instMap of
                 Just _ ->
                   let newAnn = varAnn { type = map (\t -> stripTypeVariables (substFn t)) varAnn.type }
-                      resolvedMod = Just (ModuleName modName)
+                      definerMod = case String.split (Pattern ".") qualName of
+                                     parts -> String.joinWith "." (fromMaybe [] (Array.init parts))
+                      resolvedMod = Just (ModuleName definerMod)
                       specializedVar = ExprVar (Ann newAnn) (Qualified resolvedMod specializedName)
                   in rebuildApp (Ann ann) specializedVar filteredArgs
                 Nothing ->

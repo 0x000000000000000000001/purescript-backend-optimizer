@@ -58,7 +58,9 @@ import Data.Function (on)
 import Data.FunctorWithIndex (mapWithIndex)
 import Data.Map (Map, SemigroupMap(..))
 import Data.Map as Map
+import Data.String as String
 import Data.Maybe (Maybe(..), fromJust, fromMaybe, maybe)
+import PureScript.Backend.Optimizer.Debug as Debug
 import Data.Monoid as Monoid
 import Data.Monoid.Additive (Additive(..))
 import Data.Newtype (class Newtype, over, unwrap)
@@ -70,6 +72,8 @@ import Data.Traversable (class Foldable, Accum, foldr, for, mapAccumL, mapAccumR
 import Data.TraversableWithIndex (forWithIndex)
 import Data.Tuple (Tuple(..), fst, snd)
 import Partial.Unsafe (unsafeCrashWith, unsafePartial)
+import Effect.Unsafe (unsafePerformEffect)
+import Effect.Console as Console
 import PureScript.Backend.Optimizer.Analysis (BackendAnalysis, analyze, analyzeEffectBlock, analysisOf)
 import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), ClassDecl, Comment, ConstructorType(..), DataDecl, Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Meta(..), Module(..), ModuleName(..), ProperName(..), Qualified(..), ReExport, exprAnn, findProp, propKey, propValue, qualifiedModuleName, unQualified)
 import PureScript.Backend.Optimizer.Directives (DirectiveHeaderResult, parseDirectiveHeader)
@@ -160,7 +164,11 @@ toBackendModule (Module mod) env = do
     localExports = Set.fromFoldable mod.exports
 
     isBindingUsed :: forall a. Set (Qualified Ident) -> Tuple Ident a -> Boolean
-    isBindingUsed deps (Tuple ident _) = Set.member ident localExports || Set.member (Qualified (Just mod.name) ident) deps
+    isBindingUsed deps (Tuple ident _) = 
+      let res = Set.member ident localExports || Set.member (Qualified (Just mod.name) ident) deps
+      in if unwrap mod.name == "Data.Set"
+         then res
+         else res
 
     usedBindings :: Accum (Set (Qualified Ident)) (Array (BackendBindingGroup Ident NeutralExpr))
     usedBindings = mapAccumR
@@ -611,23 +619,17 @@ binderToPattern = case _ of
       | otherwise ->
           unsafeCrashWith "Newtype binder didn't wrap 1 arg"
     Just (IsConstructor ProductType _) -> do
-      ctorFields <- lookupCtorFields tyName ctorName
-      let argsWithNames = Array.zip args ctorFields
-      -- We cannot safely expand the fields here because the number of columns
-      -- would change. So, any later rows' `BinderNull` or `BinderVar` would not similarly be expanded.
       ctorPattern
         (PatProduct tyName ctorName)
-        argsWithNames
-        (\idx (Tuple _ fieldName) -> GetCtorField ctorName ProductType (unQualified tyName) (unQualified ctorName) fieldName idx)
-        fst
+        args
+        (\idx _ -> GetCtorField ctorName ProductType (unQualified tyName) (unQualified ctorName) ("value" <> show idx) idx)
+        identity
     Just (IsConstructor SumType _) -> do
-      ctorFields <- lookupCtorFields tyName ctorName
-      let argsWithNames = Array.zip args ctorFields
       ctorPattern
         (PatSum tyName ctorName)
-        argsWithNames
-        (\idx (Tuple _ fieldName) -> GetCtorField ctorName SumType (unQualified tyName) (unQualified ctorName) fieldName idx)
-        fst
+        args
+        (\idx _ -> GetCtorField ctorName SumType (unQualified tyName) (unQualified ctorName) ("value" <> show idx) idx)
+        identity
     _ ->
       unsafeCrashWith "binderToPattern - invalid meta"
   where
@@ -651,29 +653,6 @@ binderToPattern = case _ of
         , patternCase
         , subterms
         }
-
-  lookupCtorFields
-    :: Qualified ProperName
-    -> Qualified Ident
-    -> ConvertM (Array String)
-  lookupCtorFields ty ctor = do
-    { dataTypes, implementations } <- ask
-    case importedCtorFields implementations <|> localCtorFields dataTypes of
-      Just fields -> pure fields
-      Nothing -> unsafeCrashWith ("Invariant broken: could not determine pattern matched constructor's fields during conversion. ty=" <> showQualProper ty <> " ctor=" <> showQualIdent ctor)
-    where
-    showQualProper (Qualified mn (ProperName pn)) = showMn mn <> "." <> pn
-    showQualIdent (Qualified mn (Ident id)) = showMn mn <> "." <> id
-    showMn (Just (ModuleName m)) = m
-    showMn Nothing = "Nothing"
-
-    importedCtorFields implementations = case Map.lookup ctor implementations of
-      Just (Tuple _ (ExternCtor _ _ _ _ fields)) -> Just fields
-      _ -> Nothing
-
-    localCtorFields dataTypes = do
-      { constructors } <- Map.lookup (unQualified ty) dataTypes
-      _.fields <$> Map.lookup (unQualified ctor) constructors
 
 patternVars :: forall r. { pattern :: Pattern | r } -> Array Ident
 patternVars { pattern: Pattern { vars, subterms } } =
