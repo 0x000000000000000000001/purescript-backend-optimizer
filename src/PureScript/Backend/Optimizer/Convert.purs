@@ -328,6 +328,11 @@ inferTransitiveDirective directives impl backendExpr cfn = fromImpl <|> fromBack
   fromBackendExpr = case cfn of
     ExprApp (Ann { meta: Just IsSyntheticApp }) _ _ ->
       Just $ Map.singleton InlineRef InlineAlways
+    ExprAbs (Ann { meta: Just meta }) _ _
+      | meta == IsTypeClassConstructor || meta == IsNewtype ->
+          Just $ Map.singleton InlineRef InlineAlways
+    cfn' | isTypeClassDictionary cfn' ->
+      Just $ Map.singleton InlineRef InlineAlways
     _ -> case backendExpr of
       ExprSyntax _ (App (ExprSyntax _ (Var qual)) args) ->
         case Map.lookup (EvalExtern qual) directives >>= Map.lookup InlineRef of
@@ -339,6 +344,20 @@ inferTransitiveDirective directives impl backendExpr cfn = fromImpl <|> fromBack
             Nothing
       _ ->
         Nothing
+
+  isTypeClassDictionary :: Expr Ann -> Boolean
+  isTypeClassDictionary = case _ of
+    ExprAbs (Ann { type: Just ty }) _ _ | isConstrainedType ty -> true
+    ExprAbs _ _ body -> isTypeClassDictionary body
+    ExprApp _ (ExprVar (Ann { meta: Just meta }) _) (ExprLit _ (LitRecord _))
+      | meta == IsTypeClassConstructor || meta == IsNewtype -> true
+    _ -> false
+
+  isConstrainedType :: ExprType -> Boolean
+  isConstrainedType = case _ of
+    ConstrainedType _ _ -> true
+    ForAll _ ty -> isConstrainedType ty
+    _ -> false
 
 toExternImpl :: ConvertEnv -> Array (Qualified Ident) -> BackendExpr -> Tuple (Tuple BackendAnalysis ExternImpl) NeutralExpr
 toExternImpl env group expr = case expr of
