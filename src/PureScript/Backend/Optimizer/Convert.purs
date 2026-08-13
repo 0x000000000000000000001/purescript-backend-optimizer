@@ -360,17 +360,22 @@ inferTransitiveDirective directives impl backendExpr cfn = fromImpl <|> fromBack
     _ -> false
 
 toExternImpl :: ConvertEnv -> Array (Qualified Ident) -> BackendExpr -> Tuple (Tuple BackendAnalysis ExternImpl) NeutralExpr
-toExternImpl env group expr = case expr of
-  ExprSyntax analysis (Lit (LitRecord props)) -> do
+toExternImpl env group expr = case unwrapTyped expr of
+  ExprSyntax _ (Lit (LitRecord props)) -> do
     let propsWithAnalysis = map freeze <$> props
-    Tuple (Tuple analysis (ExternDict group propsWithAnalysis)) (NeutralExpr (Lit (LitRecord (map snd <$> propsWithAnalysis))))
+    let Tuple _ expr' = freeze expr
+    Tuple (Tuple (analysisOf expr) (ExternDict group propsWithAnalysis)) expr'
   ExprSyntax _ (CtorDef ct ty tag fields) -> do
-    let Tuple analysis expr' = freeze expr
+    let Tuple _ expr' = freeze expr
     let meta = unsafePartial $ fromJust $ Map.lookup ty env.dataTypes
-    Tuple (Tuple analysis (ExternCtor meta ct ty tag fields)) expr'
+    Tuple (Tuple (analysisOf expr) (ExternCtor meta ct ty tag fields)) expr'
   _ -> do
     let Tuple analysis expr' = freeze expr
     Tuple (Tuple analysis (ExternExpr group expr')) expr'
+  where
+  unwrapTyped = case _ of
+    ExprSyntax _ (Typed _ inner) -> unwrapTyped inner
+    other -> other
 
 topEnv :: Env -> Env
 topEnv (Env env) = Env env { locals = [] }
