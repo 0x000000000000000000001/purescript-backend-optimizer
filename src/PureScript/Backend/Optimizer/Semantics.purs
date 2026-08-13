@@ -637,6 +637,10 @@ makeLet = floatLetWith go
       k binding
     NeutVar _ ->
       k binding
+    NeutLit _ ->
+      k binding
+    NeutData _ _ _ _ _ ->
+      k binding
     _ ->
       SemLet ident binding k
 

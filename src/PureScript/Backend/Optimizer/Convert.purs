@@ -325,18 +325,20 @@ inferTransitiveDirective directives impl backendExpr cfn = fromImpl <|> fromBack
     _ ->
       Nothing
 
-  fromBackendExpr = case backendExpr of
-    ExprSyntax _ (App (ExprSyntax _ (Var qual)) args) ->
-      case Map.lookup (EvalExtern qual) directives >>= Map.lookup InlineRef of
-        Just (InlineArity n)
-          | ExprApp (Ann { meta: Just IsSyntheticApp }) _ _ <- cfn
-          , arity <- NonEmptyArray.length args
-          , arity >= n ->
-              Just $ Map.singleton InlineRef InlineAlways
-        _ ->
-          Nothing
-    _ ->
-      Nothing
+  fromBackendExpr = case cfn of
+    ExprApp (Ann { meta: Just IsSyntheticApp }) _ _ ->
+      Just $ Map.singleton InlineRef InlineAlways
+    _ -> case backendExpr of
+      ExprSyntax _ (App (ExprSyntax _ (Var qual)) args) ->
+        case Map.lookup (EvalExtern qual) directives >>= Map.lookup InlineRef of
+          Just (InlineArity n)
+            | arity <- NonEmptyArray.length args
+            , arity >= n ->
+                Just $ Map.singleton InlineRef InlineAlways
+          _ ->
+            Nothing
+      _ ->
+        Nothing
 
 toExternImpl :: ConvertEnv -> Array (Qualified Ident) -> BackendExpr -> Tuple (Tuple BackendAnalysis ExternImpl) NeutralExpr
 toExternImpl env group expr = case expr of
