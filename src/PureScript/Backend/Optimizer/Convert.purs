@@ -46,6 +46,7 @@
 module PureScript.Backend.Optimizer.Convert where
 
 import Prelude
+import Debug as Debug
 
 import Control.Alternative (guard, (<|>))
 import Control.Monad.RWS (ask)
@@ -217,7 +218,10 @@ toBackendModule (Module mod) env = do
     , exports: localExports
     , reExports: Set.fromFoldable mod.reExports
     , implementations: moduleBindings.accum.moduleImplementations
-    , directives: directives.exports
+    , directives: moduleBindings.accum.directives
+        # Map.filterWithKey (\k _ -> case k of
+            EvalExtern (Qualified (Just mn) _) -> mn == mod.name
+            _ -> false)
     , foreign: mod.foreign
     }
 
@@ -266,7 +270,8 @@ toTopLevelBackendBinding group env (Binding _ ident cfn) = do
     optimizedExprWithTy = case mbType of
       Just ty -> ExprSyntax (analysisOf optimizedExpr) (Typed ty optimizedExpr)
       Nothing -> optimizedExpr
-  let Tuple impl expr' = toExternImpl env group optimizedExprWithTy
+  let isDict = fst (isTypeClassDictionaryWithProps cfn)
+  let Tuple impl expr' = toExternImpl env group isDict optimizedExprWithTy
   { accum: env
       { implementations = Map.insert qualifiedIdent impl env.implementations
       , moduleImplementations = Map.insert qualifiedIdent impl env.moduleImplementations
@@ -331,8 +336,9 @@ inferTransitiveDirective directives impl backendExpr cfn = fromImpl <|> fromBack
     ExprAbs (Ann { meta: Just meta }) _ _
       | meta == IsTypeClassConstructor || meta == IsNewtype ->
           Just $ Map.singleton InlineRef InlineAlways
-    cfn' | isTypeClassDictionary cfn' ->
-      Just $ Map.singleton InlineRef InlineAlways
+    cfn' | Tuple isDict props <- isTypeClassDictionaryWithProps cfn', isDict ->
+      Just $ Map.fromFoldable $
+        [ Tuple InlineRef InlineAlways ] <> map (\p -> Tuple (InlineProp p) InlineAlways) props
     _ -> case backendExpr of
       ExprSyntax _ (App (ExprSyntax _ (Var qual)) args) ->
         case Map.lookup (EvalExtern qual) directives >>= Map.lookup InlineRef of
@@ -345,23 +351,37 @@ inferTransitiveDirective directives impl backendExpr cfn = fromImpl <|> fromBack
       _ ->
         Nothing
 
-  isTypeClassDictionary :: Expr Ann -> Boolean
-  isTypeClassDictionary = case _ of
-    ExprAbs (Ann { type: Just ty }) _ _ | isConstrainedType ty -> true
-    ExprAbs _ _ body -> isTypeClassDictionary body
-    ExprApp _ (ExprVar (Ann { meta: Just meta }) _) (ExprLit _ (LitRecord _))
-      | meta == IsTypeClassConstructor || meta == IsNewtype -> true
-    _ -> false
 
-  isConstrainedType :: ExprType -> Boolean
-  isConstrainedType = case _ of
-    ConstrainedType _ _ -> true
-    ForAll _ ty -> isConstrainedType ty
-    _ -> false
 
-toExternImpl :: ConvertEnv -> Array (Qualified Ident) -> BackendExpr -> Tuple (Tuple BackendAnalysis ExternImpl) NeutralExpr
-toExternImpl env group expr = case unwrapTyped expr of
+isTypeClassDictionaryWithProps :: Expr Ann -> Tuple Boolean (Array String)
+isTypeClassDictionaryWithProps expr = case expr of
+  ExprAbs (Ann { type: Just ty }) _ body | isConstrainedType ty -> 
+    Tuple true (snd (isTypeClassDictionaryWithProps body))
+  ExprAbs _ _ body -> isTypeClassDictionaryWithProps body
+  ExprLet _ _ body -> isTypeClassDictionaryWithProps body
+  ExprApp _ lhs (ExprLit _ (LitRecord props))
+    | Just meta <- getConstructorMeta lhs
+    , meta == IsTypeClassConstructor || meta == IsNewtype -> Tuple true (map propKey props)
+  _ -> Tuple false []
+  where
+  getConstructorMeta = case _ of
+    ExprVar (Ann { meta: Just meta }) _ -> Just meta
+    ExprApp _ lhs _ -> getConstructorMeta lhs
+    _ -> Nothing
+
+isConstrainedType :: ExprType -> Boolean
+isConstrainedType = case _ of
+  ConstrainedType _ _ -> true
+  ForAll _ ty -> isConstrainedType ty
+  _ -> false
+
+toExternImpl :: ConvertEnv -> Array (Qualified Ident) -> Boolean -> BackendExpr -> Tuple (Tuple BackendAnalysis ExternImpl) NeutralExpr
+toExternImpl env group isDict expr = case unwrapTyped expr of
   ExprSyntax _ (Lit (LitRecord props)) -> do
+    let propsWithAnalysis = map freeze <$> props
+    let Tuple _ expr' = freeze expr
+    Tuple (Tuple (analysisOf expr) (ExternDict group propsWithAnalysis)) expr'
+  app | isDict, Just props <- getLitRecord app -> do
     let propsWithAnalysis = map freeze <$> props
     let Tuple _ expr' = freeze expr
     Tuple (Tuple (analysisOf expr) (ExternDict group propsWithAnalysis)) expr'
@@ -371,8 +391,15 @@ toExternImpl env group expr = case unwrapTyped expr of
     Tuple (Tuple (analysisOf expr) (ExternCtor meta ct ty tag fields)) expr'
   _ -> do
     let Tuple analysis expr' = freeze expr
+    let 
+      t = if isDict then Debug.trace "toExternImpl fallback for Dict!" \_ -> unit else unit
     Tuple (Tuple analysis (ExternExpr group expr')) expr'
   where
+  getLitRecord = case _ of
+    ExprSyntax _ (App _ rhs) -> getLitRecord (NonEmptyArray.last rhs)
+    ExprSyntax _ (Lit (LitRecord props)) -> Just props
+    _ -> Nothing
+
   unwrapTyped = case _ of
     ExprSyntax _ (Typed _ inner) -> unwrapTyped inner
     other -> other

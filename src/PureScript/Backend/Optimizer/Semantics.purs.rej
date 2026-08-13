@@ -1,8 +1,0 @@
-@@ -835,6 +835,7 @@
-   | otherwise = Nothing
- 
- evalPrimOpNumNumber :: BackendOperator2 -> BackendSemantics -> BackendSemantics -> Maybe BackendSemantics
-+evalPrimOpNumNumber op x y | let _ = Debug.trace { msg: "evalPrimOpNumNumber", op, x, y, dx: deref x, dy: deref y } (\_ -> unit) = Nothing
- evalPrimOpNumNumber op x y
-   | NeutLit (LitNumber a) <- deref x
-   , NeutLit (LitNumber b) <- deref y =
