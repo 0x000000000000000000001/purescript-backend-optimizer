@@ -1135,6 +1135,40 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case spine of
             Nothing
       _ ->
         Nothing
+  _ | Just { head: ExternAccessor acc@(GetProp prop), tail } <- Array.uncons spine ->
+    case impl of
+      ExternExpr group expr -> do
+        let ref = EvalExtern qual
+        case Map.lookup ref e.directives >>= Map.lookup (InlineProp prop) of
+          Just InlineAlways ->
+            Just $ evalSpine env (eval (envForGroup env ref (InlineProp prop) group) expr) spine
+          _ -> Nothing
+      ExternDict group props | Just (Tuple _ body) <- findProp prop props -> do
+        let ref = EvalExtern qual
+        case Map.lookup ref e.directives >>= Map.lookup (InlineProp prop) of
+          Just InlineAlways ->
+            Just $ evalSpine env (eval (envForGroup env ref (InlineProp prop) group) body) tail
+          _ -> Nothing
+      _ -> Nothing
+  _ | Just { head: ExternApp _, tail: tail1 } <- Array.uncons spine
+    , Just { head: ExternAccessor (GetProp prop), tail: tail2 } <- Array.uncons tail1 ->
+    case impl of
+      ExternExpr group fn -> do
+        let ref = EvalExtern qual
+        case Map.lookup ref e.directives >>= Map.lookup (InlineSpineProp prop) of
+          Just InlineAlways ->
+            Just $ evalSpine env (eval (envForGroup env ref (InlineSpineProp prop) group) fn) spine
+          _ -> Nothing
+      _ -> Nothing
+  _ | Just { head: ExternApp args, tail } <- Array.uncons spine ->
+    case impl of
+      ExternExpr group expr -> do
+        let ref = EvalExtern qual
+        case Map.lookup ref e.directives >>= Map.lookup InlineRef of
+          Just InlineAlways ->
+            Just $ evalSpine env (eval (envForGroup env ref InlineRef group) expr) spine
+          _ -> Nothing
+      _ -> Nothing
   _ ->
     Nothing
 
