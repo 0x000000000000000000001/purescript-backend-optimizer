@@ -518,13 +518,25 @@ toBackendExpr expr = do
         <$> toBackendExpr a
         <*> traverse (traverse toBackendExpr) bs
     ExprAbs _ arg body -> do
-      lvl <- currentLevel
-      make $ Abs (NonEmptyArray.singleton (Tuple (Just arg) lvl)) (intro [ arg ] lvl (toBackendExpr body))
+      let
+        unrollAbs acc (ExprAbs _ a b) = unrollAbs (Array.snoc acc a) b
+        unrollAbs acc b = Tuple acc b
+        Tuple args finalBody = unrollAbs [arg] body
+      makeUncurriedAbs args (\_ -> toBackendExpr finalBody)
     ExprApp _ a b
       | ExprVar (Ann { meta: Just IsNewtype }) id <- a -> do
           toBackendExpr b
-      | otherwise ->
-          make $ App (toBackendExpr a) (NonEmptyArray.singleton (toBackendExpr b))
+      | otherwise -> do
+          let
+            unrollApp curr@(ExprApp _ f x) acc
+              | ExprVar (Ann { meta: Just IsNewtype }) _ <- f = Tuple curr acc
+              | otherwise = unrollApp f (Array.cons x acc)
+            unrollApp f acc = Tuple f acc
+            Tuple fn args = unrollApp a [b]
+          if Array.length args > 1 then
+            make $ UncurriedApp (toBackendExpr fn) (map toBackendExpr args)
+          else
+            make $ App (toBackendExpr a) (NonEmptyArray.singleton (toBackendExpr b))
     ExprLet _ binds body ->
       foldr go (toBackendExpr body) binds
       where

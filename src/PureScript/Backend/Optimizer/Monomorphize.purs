@@ -238,7 +238,19 @@ rewriteExpr globalAstMap = goLocals
     go expr = case expr of
       ExprVar ann q -> ExprVar (mapAnn f ann) q
       ExprLit ann lit -> ExprLit (mapAnn f ann) (map go lit)
-      ExprApp ann e1 e2 -> ExprApp (mapAnn f ann) (go e1) (go e2)
+      ExprApp ann e1 e2 ->
+        let e1' = go e1
+            e2' = go e2
+        in case e1' of
+          ExprVar _ (Qualified (Just (ModuleName mn)) (Ident name)) ->
+            let fullName = mn <> "." <> name
+            in case Map.lookup fullName globalAstMap of
+                 Just (Binding _ _ (ExprAbs _ ident body)) | isJust (resolveDict e2') ->
+                   goLocals (Map.insert ident e2' locals) f body
+                 _ -> ExprApp (mapAnn f ann) e1' e2'
+          ExprAbs _ ident body | isJust (resolveDict e2') ->
+            goLocals (Map.insert ident e2' locals) f body
+          _ -> ExprApp (mapAnn f ann) e1' e2'
       ExprAbs ann id e -> ExprAbs (mapAnn f ann) id (goLocals (Map.delete id locals) f e)
       ExprLet ann binds e -> 
         let 

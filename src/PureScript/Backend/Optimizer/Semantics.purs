@@ -437,17 +437,29 @@ evalUncurriedApp env hd spine = go Nothing hd
     SemTyped ty a ->
       go (Just ty) a
     SemMkFn mk ->
-      evalUncurriedBeta NeutUncurriedApp mk spine
+      evalUncurriedBeta SemMkFn NeutUncurriedApp mk spine
     SemRef ref sp sem ->
       guardFailOver identity spine \spine' ->
         let fn = case mbTy of
               Just ty -> SemTyped ty (SemRef ref sp sem)
               Nothing -> SemRef ref sp sem
         in evalRef env ref sp (ExternUncurriedApp spine') sem
+    SemLam _ k ->
+      case NonEmptyArray.uncons spine of
+        { head: arg, tail } ->
+          makeLet Nothing arg \nextArg ->
+            let nextHd = k nextArg
+            in case NonEmptyArray.fromArray tail of
+                 Just nextSpine -> evalUncurriedApp env nextHd nextSpine
+                 Nothing -> nextHd
     SemLet ident val k ->
       SemLet ident val \nextVal ->
         makeLet Nothing (k nextVal) \nextFn ->
           evalUncurriedApp (bindLocal (bindLocal env (One nextVal)) (One nextFn)) nextFn spine
+    SemLetRec vals k ->
+      SemLetRec vals \nextVals ->
+        makeLet Nothing (k nextVals) \nextFn ->
+          evalUncurriedApp (bindLocal (bindLocal env (Group nextVals)) (One nextFn)) nextFn spine
     NeutFail err ->
       NeutFail err
     hd' ->
@@ -464,7 +476,7 @@ evalUncurriedEffectApp env hd spine = go Nothing hd
     SemTyped ty a ->
       go (Just ty) a
     SemMkEffectFn mk ->
-      evalUncurriedBeta NeutUncurriedEffectApp mk spine
+      evalUncurriedBeta SemMkEffectFn NeutUncurriedEffectApp mk spine
     SemLet ident val k ->
       SemLet ident val \nextVal ->
         makeLet Nothing (k nextVal) \nextFn ->
@@ -478,8 +490,8 @@ evalUncurriedEffectApp env hd spine = go Nothing hd
           Nothing -> hd'
       in guardFailOver identity spine (NeutUncurriedEffectApp finalHd)
 
-evalUncurriedBeta :: (BackendSemantics -> Spine BackendSemantics -> BackendSemantics) -> MkFn BackendSemantics -> Spine BackendSemantics -> BackendSemantics
-evalUncurriedBeta fn mk spine = go mk (List.fromFoldable spine)
+evalUncurriedBeta :: (MkFn BackendSemantics -> BackendSemantics) -> (BackendSemantics -> Spine BackendSemantics -> BackendSemantics) -> MkFn BackendSemantics -> Spine BackendSemantics -> BackendSemantics
+evalUncurriedBeta wrapper fn mk spine = go mk (List.fromFoldable spine)
   where
   go = case _, _ of
     MkFnNext _ _, List.Cons (NeutFail err) _ ->
@@ -487,8 +499,8 @@ evalUncurriedBeta fn mk spine = go mk (List.fromFoldable spine)
     MkFnNext _ k, List.Cons arg args ->
       makeLet Nothing arg \nextArg ->
         go (k nextArg) args
-    MkFnNext _ _, _ ->
-      unsafeCrashWith "Uncurried function applied to too few arguments"
+    mk'@(MkFnNext _ _), List.Nil ->
+      wrapper mk'
     MkFnApplied a, List.Nil ->
       a
     MkFnApplied a, args ->
@@ -1085,6 +1097,40 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case spine of
             Nothing
       _ ->
         Nothing
+  [ ExternAccessor (GetProp prop), ExternUncurriedApp args ] ->
+    case impl of
+      ExternExpr group expr -> do
+        let ref = EvalExtern qual
+        case Map.lookup ref e.directives >>= Map.lookup (InlineProp prop) of
+          Just InlineNever ->
+            Just $ neutralSpine (NeutStop qual) spine
+          Just InlineAlways ->
+            Just $ evalSpine env (eval (envForGroup env ref (InlineProp prop) group) expr) spine
+          Just (InlineArity n)
+            | Array.length args >= n ->
+                Just $ evalSpine env (eval (envForGroup env ref (InlineProp prop) group) expr) spine
+            | otherwise ->
+                Nothing
+          _ ->
+            Nothing
+      ExternDict group props | Just (Tuple analysis' body) <- findProp prop props -> do
+        let ref = EvalExtern qual
+        case Map.lookup ref e.directives >>= Map.lookup (InlineProp prop) of
+          Just InlineNever ->
+            Just $ neutralSpine (NeutStop qual) spine
+          Just InlineAlways ->
+            Just $ evalUncurriedApp env (eval (envForGroup env ref (InlineProp prop) group) body) args
+          Just (InlineArity n)
+            | Array.length args >= n ->
+                Just $ evalUncurriedApp env (eval (envForGroup env ref (InlineProp prop) group) body) args
+            | otherwise ->
+                Nothing
+          _ | shouldInlineExternApp qual analysis' body args ->
+            Just $ evalUncurriedApp env (eval (envForGroup env ref (InlineProp prop) group) body) args
+          _ ->
+            Nothing
+      _ ->
+        Nothing
   [ ExternApp args ] ->
     case impl of
       ExternExpr group expr -> do
@@ -1107,6 +1153,28 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case spine of
         Just $ NeutData qual ct ty tag $ Array.zip fields args
       _ ->
         Nothing
+  [ ExternUncurriedApp args ] ->
+    case impl of
+      ExternExpr group expr -> do
+        let ref = EvalExtern qual
+        case Map.lookup ref e.directives >>= Map.lookup InlineRef of
+          Just InlineNever ->
+            Just $ neutralSpine (NeutStop qual) spine
+          Just InlineAlways ->
+            Just $ evalUncurriedApp env (eval (envForGroup env ref InlineRef group) expr) args
+          Just (InlineArity n)
+            | Array.length args >= n ->
+                Just $ evalUncurriedApp env (eval (envForGroup env ref InlineRef group) expr) args
+            | otherwise ->
+                Nothing
+          _ | shouldInlineExternApp qual analysis expr args ->
+            Just $ evalUncurriedApp env (eval (envForGroup env ref InlineRef group) expr) args
+          _ ->
+            Nothing
+      ExternCtor _ ct ty tag fields | Array.length fields == Array.length args ->
+        Just $ NeutData qual ct ty tag $ Array.zip fields args
+      _ ->
+        Nothing
   [ ExternApp _, ExternAccessor (GetProp prop) ] ->
     case impl of
       ExternExpr group fn -> do
@@ -1121,6 +1189,51 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case spine of
       _ ->
         Nothing
   [ ExternApp _, ExternAccessor (GetProp prop), ExternApp args2 ] ->
+    case impl of
+      ExternExpr group fn -> do
+        let ref = EvalExtern qual
+        case Map.lookup ref e.directives >>= Map.lookup (InlineSpineProp prop) of
+          Just InlineNever ->
+            Just $ neutralSpine (NeutStop qual) spine
+          Just InlineAlways ->
+            Just $ evalSpine env (eval (envForGroup env ref (InlineSpineProp prop) group) fn) spine
+          Just (InlineArity n) | Array.length args2 >= n ->
+            Just $ evalSpine env (eval (envForGroup env ref (InlineSpineProp prop) group) fn) spine
+          _ ->
+            Nothing
+      _ ->
+        Nothing
+  [ ExternUncurriedApp _, ExternAccessor (GetProp prop), ExternUncurriedApp args2 ] ->
+    case impl of
+      ExternExpr group fn -> do
+        let ref = EvalExtern qual
+        case Map.lookup ref e.directives >>= Map.lookup (InlineSpineProp prop) of
+          Just InlineNever ->
+            Just $ neutralSpine (NeutStop qual) spine
+          Just InlineAlways ->
+            Just $ evalSpine env (eval (envForGroup env ref (InlineSpineProp prop) group) fn) spine
+          Just (InlineArity n) | Array.length args2 >= n ->
+            Just $ evalSpine env (eval (envForGroup env ref (InlineSpineProp prop) group) fn) spine
+          _ ->
+            Nothing
+      _ ->
+        Nothing
+  [ ExternUncurriedApp _, ExternAccessor (GetProp prop), ExternApp args2 ] ->
+    case impl of
+      ExternExpr group fn -> do
+        let ref = EvalExtern qual
+        case Map.lookup ref e.directives >>= Map.lookup (InlineSpineProp prop) of
+          Just InlineNever ->
+            Just $ neutralSpine (NeutStop qual) spine
+          Just InlineAlways ->
+            Just $ evalSpine env (eval (envForGroup env ref (InlineSpineProp prop) group) fn) spine
+          Just (InlineArity n) | Array.length args2 >= n ->
+            Just $ evalSpine env (eval (envForGroup env ref (InlineSpineProp prop) group) fn) spine
+          _ ->
+            Nothing
+      _ ->
+        Nothing
+  [ ExternApp _, ExternAccessor (GetProp prop), ExternUncurriedApp args2 ] ->
     case impl of
       ExternExpr group fn -> do
         let ref = EvalExtern qual
