@@ -1,6 +1,5 @@
 // @inline export watUnit(..).wat arity=1
 // @inline export testImpl never
-import * as Type$dEquality from "../Type.Equality/index.js";
 const wat = dict => dict.wat;
 const testImpl = x => x;
 const watUnit = dictTypeEquals => (
@@ -11,9 +10,8 @@ const watUnit = dictTypeEquals => (
     })()
   }
 );
-const wat1 = /* #__PURE__ */ (() => watUnit(Type$dEquality.refl).wat)();
-const g = wat1;
+const g = x => testImpl(x);
 const test2 = /* #__PURE__ */ testImpl();
-const f = wat1;
+const f = x => testImpl(x);
 const test1 = /* #__PURE__ */ testImpl();
-export {f, g, test1, test2, testImpl, wat, wat1, watUnit};
+export {f, g, test1, test2, testImpl, wat, watUnit};

@@ -20,6 +20,8 @@ import Data.List as List
 import Data.Map (Map)
 import Data.Map as Map
 import Data.Maybe (Maybe(..))
+import Data.Tuple.Nested ((/\))
+import Debug (trace)
 import Data.Monoid (power)
 import Data.Newtype (class Newtype, unwrap)
 import Data.Set as Set
@@ -769,12 +771,14 @@ evalPrimOp env = case _ of
       OpNumberNegate, _
         | NeutLit (LitNumber a) <- deref x ->
             liftNumber (negate a)
-      _, SemRef ref spine sem ->
-        evalRef env ref spine (ExternPrimOp op1) sem
-      _, NeutFail err ->
-        NeutFail err
-      _, _ ->
-        floatLet x (NeutPrimOp <<< Op1 op1)
+      _, _ -> case unwrapSemTyped x of
+        SemRef ref spine sem ->
+          evalRef env ref spine (ExternPrimOp op1) sem
+        _ -> case unwrapSemTyped x of
+          NeutFail err ->
+            NeutFail err
+          _ ->
+            floatLet x (NeutPrimOp <<< Op1 op1)
   Op2 op2 x y ->
     case op2 of
       OpBooleanAnd
@@ -1499,23 +1503,29 @@ build ctx = case _ of
         expr
     | Just expr <- shouldEtaReduce level binding body ->
         expr
-  App (ExprSyntax analysis (Branch bs def)) tl
-    | Just expr' <- shouldDistributeBranchApps analysis bs def tl ->
+  App expr tl
+    | ExprSyntax _ (Branch bs def) <- untypedExpr expr
+    , Just expr' <- shouldDistributeBranchApps (analysisOf expr) bs def tl ->
         expr'
-  UncurriedApp (ExprSyntax analysis (Branch bs def)) tl
-    | Just expr' <- shouldDistributeBranchUncurriedApps analysis bs def tl ->
+  UncurriedApp expr tl
+    | ExprSyntax _ (Branch bs def) <- untypedExpr expr
+    , Just expr' <- shouldDistributeBranchUncurriedApps (analysisOf expr) bs def tl ->
         expr'
-  Accessor (ExprSyntax analysis (Branch bs def)) acc
-    | Just expr' <- shouldDistributeBranchAccessor analysis bs def acc ->
+  Accessor expr acc
+    | ExprSyntax _ (Branch bs def) <- untypedExpr expr
+    , Just expr' <- shouldDistributeBranchAccessor (analysisOf expr) bs def acc ->
         expr'
-  PrimOp (Op1 op1 (ExprSyntax analysis (Branch bs def)))
-    | Just expr' <- shouldDistributeBranchPrimOp1 analysis bs def op1 ->
+  PrimOp (Op1 op1 expr)
+    | ExprSyntax _ (Branch bs def) <- untypedExpr expr
+    , Just expr' <- shouldDistributeBranchPrimOp1 (analysisOf expr) bs def op1 ->
         expr'
-  PrimOp (Op2 op2 (ExprSyntax analysis (Branch bs def)) rhs)
-    | Just expr' <- shouldDistributeBranchPrimOp2L analysis bs def op2 rhs ->
+  PrimOp (Op2 op2 expr rhs)
+    | ExprSyntax _ (Branch bs def) <- untypedExpr expr
+    , Just expr' <- shouldDistributeBranchPrimOp2L (analysisOf expr) bs def op2 rhs ->
         expr'
-  PrimOp (Op2 op2 lhs (ExprSyntax analysis (Branch bs def)))
-    | Just expr' <- shouldDistributeBranchPrimOp2R analysis bs def lhs op2 ->
+  PrimOp (Op2 op2 lhs expr)
+    | ExprSyntax _ (Branch bs def) <- untypedExpr expr
+    , Just expr' <- shouldDistributeBranchPrimOp2R (analysisOf expr) bs def lhs op2 ->
         expr'
   EffectBind ident level (ExprSyntax _ (EffectPure binding)) body ->
     build ctx $ EffectDefer $ build ctx $ Let ident level binding body
@@ -1550,34 +1560,35 @@ buildBranchCond ctx pair def
 
 -- | Tente de simplifier statiquement une condition vérifiant le constructeur (tag) d'un type algébrique.
 simplifyCondIsTag :: Ctx -> Pair BackendExpr -> BackendExpr -> Maybe BackendExpr
-simplifyCondIsTag _ = case _, _ of
-  Pair (ExprSyntax _ (PrimOp (Op1 (OpIsTag _) x1))) (ExprSyntax _ (Lit (LitBoolean false))), def@(ExprSyntax _ (PrimOp (Op1 (OpIsTag _) x2)))
-    | x1 == x2 ->
-        Just def
-  _, _ ->
-    Nothing
+simplifyCondIsTag _ (Pair p1 p2) def
+  | ExprSyntax _ (PrimOp (Op1 (OpIsTag _) x1)) <- untypedExpr p1
+  , ExprSyntax _ (Lit (LitBoolean false)) <- untypedExpr p2
+  , ExprSyntax _ (PrimOp (Op1 (OpIsTag _) x2)) <- untypedExpr def
+  , x1 == x2 = Just def
+  | otherwise = Nothing
 
 -- | Tente de simplifier statiquement une condition booléenne connue.
 simplifyCondBoolean :: Ctx -> Pair BackendExpr -> BackendExpr -> Maybe BackendExpr
-simplifyCondBoolean ctx = case _, _ of
-  Pair expr body@(ExprSyntax _ (Lit (LitBoolean body'))), ExprSyntax _ (Lit (LitBoolean other))
-    | body' == other ->
-        Just body
-    | body' && not other ->
-        Just expr
-    | not body' && other ->
-        Just $ build ctx $ PrimOp (Op1 OpBooleanNot expr)
-  Pair expr (ExprSyntax _ (Lit (LitBoolean true))), other
-    | isSimplePredicate other ->
-        Just $ build ctx $ PrimOp (Op2 OpBooleanOr expr other)
-  Pair expr body, ExprSyntax _ (Lit (LitBoolean false)) ->
-    Just $ build ctx $ PrimOp (Op2 OpBooleanAnd expr body)
-  _, _ ->
-    Nothing
+simplifyCondBoolean ctx (Pair expr body) other =
+  case untypedExpr body, untypedExpr other of
+    ExprSyntax _ (Lit (LitBoolean body')), ExprSyntax _ (Lit (LitBoolean other'))
+      | body' == other' ->
+          Just body
+      | body' && not other' ->
+          Just expr
+      | not body' && other' ->
+          Just $ build ctx $ PrimOp (Op1 OpBooleanNot expr)
+    ExprSyntax _ (Lit (LitBoolean true)), _
+      | isSimplePredicate other ->
+          Just $ build ctx $ PrimOp (Op2 OpBooleanOr expr other)
+    _, ExprSyntax _ (Lit (LitBoolean false)) ->
+      Just $ build ctx $ PrimOp (Op2 OpBooleanAnd expr body)
+    _, _ ->
+      Nothing
 
 -- | Vérifie si une expression est un simple prédicat sans effets de bord.
 isSimplePredicate :: BackendExpr -> Boolean
-isSimplePredicate = case _ of
+isSimplePredicate e = case untypedExpr e of
   ExprSyntax _ expr ->
     case expr of
       Lit _ -> true
@@ -1590,23 +1601,24 @@ isSimplePredicate = case _ of
 
 -- | Élimine la branche 'else' (par défaut) si les autres branches couvrent déjà de manière exhaustive les cas possibles statiquement.
 simplifyCondRedundantElse :: Ctx -> Pair BackendExpr -> BackendExpr -> Maybe BackendExpr
-simplifyCondRedundantElse ctx = case _, _ of
-  Pair expr1 body1, ExprSyntax _ (Branch pairs _)
-    | Pair (ExprSyntax _ (PrimOp (Op1 OpBooleanNot expr2))) body2 <- NonEmptyArray.head pairs
-    , expr1 == expr2 ->
-        Just $ buildBranchCond ctx (Pair expr1 body1) body2
-  _, _ ->
-    Nothing
+simplifyCondRedundantElse ctx (Pair expr1 body1) def
+  | ExprSyntax _ (Branch pairs _) <- untypedExpr def
+  , Pair p body2 <- NonEmptyArray.head pairs
+  , ExprSyntax _ (PrimOp (Op1 OpBooleanNot expr2)) <- untypedExpr p
+  , expr1 == expr2 =
+      Just $ buildBranchCond ctx (Pair expr1 body1) body2
+  | otherwise =
+      Nothing
 
 -- | Remonte (lift) les opérateurs logiques 'Et' hors des branches conditionnelles pour simplifier le flot de contrôle.
 simplifyCondLiftAnd :: Ctx -> Pair BackendExpr -> BackendExpr -> Maybe BackendExpr
-simplifyCondLiftAnd ctx pair def1 = case pair of
-  Pair x (ExprSyntax _ (Branch pairs def2))
-    | [ Pair y z ] <- NonEmptyArray.toArray pairs
-    , def1 == def2 ->
-        Just $ buildBranchCond ctx (Pair (build ctx (PrimOp (Op2 OpBooleanAnd x y))) z) def1
-  _ ->
-    Nothing
+simplifyCondLiftAnd ctx (Pair x yExpr) def1
+  | ExprSyntax _ (Branch pairs def2) <- untypedExpr yExpr
+  , [ Pair y z ] <- NonEmptyArray.toArray pairs
+  , def1 == def2 =
+      Just $ buildBranchCond ctx (Pair (build ctx (PrimOp (Op2 OpBooleanAnd x y))) z) def1
+  | otherwise =
+      Nothing
 
 -- | Reconstruit une référence marquée comme 'stoppée' pour empêcher son inlining infini.
 buildStop :: Ctx -> Qualified Ident -> BackendExpr
@@ -1711,7 +1723,7 @@ shouldUnpackArray ident level binding body = do
 shouldDistributeBranches :: Maybe Ident -> Level -> BackendExpr -> BackendExpr -> Maybe BackendExpr
 shouldDistributeBranches ident level a body = do
   let BackendAnalysis s2 = analysisOf body
-  case a of
+  case untypedExpr a of
     ExprSyntax (BackendAnalysis s1) (Branch branches def)
       | s2.size <= 128
       , s1.result == KnownNeutral
@@ -2020,3 +2032,15 @@ guardFailOver f as k =
   toFail expr = case expr of
     NeutFail _ -> Just expr
     _ -> Nothing
+
+
+unwrapSemTyped :: BackendSemantics -> BackendSemantics
+unwrapSemTyped = case _ of
+  SemTyped _ a -> unwrapSemTyped a
+  a -> a
+
+untypedExpr :: BackendExpr -> BackendExpr
+untypedExpr = case _ of
+  ExprSyntax _ (Typed _ a) -> untypedExpr a
+  a -> a
+

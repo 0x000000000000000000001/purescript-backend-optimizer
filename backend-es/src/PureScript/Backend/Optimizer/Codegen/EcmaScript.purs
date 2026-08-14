@@ -19,11 +19,18 @@ import PureScript.Backend.Optimizer.Codegen.EcmaScript.Syntax (EsAnalysis(..), E
 import PureScript.Backend.Optimizer.Codegen.Tco (TcoExpr)
 import PureScript.Backend.Optimizer.Convert (BackendImplementations, BackendModule)
 import PureScript.Backend.Optimizer.CoreFn (Ident, ModuleName(..), ProperName, Qualified)
-import PureScript.Backend.Optimizer.Semantics (DataTypeMeta)
+import PureScript.Backend.Optimizer.Semantics (DataTypeMeta, NeutralExpr(..))
+import PureScript.Backend.Optimizer.Syntax (BackendSyntax(..))
+
+stripTyped :: NeutralExpr -> NeutralExpr
+stripTyped (NeutralExpr expr) = case expr of
+  Typed _ inner -> stripTyped inner
+  _ -> NeutralExpr (stripTyped <$> expr)
 
 codegenModule :: forall a. CodegenOptions -> BackendImplementations -> BackendModule -> Dodo.Doc a
-codegenModule options implementations mod = do
+codegenModule options implementations modOriginal = do
   let
+    mod = modOriginal { bindings = map (\g -> g { bindings = map (map stripTyped) g.bindings }) modOriginal.bindings }
     topLevelBound :: Map Ident Int
     topLevelBound = foldl
       ( \bs { bindings } ->

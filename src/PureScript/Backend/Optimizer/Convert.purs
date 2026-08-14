@@ -86,7 +86,7 @@ import Effect.Console as Console
 import PureScript.Backend.Optimizer.Analysis (BackendAnalysis, analyze, analyzeEffectBlock, analysisOf)
 import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), ClassDecl, Comment, ConstructorType(..), DataDecl, Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Meta(..), Module(..), ModuleName(..), ProperName(..), Qualified(..), ReExport, exprAnn, findProp, propKey, propValue, qualifiedModuleName, unQualified)
 import PureScript.Backend.Optimizer.Directives (DirectiveHeaderResult, parseDirectiveHeader)
-import PureScript.Backend.Optimizer.Semantics (BackendExpr(..), BackendSemantics, Ctx(..), DataTypeMeta, Env(..), EvalRef(..), ExternImpl(..), ExternSpine, InlineAccessor(..), InlineDirective(..), InlineDirectiveMap, NeutralExpr(..), build, evalExternFromImpl, evalExternRefFromImpl, freeze, optimize)
+import PureScript.Backend.Optimizer.Semantics (BackendExpr(..), BackendSemantics(..), Ctx(..), DataTypeMeta, Env(..), EvalRef(..), ExternImpl(..), ExternSpine(..), InlineAccessor(..), InlineDirective(..), InlineDirectiveMap, NeutralExpr(..), build, evalExternFromImpl, evalExternRefFromImpl, freeze, optimize, unwrapSemTyped)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
 import PureScript.Backend.Optimizer.Syntax (BackendAccessor(..), BackendOperator(..), BackendOperator1(..), BackendOperator2(..), BackendOperatorOrd(..), BackendSyntax(..), Level(..), Pair(..))
 import PureScript.Backend.Optimizer.Utils (foldl1Array)
@@ -406,14 +406,12 @@ toExternImpl env group isDict expr = case unwrapTyped expr of
   ExprSyntax _ (CtorDef ct ty tag fields) -> do
     -- Ours
     let Tuple _ expr' = freeze expr
-    let meta = unsafePartial $ fromJust $ Map.lookup ty env.dataTypes
+    let meta = fromMaybe { constructors: Map.empty, size: 0 } $ Map.lookup ty env.dataTypes
     -- Ours
     Tuple (Tuple (analysisOf expr) (ExternCtor meta ct ty tag fields)) expr'
   _ -> do
     let Tuple analysis expr' = freeze expr
     -- Ours
-    let 
-      t = if isDict then Debug.trace "toExternImpl fallback for Dict!" \_ -> unit else unit
     Tuple (Tuple analysis (ExternExpr group expr')) expr'
   -- Ours
   where
@@ -429,16 +427,24 @@ toExternImpl env group isDict expr = case unwrapTyped expr of
 topEnv :: Env -> Env
 topEnv (Env env) = Env env { locals = [] }
 
+unwrapExternSpine :: ExternSpine -> ExternSpine
+unwrapExternSpine = case _ of
+  ExternApp sems -> ExternApp (unwrapSemTyped <$> sems)
+  ExternUncurriedApp sems -> ExternUncurriedApp (unwrapSemTyped <$> sems)
+  ExternAccessor acc -> ExternAccessor acc
+  ExternPrimOp op -> ExternPrimOp op
+
 makeExternEvalSpine :: ConvertEnv -> Env -> Qualified Ident -> Array ExternSpine -> Maybe BackendSemantics
 makeExternEvalSpine conv env qual spine = do
   let
+    spine' = unwrapExternSpine <$> spine
     result = do
       fn <- Map.lookup qual conv.foreignSemantics
-      fn env qual spine
+      fn env qual spine'
   case result of
     Nothing -> do
       impl <- Map.lookup qual conv.implementations
-      evalExternFromImpl (topEnv env) qual impl spine
+      evalExternFromImpl (topEnv env) qual impl spine'
     _ ->
       result
 

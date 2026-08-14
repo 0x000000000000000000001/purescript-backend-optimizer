@@ -1,11 +1,10 @@
+import * as Effect$dRef from "../Effect.Ref/index.js";
 const test = f => {
-  const ref = {value: 0};
-  const $0 = f(ref);
+  const ref = Effect$dRef._new(0)();
+  const $0 = Effect$dRef.modify_($0 => 1 + $0 | 0)(f(ref));
   return () => {
-    const $1 = $0.value;
-    $0.value = 1 + $1 | 0;
-    const $2 = ref.value;
-    ref.value = 1 + $2 | 0;
+    $0();
+    return Effect$dRef.modify_($1 => 1 + $1 | 0)(ref)();
   };
 };
 export {test};

@@ -28,12 +28,35 @@ const genericTest = {
   }
 };
 const showTest = {
-  show: x => {
-    if (x === "Foo") { return "Foo"; }
-    if (x === "Bar") { return "Bar"; }
-    if (x === "Baz") { return "Baz"; }
-    if (x === "Qux") { return "Qux"; }
-    $runtime.fail();
-  }
+  show: /* #__PURE__ */ (() => {
+    const $0 = {
+      "genericShow'": v => {
+        if (v.tag === "Inl") { return "Baz"; }
+        if (v.tag === "Inr") { return "Qux"; }
+        $runtime.fail();
+      }
+    };
+    const $1 = {
+      "genericShow'": v => {
+        if (v.tag === "Inl") { return "Bar"; }
+        if (v.tag === "Inr") { return $0["genericShow'"](v._1); }
+        $runtime.fail();
+      }
+    };
+    const $2 = {
+      "genericShow'": v => {
+        if (v.tag === "Inl") { return "Foo"; }
+        if (v.tag === "Inr") { return $1["genericShow'"](v._1); }
+        $runtime.fail();
+      }
+    };
+    return x => $2["genericShow'"]((() => {
+      if (x === "Foo") { return Data$dGeneric$dRep.$Sum("Inl", Data$dGeneric$dRep.NoArguments); }
+      if (x === "Bar") { return Data$dGeneric$dRep.$Sum("Inr", Data$dGeneric$dRep.$Sum("Inl", Data$dGeneric$dRep.NoArguments)); }
+      if (x === "Baz") { return Data$dGeneric$dRep.$Sum("Inr", Data$dGeneric$dRep.$Sum("Inr", Data$dGeneric$dRep.$Sum("Inl", Data$dGeneric$dRep.NoArguments))); }
+      if (x === "Qux") { return Data$dGeneric$dRep.$Sum("Inr", Data$dGeneric$dRep.$Sum("Inr", Data$dGeneric$dRep.$Sum("Inr", Data$dGeneric$dRep.NoArguments))); }
+      $runtime.fail();
+    })());
+  })()
 };
 export {$Test, Bar, Baz, Foo, Qux, genericTest, showTest};

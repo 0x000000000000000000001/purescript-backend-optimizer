@@ -1,7 +1,9 @@
-const test6 = a => b => a >= b;
-const test5 = a => b => a <= b;
-const test4 = a => b => a > b;
-const test3 = a => b => a < b;
+import * as Data$dOrd from "../Data.Ord/index.js";
+import * as Data$dOrdering from "../Data.Ordering/index.js";
+const test6 = a => b => Data$dOrd.ordCharImpl(Data$dOrdering.LT)(Data$dOrdering.EQ)(Data$dOrdering.GT)(a)(b) !== "LT";
+const test5 = a => b => Data$dOrd.ordCharImpl(Data$dOrdering.LT)(Data$dOrdering.EQ)(Data$dOrdering.GT)(a)(b) !== "GT";
+const test4 = a => b => Data$dOrd.ordCharImpl(Data$dOrdering.LT)(Data$dOrdering.EQ)(Data$dOrdering.GT)(a)(b) === "GT";
+const test3 = a => b => Data$dOrd.ordCharImpl(Data$dOrdering.LT)(Data$dOrdering.EQ)(Data$dOrdering.GT)(a)(b) === "LT";
 const test2 = a => b => a !== b;
 const test1 = a => b => a === b;
 export {test1, test2, test3, test4, test5, test6};

@@ -5,25 +5,26 @@ const $Fun = (tag, _1, _2) => ({tag, _1, _2});
 const Abs = value0 => value1 => $Fun("Abs", value0, value1);
 const App = value0 => value1 => $Fun("App", value0, value1);
 const traverseFun1 = dictApplicative => {
+  const Functor0 = dictApplicative.Apply0().Functor0();
   const Apply0 = dictApplicative.Apply0();
-  const $0 = Apply0.Functor0();
   return k => v => {
-    if (v.tag === "Abs") { return $0.map(Abs(v._1))(k(v._2)); }
-    if (v.tag === "App") { return Apply0.apply($0.map(App)(k(v._1)))(k(v._2)); }
+    if (v.tag === "Abs") { return Functor0.map(Abs(v._1))(k(v._2)); }
+    if (v.tag === "App") { return Apply0.apply(Functor0.map(App)(k(v._1)))(k(v._2)); }
     $runtime.fail();
   };
 };
 const rewriteBottomUpM = dictMonad => {
-  const Apply0 = dictMonad.Applicative0().Apply0();
-  const $0 = Apply0.Functor0();
-  const $1 = dictMonad.Bind1();
+  const Applicative0 = dictMonad.Applicative0();
+  const Bind1 = dictMonad.Bind1();
   return k => {
     const go = a => {
-      if (a.tag === "Abs") { return $0.map(Abs(a._1))($1.bind(go(a._2))(k)); }
-      if (a.tag === "App") { return Apply0.apply($0.map(App)($1.bind(go(a._1))(k)))($1.bind(go(a._2))(k)); }
+      const Functor0 = Applicative0.Apply0().Functor0();
+      const Apply0 = Applicative0.Apply0();
+      if (a.tag === "Abs") { return Functor0.map(Abs(a._1))(Bind1.bind(go(a._2))(k)); }
+      if (a.tag === "App") { return Apply0.apply(Functor0.map(App)(Bind1.bind(go(a._1))(k)))(Bind1.bind(go(a._2))(k)); }
       $runtime.fail();
     };
-    return a => $1.bind(go(a))(k);
+    return a => Bind1.bind(go(a))(k);
   };
 };
 const rewriteBottomUp = k => {

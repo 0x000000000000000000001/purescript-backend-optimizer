@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
 
 # Use the local compiler and local spago to execute all tests in the workspace
+export NODE_NO_WARNINGS=1
 npx spago test "$@"

@@ -21,8 +21,8 @@ const test2 = k => {
     for (const a of $0) {
       Effect$dConsole.log(Data$dShow.showIntImpl(a))();
     }
-    for (const $1 of k(42)) {
-      Effect$dConsole.log(Data$dShow.showIntImpl($1))();
+    for (const x of k(42)) {
+      Effect$dConsole.log(Data$dShow.showIntImpl(x))();
     }
     const $1 = Effect$dConsole.log("wat");
     for (const $2 of k(42)) {

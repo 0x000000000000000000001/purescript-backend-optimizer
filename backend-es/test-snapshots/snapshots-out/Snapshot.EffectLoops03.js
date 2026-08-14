@@ -1,38 +1,47 @@
 import * as Effect$dConsole from "../Effect.Console/index.js";
-const test4 = cond => ref => () => {
-  while (cond.value) {
-    const a = ref.value;
-    if (a < 10) {
-      Effect$dConsole.log("foo")();
-    } else {
-      Effect$dConsole.log("wat")();
+import * as Effect$dRef from "../Effect.Ref/index.js";
+const test4 = cond => ref => {
+  const $0 = Effect$dRef.read(cond);
+  const $1 = Effect$dRef.read(ref);
+  return () => {
+    while ($0()) {
+      const a = $1();
+      if (a < 10) {
+        Effect$dConsole.log("foo")();
+      } else {
+        Effect$dConsole.log("wat")();
+      }
     }
-  }
+  };
 };
-const test3 = cond => ref => () => {
-  while (cond.value) {
-    const a = ref.value;
-    const $0 = Effect$dConsole.log("foo");
-    if (a < 10) { $0(); }
-  }
+const test3 = cond => ref => {
+  const $0 = Effect$dRef.read(cond);
+  const $1 = Effect$dRef.read(ref);
+  return () => {
+    while ($0()) {
+      const a = $1();
+      const $2 = Effect$dConsole.log("foo");
+      if (a < 10) { $2(); }
+    }
+  };
 };
 const test2 = cond => {
-  const $0 = Effect$dConsole.log("foo");
+  const $0 = Effect$dRef.read(cond);
   return () => {
-    while (cond.value) {
-      $0();
+    while ($0()) {
+      Effect$dConsole.log("foo")();
     }
     const $1 = Effect$dConsole.log("bar");
-    while (cond.value) {
+    while (Effect$dRef.read(cond)()) {
       $1();
     }
   };
 };
 const test1 = cond => {
-  const $0 = Effect$dConsole.log("foo");
+  const $0 = Effect$dRef.read(cond);
   return () => {
-    while (cond.value) {
-      $0();
+    while ($0()) {
+      Effect$dConsole.log("foo")();
       Effect$dConsole.log("bar")();
     }
   };

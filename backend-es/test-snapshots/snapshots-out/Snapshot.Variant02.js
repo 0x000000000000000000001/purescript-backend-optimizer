@@ -19,13 +19,20 @@ const variantBuildMatchCons = dictTypeEquals => () => () => dictIsSymbol => dict
   }
 );
 const match = () => dictVariantBuildMatch => dictVariantBuildMatch.variantBuildMatch(Type$dProxy.Proxy)(Data$dVariant.case_);
-const test1 = r => {
-  if (r.type === "bar") {
-    if (r.value) { return "true"; }
-    return "false";
-  }
-  if (r.type === "baz") { return r.value; }
-  if (r.type === "foo") { return Data$dShow.showIntImpl(r.value); }
-  return Partial._crashWith("Data.Variant: pattern match failure [" + r.type + "]");
-};
+const test1 = /* #__PURE__ */ (() => {
+  const $0 = {
+    foo: a => Data$dShow.showIntImpl(a),
+    bar: a => {
+      if (a) { return "true"; }
+      return "false";
+    },
+    baz: a => a
+  };
+  return r => {
+    if (r.type === "bar") { return $0.bar(r.value); }
+    if (r.type === "baz") { return $0.baz(r.value); }
+    if (r.type === "foo") { return $0.foo(r.value); }
+    return Partial._crashWith("Data.Variant: pattern match failure [" + r.type + "]");
+  };
+})();
 export {match, test1, variantBuildMatch, variantBuildMatchCons, variantBuildMatchNil};

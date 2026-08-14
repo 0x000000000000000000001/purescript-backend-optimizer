@@ -1,7 +1,3 @@
--- | AST du Backend (Syntax.purs)
--- | Définit le BackendSyntax, l'arbre de syntaxe abstrait optimisé (proche d'un langage impératif typé) vers lequel le CoreFn est traduit.
--- | Ce module contient des constructions comme les boucles, les blocs, les structures de données mutables et non-curryfiées, qui serviront de modèle universel pour tous nos générateurs de code (PHP, Go, JS).
-
 module PureScript.Backend.Optimizer.Syntax where
 
 import Prelude
@@ -15,30 +11,179 @@ import Data.Tuple (Tuple)
 import PureScript.Backend.Optimizer.CoreFn (ConstructorType, ExprType, Ident, Literal(..), Prop, ProperName, Qualified)
 
 data BackendSyntax a
+  -- | Reference to a global value or function (defined at the module level or imported).
+  -- | In PureScript, top-level declarations are immutable and globally accessible.
+  -- | 
+  -- | Ex: `Data.Map.empty` or `myTopLevelFunction`
   = Var (Qualified Ident)
+
+  -- | Reference to a local variable (function parameter, `let` variable).
+  -- | The `Level` indicates its absolute lexical depth from the root of the expression (De Bruijn level).
+  -- | Unlike De Bruijn indices which are relative to the current binder, a De Bruijn level is absolute.
+  -- | This makes it easier to test variable equality (two variables are the same if they have the same Level)
+  -- | and prevents accidental capture without needing to constantly shift indices.
+  -- | 
+  -- | Ex: `\x -> \y -> x + y` 
+  -- | `x` is introduced first (Level 0), `y` is introduced next (Level 1).
+  -- | In the body `x + y`, we refer to `x` via `Local (Just "x") 0` and `y` via `Local (Just "y") 1`.
+  -- | `Nothing` is for _ in `\_ -> ...`
   | Local (Maybe Ident) Level
+
+  -- | A primitive literal value.
+  -- | Represents basic data types that are typically built-in to the target backend language.
+  -- | 
+  -- | Ex: `Lit (LitInt 42)` translates to `42` in JS/Go.
+  -- | Ex: `Lit (LitString "hello")` translates to `"hello"`.
+  -- | Ex: `Lit (LitArray [a, b])` translates to an array allocation like `[a, b]`.
   | Lit (Literal a)
+
+  -- | Standard curried function application.
+  -- | In PureScript, every function technically takes exactly one argument. Calling `f x y` 
+  -- | is parsed as `(f x) y`. This constructor represents applying one or more arguments 
+  -- | to a function that expects them one by one.
+  -- | 
+  -- | Ex: `App (Var "f") [x, y]` represents calling `f(x)(y)` in a curried model.
   | App a (NonEmptyArray a)
+
+  -- | Definition of a standard curried function (closure or lambda).
+  -- | Binds one or more arguments (each with their own `Level`) and evaluates the body.
+  -- | Since PureScript is curried, `\x y -> x + y` is represented as an `Abs` binding `x` and `y`.
+  -- | 
+  -- | Ex: `Abs [(Just "x", 0), (Just "y", 1)] (body)` translates to `function(x) { return function(y) { return body; } }` if not optimized.
   | Abs (NonEmptyArray (Tuple (Maybe Ident) Level)) a
+
+  -- | Optimized "uncurried" function call.
+  -- | All required arguments are passed at once, which is much more efficient on native backends.
+  -- | 
+  -- | Ex: `UncurriedApp (Var "f") [x, y]` directly invokes `f(x, y)` in Go/PHP/JS, avoiding intermediate closures.
   | UncurriedApp a (Array a)
+
+  -- | Definition of an optimized "uncurried" function.
+  -- | Represents a backend function with a strict arity. When called, it expects all its arguments at once.
+  -- | 
+  -- | Ex: `UncurriedAbs [(Just "x", 0), (Just "y", 1)] (body)` translates to `function f(x, y) { return body; }`.
   | UncurriedAbs (Array (Tuple (Maybe Ident) Level)) a
+
+  -- | Optimized call of an uncurried function that executes effects (e.g., FFI functions).
+  -- | It directly applies the arguments and runs the effect, rather than returning a thunk `\() -> ...`.
+  -- | 
+  -- | Ex: `UncurriedEffectApp (Var "consoleLog") ["hello"]` translates to `console.log("hello")`.
   | UncurriedEffectApp a (Array a)
+
+  -- | Optimized definition of an uncurried function that contains side effects.
+  -- | Typically generates a function that directly executes imperative statements when called.
+  -- | 
+  -- | Ex: `UncurriedEffectAbs [(Just "msg", 0)] (body)` translates to `function log(msg) { body; }`.
   | UncurriedEffectAbs (Array (Tuple (Maybe Ident) Level)) a
+
+  -- | Property or field access.
+  -- | Reads a value from a structured type (Record, Array, or ADT constructor).
+  -- | 
+  -- | Ex: `Accessor record (GetProp "name")` translates to `record.name`.
+  -- | Ex: `Accessor array (GetIndex 0)` translates to `array[0]`.
+  -- | Ex: `Accessor adt (GetCtorField ... "value0")` translates to reading a specific field of a native struct/class.
   | Accessor a BackendAccessor
+
+  -- | Pure record update.
+  -- | Creates a new record by copying the existing one and replacing specific fields.
+  -- | 
+  -- | Ex: `Update record [(Prop "name" newName)]` translates to `{ ...record, name: newName }` in JS.
   | Update a (Array (Prop a))
+
+  -- | Complete (saturated) instantiation of an Algebraic Data Type (ADT) constructor.
+  -- | Provides all values expected by the memory layout (`dataDecls`) with their exact names.
+  -- | Since all arguments are known, the backend can directly allocate the native struct or object.
+  -- | 
+  -- | Ex: `CtorSaturated (Qualified "Left") ... [("value0", "error")]` translates to `&Left{value0: "error"}` in Go.
   | CtorSaturated (Qualified Ident) ConstructorType ProperName Ident (Array (Tuple String a))
+
+  -- | Represents the formal definition (the "factory") of an ADT constructor.
+  -- | Used when manipulating the constructor as a first-class value itself (e.g., passing `Just` to a function).
+  -- | 
+  -- | Ex: `map Just [1, 2]` will pass the `CtorDef` of `Just` to `map`.
   | CtorDef ConstructorType ProperName Ident (Array String)
+
+  -- | Block of mutually recursive local declarations.
+  -- | Unlike a standard `Let` where the bound variable is only visible in the continuation (the body), 
+  -- | in a `LetRec`, all bound variables are visible within their own definitions AND within each other's definitions.
+  -- | This is strictly required to define local recursive functions (like a `go` loop) or multiple functions that call each other.
+  -- | 
+  -- | The `Level` represents the base lexical depth for the first variable in the block. 
+  -- | The `NonEmptyArray` contains the identifiers and their expressions.
+  -- | 
+  -- | Ex: 
+  -- | ```purescript
+  -- | let ping n = pong (n - 1)
+  -- |     pong n = ping (n - 1)
+  -- | in ping 10
+  -- | ```
+  -- | Here `ping` and `pong` need to know about each other before they are fully evaluated. `LetRec` makes this possible.
   | LetRec Level (NonEmptyArray (Tuple Ident a)) a
+
+  -- | Simple local declaration (variable assignment).
+  -- | Evaluates the first expression and binds it to a name/level, then evaluates the body.
+  -- | 
+  -- | Ex: `Let (Just "x") 0 (LitInt 42) (body)` translates to `let x = 42; return body;`.
   | Let (Maybe Ident) Level a a
+
+  -- | Sequential monadic bind (`<-`) specialized for native effects.
+  -- | Imperative sequential execution: evaluates the first expression (the effect), binds its result, then evaluates the continuation.
+  -- | 
+  -- | Ex: `EffectBind (Just "text") 0 (readFile) (print text)` translates to `text = readFile(); return print(text);`.
   | EffectBind (Maybe Ident) Level a a
+
+  -- | Wraps a pure value in an effectful context (equivalent to `pure x` in `Effect`).
+  -- | 
+  -- | Ex: `EffectPure (LitInt 42)` translates to `return 42;` in an imperative function body.
   | EffectPure a
+
+  -- | Defers the execution of an expression.
+  -- | In PureScript, `Effect a` is represented internally by a thunk `\() -> a`.
+  -- | This constructor encapsulates the expression to prevent immediate execution until the effect is explicitly run.
+  -- | 
+  -- | Ex: `EffectDefer (consoleLog "hello")` translates to `function() { consoleLog("hello"); }`.
   | EffectDefer a
+
+  -- | Multi-branch conditional structure.
+  -- | Translates a pattern match or chained conditions into an `if / else if / else` block.
+  -- | The pairs represent `(condition, body)`, and the last `a` is the default `else` fallback.
+  -- | 
+  -- | Ex: `Branch [(cond1, body1), (cond2, body2)] defaultBody` 
+  -- | translates to: `if (cond1) { body1 } else if (cond2) { body2 } else { defaultBody }`.
   | Branch (NonEmptyArray (Pair a)) a
+
+  -- | Primitive operator (unary or binary).
+  -- | Reserved for native operations that have direct equivalents in the target CPU/Language.
+  -- | 
+  -- | Ex: `PrimOp (Op2 OpAdd x y)` translates to `x + y`.
+  -- | Ex: `PrimOp (Op1 OpBooleanNot x)` translates to `!x`.
   | PrimOp (BackendOperator a)
+
+  -- | Effect operation related to primitive mutable variables (`Ref` or `STRef`).
+  -- | Directly maps to mutable memory allocation and modification in the backend.
+  -- | 
+  -- | Ex: `PrimEffect (EffectRefNew 42)` allocates a mutable pointer/variable initialized to 42.
+  -- | Ex: `PrimEffect (EffectRefWrite ref 43)` updates the pointer/variable.
   | PrimEffect (BackendEffect a)
+
+  -- | Represents the absence of a value or an undefined state.
+  -- | Used to optimize unreachable branches or as a global placeholder to satisfy type systems without allocating memory.
+  -- | 
+  -- | Ex: Can translate to `null`, `undefined`, or a `panic("unreachable")` depending on the backend.
   | PrimUndefined
+
+  -- | Throwing a fatal error at runtime.
+  -- | Often induced by an incomplete pattern matching (e.g., `Failed pattern match...`).
+  -- | 
+  -- | Ex: `Fail "Pattern match failed"` translates to `throw new Error(...)` or `panic(...)`.
   | Fail String
-  -- Ours
+
+  -- | Ours
+  -- | (TAST v2 specificity) Associates a full PureScript type (`ExprType`) with an expression.
+  -- | Essential for strongly typed AOT backends (Go, PHP 8+, Java) to generate strict types, 
+  -- | emit casts, or instantiate the correct native `struct` without falling back to dynamic typing (`interface{}`).
+  -- | 
+  -- | Ex: `Typed Int (LitInt 42)` tells the Go generator to treat this node strictly as an `int`.
   | Typed ExprType a
 
 derive instance Eq a => Eq (BackendSyntax a)
@@ -60,8 +205,39 @@ sndPair :: forall a. Pair a -> a
 sndPair (Pair _ a) = a
 
 data BackendAccessor
+  -- | Accesses a property by its string name.
+  -- | Typically used to read fields from a PureScript Record.
+  -- | 
+  -- | Ex: `Accessor record (GetProp "foo")` translates to `record.foo` or `record["foo"]`.
   = GetProp String
+
+  -- | Accesses an element at a specific index in an array.
+  -- | 
+  -- | Ex: `Accessor array (GetIndex 0)` translates to `array[0]`.
   | GetIndex Int
+
+  -- | Accesses a specific field of an Algebraic Data Type (ADT) constructor.
+  -- | In standard PureScript, this requires pattern matching, but the optimizer flattens it 
+  -- | into direct memory access since it knows the exact memory layout (`dataDecls`).
+  -- | 
+  -- | The parameters represent:
+  -- | 1. `Qualified Ident`: The ADT type identifier (e.g., `Data.Either.Left`)
+  -- | 2. `ConstructorType`: Whether it's a Product or Sum type.
+  -- | 3. `ProperName`: The type name.
+  -- | 4. `Ident`: The constructor name.
+  -- | 5. `String`: The explicit name of the field (e.g., `"value0"`).
+  -- | 6. `Int`: The positional index of the field (useful for tuple-like arrays).
+  -- | 
+  -- | Ex: Given the PureScript ADT: `data Maybe a = Nothing | Just a`
+  -- | When accessing the value inside `Just` (e.g. during pattern matching `case x of Just val -> val`),
+  -- | the optimizer can flatten the match into an explicit accessor:
+  -- | 
+  -- | `Accessor x (GetCtorField (Qualified (Just "Data.Maybe") "Just") ConstructorTypeSum (ProperName "Maybe") (Ident "Just") "value0" 0)`
+  -- | 
+  -- | This gives the Codegen all the metadata it needs to emit a highly optimized, strictly typed native access:
+  -- | - In Go: `x.(*Maybe_Just).value0` (Type assertion followed by struct field access)
+  -- | - In PHP: `$x->value0` (Direct object property access)
+  -- | - In JS: `x.value0` or `x[0]` (Depending on how the constructor was lowered)
   | GetCtorField (Qualified Ident) ConstructorType ProperName Ident String Int
 
 derive instance Eq BackendAccessor
@@ -271,5 +447,10 @@ instance Traversable BackendEffect where
     EffectRefRead a -> EffectRefRead <$> f a
     EffectRefWrite a b -> EffectRefWrite <$> f a <*> f b
 
+-- | A type class serving as an abstraction bridge to extract the raw syntax from a wrapped AST node.
+-- | In the optimizer, the AST is often wrapped in a container to store metadata 
+-- | (e.g., `BackendExpr` in Semantics.purs which attaches analysis data to each node). 
+-- | `HasSyntax` allows generic algorithms to extract and inspect the underlying `BackendSyntax a` 
+-- | without needing to know exactly how the node `a` is wrapped.
 class HasSyntax a where
   syntaxOf :: a -> Maybe (BackendSyntax a)

@@ -3,10 +3,9 @@
 // @inline export externTest always
 const fn = v => 0.0;
 const localTest = f => {
-  const rec = {a: {b: {c: 99.0}}, d: fn({}), e: 11.0};
-  const res = f(rec);
+  const res = f({a: {b: {c: 99.0}}, d: fn({}), e: 11.0});
   if (res !== -Infinity) { return res; }
-  return fn(rec);
+  return fn({a: {b: {c: 99.0}}, d: fn({}), e: 11.0});
 };
 const test1 = 110.0;
 const test2 = 88.0;

@@ -23,8 +23,8 @@ const test2 = lo => hi => {
     for (const a of $runtime.range($0, $1)) {
       Effect$dConsole.log(Data$dShow.showIntImpl(a))();
     }
-    for (const $2 of $runtime.range(lo + 1 | 0, hi + 1 | 0)) {
-      Effect$dConsole.log(Data$dShow.showIntImpl($2))();
+    for (const x of $runtime.range(lo + 1 | 0, hi + 1 | 0)) {
+      Effect$dConsole.log(Data$dShow.showIntImpl(x))();
     }
     const $2 = Effect$dConsole.log("wat");
     for (const $3 of $runtime.range(lo + 1 | 0, hi + 1 | 0)) {

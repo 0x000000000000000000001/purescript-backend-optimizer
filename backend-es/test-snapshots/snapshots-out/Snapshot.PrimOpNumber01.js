@@ -1,8 +1,10 @@
+import * as Data$dOrd from "../Data.Ord/index.js";
+import * as Data$dOrdering from "../Data.Ordering/index.js";
 const test9 = a => b => a * b;
-const test8 = a => b => a >= b;
-const test7 = a => b => a <= b;
-const test6 = a => b => a > b;
-const test5 = a => b => a < b;
+const test8 = a => b => Data$dOrd.ordNumberImpl(Data$dOrdering.LT)(Data$dOrdering.EQ)(Data$dOrdering.GT)(a)(b) !== "LT";
+const test7 = a => b => Data$dOrd.ordNumberImpl(Data$dOrdering.LT)(Data$dOrdering.EQ)(Data$dOrdering.GT)(a)(b) !== "GT";
+const test6 = a => b => Data$dOrd.ordNumberImpl(Data$dOrdering.LT)(Data$dOrdering.EQ)(Data$dOrdering.GT)(a)(b) === "GT";
+const test5 = a => b => Data$dOrd.ordNumberImpl(Data$dOrdering.LT)(Data$dOrdering.EQ)(Data$dOrdering.GT)(a)(b) === "LT";
 const test4 = a => b => a !== b;
 const test3 = a => b => a === b;
 const test2 = a => b => a - b;
