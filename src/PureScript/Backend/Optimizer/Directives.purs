@@ -1,3 +1,6 @@
+-- | Moteur de Directives (Directives.purs)
+-- | Gère le parsing et l'application des instructions manuelles (directives) définies par le développeur dans son code source (ex: -- @inline, -- @noinline). Cela permet de forcer ou d'empêcher certaines optimisations sur des fonctions spécifiques.
+
 module PureScript.Backend.Optimizer.Directives
   ( parseDirectiveFile
   , parseDirectiveHeader

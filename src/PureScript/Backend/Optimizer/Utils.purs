@@ -1,3 +1,6 @@
+-- | Utilitaires Globaux (Utils.purs)
+-- | Contient des fonctions d'aide génériques (manipulation de listes, arbres, ou fonctions courantes) utilisées à travers tout le code de l'optimiseur pour éviter la redondance.
+
 module PureScript.Backend.Optimizer.Utils where
 
 import Prelude

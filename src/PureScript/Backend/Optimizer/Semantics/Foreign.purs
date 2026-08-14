@@ -1,3 +1,6 @@
+-- | Sémantique FFI (Foreign.purs)
+-- | Étend le moteur d'évaluation (Semantics) pour lui permettre de comprendre et de gérer le comportement (du moins l'empreinte de dépendance) du code FFI (fonctions étrangères), afin d'éviter de casser ou d'éliminer à tort des fonctions implémentées nativement.
+
 module PureScript.Backend.Optimizer.Semantics.Foreign where
 
 import Prelude
@@ -9,6 +12,8 @@ import Data.Enum (fromEnum)
 import Data.List as List
 import Data.Map (Map)
 import Data.Map as Map
+-- Ours
+import Debug
 import Data.Maybe (Maybe(..))
 import Data.String as String
 import Data.Tuple (Tuple(..))
@@ -59,6 +64,8 @@ coreForeignSemantics = Map.fromFoldable semantics
     , data_ord_ordBoolean
     , data_ord_ordChar
     , data_ord_ordInt
+    -- Ours
+    , data_ord_ordIntImpl
     , data_ord_ordNumber
     , data_ord_ordString
     , data_ring_intSub
@@ -72,10 +79,6 @@ coreForeignSemantics = Map.fromFoldable semantics
     , data_string_codePoints_toCodePointArray
     , effect_bindE
     , effect_pureE
-    , effect_ref_modify
-    , effect_ref_new
-    , effect_ref_read
-    , effect_ref_write
     , effect_unsafe_unsafePerformEffect
     , partial_unsafe_unsafePartial
     , record_builder_copyRecord
@@ -183,6 +186,10 @@ data_ord_ordBoolean = Tuple (qualified "Data.Ord" "ordBoolean") $ primOrdOperato
 
 data_ord_ordInt :: ForeignSemantics
 data_ord_ordInt = Tuple (qualified "Data.Ord" "ordInt") $ primOrdOperator OpIntOrd
+
+-- Ours
+data_ord_ordIntImpl :: ForeignSemantics
+data_ord_ordIntImpl = Tuple (qualified "Data.Ord" "ordIntImpl") $ primOrdImplOperator OpIntOrd
 
 data_ord_ordNumber :: ForeignSemantics
 data_ord_ordNumber = Tuple (qualified "Data.Ord" "ordNumber") $ primOrdOperator OpNumberOrd
@@ -349,6 +356,19 @@ primUnaryOperator op env _ = case _ of
 primOrdOperator :: (BackendOperatorOrd -> BackendOperator2) -> ForeignEval
 primOrdOperator op env _ = case _ of
   [ ExternAccessor (GetProp "compare"), ExternApp [ a, b ], ExternPrimOp (OpIsTag tag) ]
+    | isQualified "Data.Ordering" "LT" tag ->
+        Just $ evalPrimOp env $ Op2 (op OpLt) a b
+    | isQualified "Data.Ordering" "GT" tag ->
+        Just $ evalPrimOp env $ Op2 (op OpGt) a b
+    | isQualified "Data.Ordering" "EQ" tag ->
+        Just $ evalPrimOp env $ Op2 (op OpEq) a b
+  _ ->
+    Nothing
+
+-- Ours
+primOrdImplOperator :: (BackendOperatorOrd -> BackendOperator2) -> ForeignEval
+primOrdImplOperator op env _ = case _ of
+  [ ExternApp [ _, _, _, a, b ], ExternPrimOp (OpIsTag tag) ]
     | isQualified "Data.Ordering" "LT" tag ->
         Just $ evalPrimOp env $ Op2 (op OpLt) a b
     | isQualified "Data.Ordering" "GT" tag ->
@@ -582,3 +602,52 @@ record_unsafe_union_unsafeUnionFn = Tuple (qualified "Record.Unsafe.Union" "unsa
       Just $ NeutLit (LitRecord (NonEmptyArray.head <$> Array.groupAllBy (comparing propKey) (props1 <> props2)))
     _ ->
       Nothing
+-- Ours
+
+test_data_undefinedOr_compareUndefinedOrImpl :: ForeignSemantics
+test_data_undefinedOr_compareUndefinedOrImpl = Tuple (qualified "Test.Data.UndefinedOr" "compareUndefinedOrImpl") go
+  where
+  go env _ = case _ of
+    [ ExternApp [ lt, eq, gt, compareFn, a, b ] ] ->
+      Just $ goCmp env lt eq gt compareFn a b
+    [ ExternApp [ lt, eq, gt, compareFn, a ] ] ->
+      Just $ SemLam Nothing \b ->
+        goCmp env lt eq gt compareFn a b
+    [ ExternApp [ lt, eq, gt, compareFn ] ] ->
+      Just $ SemLam Nothing \a ->
+        SemLam Nothing \b ->
+          goCmp env lt eq gt compareFn a b
+    [ ExternApp [ lt, eq, gt ] ] ->
+      Just $ SemLam Nothing \compareFn ->
+        SemLam Nothing \a ->
+          SemLam Nothing \b ->
+            goCmp env lt eq gt compareFn a b
+    [ ExternApp [ lt, eq ] ] ->
+      Just $ SemLam Nothing \gt ->
+        SemLam Nothing \compareFn ->
+          SemLam Nothing \a ->
+            SemLam Nothing \b ->
+              goCmp env lt eq gt compareFn a b
+    [ ExternApp [ lt ] ] ->
+      Just $ SemLam Nothing \eq ->
+        SemLam Nothing \gt ->
+          SemLam Nothing \compareFn ->
+            SemLam Nothing \a ->
+              SemLam Nothing \b ->
+                goCmp env lt eq gt compareFn a b
+    [] ->
+      Just $ SemLam Nothing \lt ->
+        SemLam Nothing \eq ->
+          SemLam Nothing \gt ->
+            SemLam Nothing \compareFn ->
+              SemLam Nothing \a ->
+                SemLam Nothing \b ->
+                  goCmp env lt eq gt compareFn a b
+    _ ->
+      Nothing
+
+  goCmp env lt eq gt compareFn a b = case a, b of
+    NeutPrimUndefined, NeutPrimUndefined -> eq
+    NeutPrimUndefined, _ -> lt
+    _, NeutPrimUndefined -> gt
+    _, _ -> evalApp env compareFn [ a, b ]

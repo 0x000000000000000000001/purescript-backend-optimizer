@@ -1,3 +1,8 @@
+-- | Module d'Analyse (Analysis.purs)
+-- | Ce module est chargé de parcourir l'Abstract Syntax Tree (AST) intermédiaire (BackendSyntax) afin de récolter des métriques cruciales sur le code.
+-- | Il détermine notamment la "taille" (complexité) des expressions, compte le nombre d'occurrences d'utilisation des variables (usages), et évalue la "pureté" des expressions (si elles ont des effets de bord ou non).
+-- | Ces heuristiques sont le moteur décisionnel de l'optimiseur : elles lui permettent de choisir mathématiquement si une fonction doit être inlinée (copiée sur place) ou conservée sous forme d'appel, dans le but de réduire les indirections sans faire exploser la taille du binaire final.
+
 module PureScript.Backend.Optimizer.Analysis where
 
 import Prelude
@@ -389,6 +394,9 @@ analyze externAnalysis expr = case expr of
     analysis =
       withResult KnownNeutral
         $ analyzeDefault expr
+  -- Ours
+  Typed _ a ->
+    analysisOf a
 
 analyzeEffectBlock :: forall a. HasAnalysis a => HasSyntax a => (Qualified Ident -> Maybe String -> Maybe BackendAnalysis) -> BackendSyntax a -> BackendAnalysis
 analyzeEffectBlock externAnalysis expr = case expr of
@@ -431,6 +439,9 @@ analyzeEffectBlock externAnalysis expr = case expr of
     withResult Unknown
       $ complex NonTrivial
       $ analyzeDefault expr
+  -- Ours
+  Typed _ a ->
+    analysisOf a
   _ ->
     analyze externAnalysis expr
 

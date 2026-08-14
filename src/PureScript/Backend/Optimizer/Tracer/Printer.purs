@@ -1,3 +1,6 @@
+-- | Formateur de Trace (Printer.purs)
+-- | Module de débogage qui permet d'afficher et de logger de façon lisible l'état de l'AST et les transformations internes de l'optimiseur (utile pour visualiser le graphe et l'évaluation sémantique dans la console).
+
 module PureScript.Backend.Optimizer.Tracer.Printer
   ( printModuleSteps
   , printSteps
@@ -285,6 +288,9 @@ printBackendSyntax = case _ of
     primOp "" "undefined"
   Fail _ ->
     printUncurriedApp false (primOp "" "fail") []
+  -- Ours
+  Typed _ a ->
+    a
 
 printBackendRewriteCase :: forall a. BackendRewrite a -> Doc Void
 printBackendRewriteCase = case _ of

@@ -1,3 +1,7 @@
+-- | Moteur d'Évaluation Sémantique (Semantics.purs)
+-- | Ce module implémente une véritable machine virtuelle simplifiée au sein même du compilateur.
+-- | Il définit les règles d'évaluation partielle du BackendSyntax, permettant à l'optimiseur de "faire tourner" virtuellement le programme pour simplifier les expressions statiques, fusionner les applications de fonctions (Beta-réduction) et propager des constantes.
+
 module PureScript.Backend.Optimizer.Semantics where
 
 import Prelude
@@ -23,20 +27,27 @@ import Data.String as String
 import Data.Tuple (Tuple(..), fst, snd)
 import Partial.Unsafe (unsafeCrashWith)
 import PureScript.Backend.Optimizer.Analysis (class HasAnalysis, BackendAnalysis(..), Capture(..), Complexity(..), ResultTerm(..), Usage(..), analysisOf, bound, bump, complex, resultOf, updated, withResult, withRewrite)
-import PureScript.Backend.Optimizer.CoreFn (ConstructorType, Ident(..), Literal(..), ModuleName, Prop(..), ProperName, Qualified(..), findProp, propKey, propValue)
+-- Ours
+import PureScript.Backend.Optimizer.CoreFn (ConstructorType, ExprType, Ident(..), Literal(..), ModuleName, Prop(..), ProperName, Qualified(..), findProp, propKey, propValue)
 import PureScript.Backend.Optimizer.Syntax (class HasSyntax, BackendAccessor(..), BackendEffect, BackendOperator(..), BackendOperator1(..), BackendOperator2(..), BackendOperatorNum(..), BackendOperatorOrd(..), BackendSyntax(..), Level(..), Pair(..), syntaxOf)
 import PureScript.Backend.Optimizer.Utils (foldl1Array, foldr1Array)
 
+-- | Alias pour un tableau d'arguments appliqués séquentiellement (l'épine).
 type Spine a = Array a
 
+-- | Alias pour un groupe de liaisons mutuellement récursives.
 type RecSpine a = NonEmptyArray (Tuple Ident (Lazy a))
 
+-- | Représente l'état interne d'évaluation d'une fonction décurryfiée, gérant l'application partielle.
 data MkFn a
   = MkFnApplied a
   | MkFnNext (Maybe Ident) (a -> MkFn a)
 
+-- | Le type central de l'évaluateur. Représente les valeurs du programme pendant l'évaluation sémantique (réduites, neutres, primitives).
 data BackendSemantics
-  = SemRef EvalRef (Array ExternSpine) (Lazy BackendSemantics)
+  -- Ours
+  = SemTyped ExprType BackendSemantics
+  | SemRef EvalRef (Array ExternSpine) (Lazy BackendSemantics)
   | SemLam (Maybe Ident) (BackendSemantics -> BackendSemantics)
   | SemMkFn (MkFn BackendSemantics)
   | SemMkEffectFn (MkFn BackendSemantics)
@@ -63,8 +74,10 @@ data BackendSemantics
   | NeutPrimEffect (BackendEffect BackendSemantics)
   | NeutPrimUndefined
 
+-- | Structure paresseuse (lazy) permettant de retarder l'évaluation des conditions et des corps de branches (case).
 data SemConditional a = SemConditional (Lazy a) (Lazy a)
 
+-- | L'arbre de syntaxe finale, optimisée, générée par la phase de réification (quote).
 data BackendExpr
   = ExprSyntax BackendAnalysis (BackendSyntax BackendExpr)
   | ExprRewrite BackendAnalysis (BackendRewrite BackendExpr)
@@ -78,12 +91,14 @@ instance Eq BackendExpr where
     _, _ ->
       false
 
+-- | Représente l'association d'une liaison locale sans effet (let binding).
 type LetBindingAssoc a =
   { ident :: Maybe Ident
   , level :: Level
   , binding :: a
   }
 
+-- | Représente l'association d'une liaison avec effet de bord.
 type EffectBindingAssoc a =
   { ident :: Maybe Ident
   , level :: Level
@@ -91,6 +106,7 @@ type EffectBindingAssoc a =
   , pure :: Boolean
   }
 
+-- | Encode les différentes opérations de réécriture d'arbre appliquées lors de l'optimisation (inlining, distribution, eta-réduction).
 data BackendRewrite a
   = RewriteInline (Maybe Ident) Level a a
   | RewriteUncurry (Maybe Ident) Level (NonEmptyArray (Tuple (Maybe Ident) Level)) a a
@@ -101,6 +117,7 @@ data BackendRewrite a
 
 derive instance Eq a => Eq (BackendRewrite a)
 
+-- | Encode les opérations d'ouverture (unpack) de structures de données (Records, Arrays, Constructeurs).
 data UnpackOp a
   = UnpackRecord (Array (Prop a))
   | UnpackUpdate a (Array (Prop a))
@@ -109,6 +126,7 @@ data UnpackOp a
 
 derive instance Eq a => Eq (UnpackOp a)
 
+-- | Encode les opérations de distribution de calculs (ex: opérateurs, accès) à travers les branches d'un 'case'.
 data DistOp a
   = DistApp (NonEmptyArray a)
   | DistUncurriedApp (Array a)
@@ -119,16 +137,19 @@ data DistOp a
 
 derive instance Eq a => Eq (DistOp a)
 
+-- | Représente les implémentations sémantiques fournies pour évaluer statiquement le code externe (FFI).
 data ExternImpl
   = ExternExpr (Array (Qualified Ident)) NeutralExpr
   | ExternDict (Array (Qualified Ident)) (Array (Prop (Tuple BackendAnalysis NeutralExpr)))
   | ExternCtor DataTypeMeta ConstructorType ProperName Ident (Array String)
 
+-- | Métadonnées d'un type algébrique (ADT), listant l'ensemble de ses constructeurs.
 type DataTypeMeta =
   { constructors :: Map Ident CtorMeta
   , size :: Int
   }
 
+-- | Métadonnées détaillant la structure d'un constructeur spécifique.
 type CtorMeta =
   { fields :: Array String
   , tag :: Int
@@ -140,18 +161,25 @@ instance HasAnalysis BackendExpr where
     ExprRewrite s _ -> s
 
 instance HasSyntax BackendExpr where
-  syntaxOf = case _ of
-    ExprSyntax _ s -> Just s
-    _ -> Nothing
+  -- Ours
+  syntaxOf = go
+    where
+    go = case _ of
+      ExprSyntax _ (Typed _ a) -> go a
+      ExprSyntax _ s -> Just s
+      _ -> Nothing
 
+-- | Représente une variable locale ou un groupe mutuellement récursif dans l'environnement courant.
 data LocalBinding a = One a | Group (NonEmptyArray (Tuple Ident (Lazy a)))
 
+-- | Épine d'arguments appliqués à une référence externe.
 data ExternSpine
   = ExternApp (Spine BackendSemantics)
   | ExternUncurriedApp (Spine BackendSemantics)
   | ExternAccessor BackendAccessor
   | ExternPrimOp BackendOperator1
 
+-- | Une référence permettant d'identifier de manière unique une variable locale ou externe.
 data EvalRef
   = EvalExtern (Qualified Ident)
   | EvalLocal (Maybe Ident) Level
@@ -159,6 +187,7 @@ data EvalRef
 derive instance Eq EvalRef
 derive instance Ord EvalRef
 
+-- | Cible spécifique d'une directive d'inlining (référence brute ou propriété d'un record).
 data InlineAccessor
   = InlineProp String
   | InlineSpineProp String
@@ -167,14 +196,17 @@ data InlineAccessor
 derive instance Eq InlineAccessor
 derive instance Ord InlineAccessor
 
+-- | Directive utilisateur contrôlant l'agressivité de l'inlining (@inline, @noinline, etc).
 data InlineDirective
   = InlineDefault
   | InlineNever
   | InlineAlways
   | InlineArity Int
 
+-- | Dictionnaire liant les références à leurs directives d'inlining respectives.
 type InlineDirectiveMap = Map EvalRef (Map InlineAccessor InlineDirective)
 
+-- | L'environnement d'évaluation, transportant les variables locales et la configuration d'inlining.
 newtype Env = Env
   { currentModule :: ModuleName
   , evalExternRef :: Env -> Qualified Ident -> Maybe BackendSemantics
@@ -185,12 +217,15 @@ newtype Env = Env
 
 derive instance Newtype Env _
 
+-- | Recherche une variable locale dans l'environnement d'évaluation courant à l'aide de son niveau (De Bruijn level).
 lookupLocal :: Env -> Level -> Maybe (LocalBinding BackendSemantics)
 lookupLocal (Env { locals }) (Level lvl) = Array.index locals lvl
 
+-- | Lie une nouvelle variable locale dans l'environnement d'évaluation.
 bindLocal :: Env -> LocalBinding BackendSemantics -> Env
 bindLocal (Env env) sem = Env env { locals = Array.snoc env.locals sem }
 
+-- | Insère une directive d'inlining (ex: @inline) pour une référence spécifique dans la map des directives.
 insertDirective :: EvalRef -> InlineAccessor -> InlineDirective -> InlineDirectiveMap -> InlineDirectiveMap
 insertDirective ref acc dir = Map.alter
   case _ of
@@ -200,6 +235,8 @@ insertDirective ref acc dir = Map.alter
       Just $ Map.singleton acc dir
   ref
 
+-- | Marque une référence comme 'stoppée' dans l'environnement,
+-- | empêchant son évaluation ou son inlining ultérieur pour éviter les boucles infinies.
 addStop :: Env -> EvalRef -> InlineAccessor -> Env
 addStop (Env env) ref acc = Env env
   { directives = Map.alter
@@ -212,6 +249,7 @@ addStop (Env env) ref acc = Env env
       env.directives
   }
 
+-- | Classe de types caractérisant les structures capables d'être réduites en 'BackendSemantics'.
 class Eval f where
   eval :: Env -> f -> BackendSemantics
 
@@ -296,6 +334,9 @@ instance Eval f => Eval (BackendSyntax f) where
       NeutCtorDef (Qualified (Just (unwrap env).currentModule) tag) ct ty tag fields
     CtorSaturated qual ct ty tag fields ->
       guardFailOver snd (map (eval env) <$> fields) $ NeutData qual ct ty tag
+    -- Ours
+    Typed t a ->
+      SemTyped t (eval env a)
 
 instance Eval BackendExpr where
   eval = go
@@ -374,6 +415,7 @@ instance Eval BackendExpr where
 instance Eval NeutralExpr where
   eval env (NeutralExpr a) = eval env a
 
+-- | Ajoute un argument supplémentaire à la fin (snoc) de l'épine (spine) d'application d'une fonction externe.
 snocApp :: Array ExternSpine -> BackendSemantics -> Array ExternSpine
 snocApp prev next = case Array.last prev of
   Just (ExternApp apps) ->
@@ -381,61 +423,112 @@ snocApp prev next = case Array.last prev of
   _ ->
     Array.snoc prev (ExternApp [ next ])
 
+-- | Évalue l'application d'une fonction à ses arguments (l'épine). Gère la beta-réduction si la fonction est une abstraction connue.
 evalApp :: Env -> BackendSemantics -> Spine BackendSemantics -> BackendSemantics
-evalApp env hd spine = go env hd (List.fromFoldable spine)
+-- Ours
+evalApp env hd spine = go Nothing env hd (List.fromFoldable spine)
   where
-  go env' = case _, _ of
+  -- Ours
+  go mbTy env' = case _, _ of
+    SemTyped ty fn, args ->
+      go (Just ty) env' fn args
     _, List.Cons (NeutFail err) _ ->
       NeutFail err
     NeutFail err, _ ->
       NeutFail err
     SemLam _ k, List.Cons arg args ->
       makeLet Nothing arg \nextArg ->
-        go env' (k nextArg) args
+        -- Ours
+        go Nothing env' (k nextArg) args
     SemRef ref sp sem, List.Cons arg args ->
-      go env' (evalRef env' ref sp (ExternApp [ arg ]) sem) args
+      -- Ours
+      let
+        fn = case mbTy of
+          Just ty -> SemTyped ty (SemRef ref sp sem)
+          Nothing -> SemRef ref sp sem
+      in
+        go Nothing env' (evalRef env' ref sp (ExternApp [ arg ]) sem) args
     SemLet ident val k, args ->
       SemLet ident val \nextVal ->
         makeLet Nothing (k nextVal) \nextFn ->
-          go (bindLocal (bindLocal env' (One nextVal)) (One nextFn)) nextFn args
+          -- Ours
+          go mbTy (bindLocal (bindLocal env' (One nextVal)) (One nextFn)) nextFn args
     SemLetRec vals k, args ->
       SemLetRec vals \nextVals ->
         makeLet Nothing (k nextVals) \nextFn ->
-          go (bindLocal (bindLocal env' (Group nextVals)) (One nextFn)) nextFn args
+          -- Ours
+          go mbTy (bindLocal (bindLocal env' (Group nextVals)) (One nextFn)) nextFn args
+    NeutCtorDef qual ct ty tag fields, args
+      | Array.length fields == List.length args ->
+          unsafeCrashWith "CRASH CtorDef"
     fn, List.Nil ->
-      fn
+      -- Ours
+      case mbTy of
+        Just ty -> SemTyped ty fn
+        Nothing -> fn
     fn, args ->
-      NeutApp fn (List.toUnfoldable args)
+      -- Ours
+      let 
+        fn' = case mbTy of
+          Just ty -> SemTyped ty fn
+          Nothing -> fn
+      in
+        NeutApp fn' (List.toUnfoldable args)
 
+-- | Évalue l'application d'une fonction décurryfiée. Tente de saturer la fonction avec 
+-- | les arguments fournis.
 evalUncurriedApp :: Env -> BackendSemantics -> Spine BackendSemantics -> BackendSemantics
-evalUncurriedApp env hd spine = case hd of
-  SemMkFn mk ->
-    evalUncurriedBeta NeutUncurriedApp mk spine
-  SemRef ref sp sem ->
-    guardFailOver identity spine \spine' ->
-      evalRef env ref sp (ExternUncurriedApp spine') sem
-  SemLet ident val k ->
-    SemLet ident val \nextVal ->
-      makeLet Nothing (k nextVal) \nextFn ->
-        evalUncurriedApp (bindLocal (bindLocal env (One nextVal)) (One nextFn)) nextFn spine
-  NeutFail err ->
-    NeutFail err
-  _ ->
-    guardFailOver identity spine (NeutUncurriedApp hd)
+-- Ours
+evalUncurriedApp env hd spine = go Nothing hd
+  where
+  go mbTy = case _ of
+    SemTyped ty a ->
+      go (Just ty) a
+    SemMkFn mk ->
+      evalUncurriedBeta NeutUncurriedApp mk spine
+    SemRef ref sp sem ->
+      guardFailOver identity spine \spine' ->
+        let fn = case mbTy of
+              Just ty -> SemTyped ty (SemRef ref sp sem)
+              Nothing -> SemRef ref sp sem
+        in evalRef env ref sp (ExternUncurriedApp spine') sem
+    SemLet ident val k ->
+      SemLet ident val \nextVal ->
+        makeLet Nothing (k nextVal) \nextFn ->
+          evalUncurriedApp (bindLocal (bindLocal env (One nextVal)) (One nextFn)) nextFn spine
+    NeutFail err ->
+      NeutFail err
+    hd' ->
+      let 
+        finalHd = case mbTy of
+          Just ty -> SemTyped ty hd'
+          Nothing -> hd'
+      in guardFailOver identity spine (NeutUncurriedApp finalHd)
 
+-- | Évalue l'application d'une fonction décurryfiée avec effets (UncurriedEffectApp).
 evalUncurriedEffectApp :: Env -> BackendSemantics -> Spine BackendSemantics -> BackendSemantics
-evalUncurriedEffectApp env hd spine = case hd of
-  SemMkEffectFn mk ->
-    evalUncurriedBeta NeutUncurriedEffectApp mk spine
-  SemLet ident val k ->
-    SemLet ident val \nextVal ->
-      makeLet Nothing (k nextVal) \nextFn ->
-        evalUncurriedEffectApp (bindLocal (bindLocal env (One nextVal)) (One nextFn)) nextFn spine
-  NeutFail err ->
-    NeutFail err
-  _ ->
-    guardFailOver identity spine (NeutUncurriedEffectApp hd)
+-- Ours
+evalUncurriedEffectApp env hd spine = go Nothing hd
+  where
+  go mbTy = case _ of
+    SemTyped ty a ->
+      go (Just ty) a
+    SemMkEffectFn mk ->
+      evalUncurriedBeta NeutUncurriedEffectApp mk spine
+    SemLet ident val k ->
+      SemLet ident val \nextVal ->
+        makeLet Nothing (k nextVal) \nextFn ->
+          evalUncurriedEffectApp (bindLocal (bindLocal env (One nextVal)) (One nextFn)) nextFn spine
+    NeutFail err ->
+      NeutFail err
+    hd' ->
+      let
+        finalHd = case mbTy of
+          Just ty -> SemTyped ty hd'
+          Nothing -> hd'
+      in guardFailOver identity spine (NeutUncurriedEffectApp finalHd)
 
+-- | Applique la beta-réduction sur une fonction décurryfiée saturée.
 evalUncurriedBeta :: (BackendSemantics -> Spine BackendSemantics -> BackendSemantics) -> MkFn BackendSemantics -> Spine BackendSemantics -> BackendSemantics
 evalUncurriedBeta fn mk spine = go mk (List.fromFoldable spine)
   where
@@ -452,6 +545,7 @@ evalUncurriedBeta fn mk spine = go mk (List.fromFoldable spine)
     MkFnApplied a, args ->
       fn a (List.toUnfoldable args)
 
+-- | Évalue séquentiellement une liste d'arguments (l'épine) et les applique à une sémantique de base.
 evalSpine :: Env -> BackendSemantics -> Array ExternSpine -> BackendSemantics
 evalSpine env = foldl go
   where
@@ -465,6 +559,7 @@ evalSpine env = foldl go
     ExternPrimOp op1 ->
       evalPrimOp env (Op1 op1 hd)
 
+-- | Reconstruit une expression neutre (non réductible) à partir d'une épine d'arguments.
 neutralSpine :: BackendSemantics -> Array ExternSpine -> BackendSemantics
 neutralSpine = foldl go
   where
@@ -478,6 +573,7 @@ neutralSpine = foldl go
     ExternPrimOp op1 ->
       NeutPrimOp (Op1 op1 hd)
 
+-- | Crée une application neutre (qui ne peut pas être évaluée plus avant) à partir d'une épine.
 neutralApp :: BackendSemantics -> Spine BackendSemantics -> BackendSemantics
 neutralApp hd spine
   | Array.null spine =
@@ -488,8 +584,12 @@ neutralApp hd spine
       _ ->
         NeutApp hd spine
 
+-- | Évalue l'accès à une propriété d'un enregistrement (record). Si l'enregistrement est statique, extrait directement la valeur.
 evalAccessor :: Env -> BackendSemantics -> BackendAccessor -> BackendSemantics
 evalAccessor env lhs accessor = floatLet lhs case _ of
+  -- Ours
+  SemTyped _ a ->
+    evalAccessor env a accessor
   SemRef ref spine sem ->
     evalRef env ref spine (ExternAccessor accessor) sem
   NeutLit (LitRecord props)
@@ -516,8 +616,12 @@ evalAccessor env lhs accessor = floatLet lhs case _ of
   lhs' ->
     NeutAccessor lhs' accessor
 
+-- | Évalue la mise à jour d'un enregistrement (record update).
 evalUpdate :: BackendSemantics -> Array (Prop BackendSemantics) -> BackendSemantics
 evalUpdate lhs props = floatLet lhs case _ of
+  -- Ours
+  SemTyped _ a ->
+    evalUpdate a props
   NeutLit (LitRecord props') ->
     NeutLit (LitRecord (NonEmptyArray.head <$> Array.groupAllBy (comparing propKey) (props <> props')))
   NeutUpdate r props' ->
@@ -525,6 +629,7 @@ evalUpdate lhs props = floatLet lhs case _ of
   lhs' ->
     NeutUpdate lhs' props
 
+-- | Évalue une structure conditionnelle (case/branches). Tente d'éliminer les branches mortes si la condition est statiquement connue.
 evalBranches :: Env -> NonEmptyArray (SemConditional BackendSemantics) -> Lazy BackendSemantics -> BackendSemantics
 evalBranches _ initConds initDef = go [] (NonEmptyArray.toArray initConds) initDef
   where
@@ -546,6 +651,7 @@ evalBranches _ initConds initDef = go [] (NonEmptyArray.toArray initConds) initD
         Nothing ->
           force def
 
+-- | Réécrit le contenu des branches d'une expression conditionnelle en appliquant une fonction de transformation.
 rewriteBranches :: (BackendSemantics -> BackendSemantics) -> BackendSemantics -> BackendSemantics
 rewriteBranches k = go
   where
@@ -559,9 +665,11 @@ rewriteBranches k = go
     sem ->
       k sem
 
+-- | Évalue une paire clé/valeur ou condition/résultat dans le contexte sémantique.
 evalPair :: forall f. Eval f => Env -> Pair f -> SemConditional BackendSemantics
 evalPair env (Pair a b) = SemConditional (defer \_ -> eval env a) (defer \_ -> eval env b)
 
+-- | Crée une liaison (bind) pour une expression avec effets de bord, préservant l'ordre d'évaluation.
 makeEffectBind :: Maybe Ident -> BackendSemantics -> (BackendSemantics -> BackendSemantics) -> BackendSemantics
 makeEffectBind = go
   where
@@ -579,6 +687,7 @@ makeEffectBind = go
       floatLet binding1 \nextBinding2 ->
         SemEffectBind ident1 nextBinding2 k1
 
+-- | Génère une déclaration locale (let) pour éviter la duplication de code lors de l'inlining.
 makeLet :: Maybe Ident -> BackendSemantics -> (BackendSemantics -> BackendSemantics) -> BackendSemantics
 makeLet = floatLetWith go
   where
@@ -591,9 +700,15 @@ makeLet = floatLetWith go
       k binding
     NeutVar _ ->
       k binding
+    -- Ours
+    NeutLit _ ->
+      k binding
+    NeutData _ _ _ _ _ ->
+      k binding
     _ ->
       SemLet ident binding k
 
+-- | Fait 'remonter' (float) une déclaration locale pour élargir sa portée si cela est sûr.
 floatLet :: BackendSemantics -> (BackendSemantics -> BackendSemantics) -> BackendSemantics
 floatLet = floatLetWith (const (#)) Nothing
 
@@ -617,13 +732,18 @@ floatLetWith = go
     _ ->
       f ident1 binding1 k1
 
+-- | Déréférence une variable ou une expression, tentant d'obtenir sa valeur sous-jacente.
 deref :: BackendSemantics -> BackendSemantics
 deref = case _ of
+  -- Ours
+  SemTyped _ a ->
+    deref a
   SemRef _ _ sem ->
     force sem
   sem ->
     sem
 
+-- | Évalue une opération primitive (arithmétique, booléenne, etc.) si ses arguments sont statiquement connus.
 evalPrimOp :: Env -> BackendOperator BackendSemantics -> BackendSemantics
 evalPrimOp env = case _ of
   Op1 op1 x ->
@@ -767,6 +887,7 @@ evalPrimOp env = case _ of
                 else
                   NeutPrimOp (Op2 op2 x' y')
 
+-- | Évalue statiquement une opération de comparaison (Ord) entre deux valeurs connues.
 evalPrimOpOrd :: forall a. Ord a => BackendOperatorOrd -> a -> a -> Boolean
 evalPrimOpOrd op x y = case op of
   OpEq -> x == y
@@ -778,6 +899,7 @@ evalPrimOpOrd op x y = case op of
 
 -- Duplicate because inlined operators behave differently with NaN.
 -- This just ensures we get the same behavior for const eval.
+-- | Évalue statiquement une comparaison entre deux nombres flottants (Number).
 evalPrimOpOrdNumber :: BackendOperatorOrd -> Number -> Number -> Boolean
 evalPrimOpOrdNumber op x y = case op of
   OpEq -> x == y
@@ -787,6 +909,7 @@ evalPrimOpOrdNumber op x y = case op of
   OpLt -> x < y
   OpLte -> x <= y
 
+-- | Évalue statiquement une opération arithmétique entre deux nombres flottants (Number).
 evalPrimOpNumNumber :: BackendOperatorNum -> BackendSemantics -> BackendSemantics -> Maybe BackendSemantics
 evalPrimOpNumNumber op x y
   | NeutLit (LitNumber a) <- deref x
@@ -799,6 +922,7 @@ evalPrimOpNumNumber op x y
   | otherwise =
       Nothing
 
+-- | Évalue statiquement une opération arithmétique entre deux entiers (Int).
 evalPrimOpNumInt :: BackendOperatorNum -> BackendSemantics -> BackendSemantics -> Maybe BackendSemantics
 evalPrimOpNumInt op x y
   | NeutLit (LitInt a) <- deref x
@@ -821,6 +945,7 @@ evalPrimOpNumInt op x y
   | otherwise =
       Nothing
 
+-- | Évalue statiquement la négation logique (Not) ou la négation de comparaison (ex: transformer == en !=).
 evalPrimOpNot :: BackendOperator BackendSemantics -> BackendSemantics
 evalPrimOpNot = case _ of
   Op1 op x ->
@@ -844,6 +969,7 @@ evalPrimOpNot = case _ of
       _ ->
         liftOp1 OpBooleanNot (liftOp2 op x y)
 
+-- | Inverse un opérateur de comparaison (ex: transforme Eq en NotEq, Lt en Gte).
 primOpOrdNot :: BackendOperatorOrd -> BackendOperatorOrd
 primOpOrdNot = case _ of
   OpEq -> OpNotEq
@@ -853,6 +979,7 @@ primOpOrdNot = case _ of
   OpGt -> OpLte
   OpGte -> OpLt
 
+-- | Détermine si un opérateur binaire primitif est associatif (utile pour la réorganisation des expressions).
 isAssocPrimOp :: BackendOperator2 -> Boolean
 isAssocPrimOp = case _ of
   OpIntNum OpAdd -> true
@@ -862,8 +989,14 @@ isAssocPrimOp = case _ of
   OpStringAppend -> true
   _ -> false
 
+-- | Évalue ou réorganise une opération associative (comme l'addition ou la concaténation de chaînes) pour maximiser le repliage de constantes (constant folding).
 evalAssocOp :: Env -> Either (Qualified Ident) BackendOperator2 -> BackendSemantics -> BackendSemantics -> BackendSemantics
 evalAssocOp env op1 = case _, _ of
+  -- Ours
+  SemTyped _ a, b ->
+    evalAssocOp env op1 a b
+  a, SemTyped _ b ->
+    evalAssocOp env op1 a b
   SemAssocOp op2 as, SemAssocOp op3 bs
     | op1 == op2
     , op2 == op3 ->
@@ -903,6 +1036,7 @@ evalAssocOp' env@(Env e) op a b = case op of
   Right primOp ->
     evalPrimOp env (Op2 primOp a b)
 
+-- | Évalue une référence à une définition globale, en décidant s'il faut l'inliner ou la conserver comme référence neutre.
 evalRef :: Env -> EvalRef -> Array ExternSpine -> ExternSpine -> Lazy BackendSemantics -> BackendSemantics
 evalRef env@(Env e) ref spine last sem = case ref of
   EvalExtern qual
@@ -914,6 +1048,7 @@ evalRef env@(Env e) ref spine last sem = case ref of
   where
   spine' = snocSpine spine last
 
+-- | Évalue une référence globale appliquée à une épine d'arguments.
 evalRefSpine :: Env -> EvalRef -> Array ExternSpine -> Lazy BackendSemantics -> ExternSpine -> BackendSemantics
 evalRefSpine env ref spine sem = case _ of
   ExternApp _ ->
@@ -925,6 +1060,7 @@ evalRefSpine env ref spine sem = case _ of
   ExternPrimOp op ->
     evalPrimOp env (Op1 op (force sem))
 
+-- | Convertit une référence d'évaluation (EvalRef) en sémantique de backend.
 evalEvalRef :: EvalRef -> BackendSemantics
 evalEvalRef = case _ of
   EvalExtern qual ->
@@ -932,6 +1068,7 @@ evalEvalRef = case _ of
   EvalLocal ident lvl ->
     NeutLocal ident lvl
 
+-- | Ajoute un élément à la fin d'une épine d'arguments externes.
 snocSpine :: Array ExternSpine -> ExternSpine -> Array ExternSpine
 snocSpine spine = case _ of
   ExternApp apps ->
@@ -939,11 +1076,13 @@ snocSpine spine = case _ of
   other ->
     Array.snoc spine other
 
+-- | Prépare l'environnement pour l'évaluation d'un groupe de définitions mutuellement récursives.
 envForGroup :: Env -> EvalRef -> InlineAccessor -> Array (Qualified Ident) -> Env
 envForGroup env ref acc group
   | Array.null group = env
   | otherwise = addStop env ref acc
 
+-- | Tente d'évaluer une fonction externe (FFI) si une implémentation sémantique (ForeignEval) est fournie pour elle.
 evalExternFromImpl :: Env -> Qualified Ident -> Tuple BackendAnalysis ExternImpl -> Array ExternSpine -> Maybe BackendSemantics
 evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case spine of
   [] ->
@@ -1079,9 +1218,45 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case spine of
             Nothing
       _ ->
         Nothing
+  -- Ours
+  _ | Just { head: ExternAccessor acc@(GetProp prop), tail } <- Array.uncons spine ->
+    case impl of
+      ExternExpr group expr -> do
+        let ref = EvalExtern qual
+        case Map.lookup ref e.directives >>= Map.lookup (InlineProp prop) of
+          Just InlineAlways ->
+            Just $ evalSpine env (eval (envForGroup env ref (InlineProp prop) group) expr) spine
+          _ -> Nothing
+      ExternDict group props | Just (Tuple _ body) <- findProp prop props -> do
+        let ref = EvalExtern qual
+        case Map.lookup ref e.directives >>= Map.lookup (InlineProp prop) of
+          Just InlineAlways ->
+            Just $ evalSpine env (eval (envForGroup env ref (InlineProp prop) group) body) tail
+          _ -> Nothing
+      _ -> Nothing
+  _ | Just { head: ExternApp _, tail: tail1 } <- Array.uncons spine
+    , Just { head: ExternAccessor (GetProp prop), tail: tail2 } <- Array.uncons tail1 ->
+    case impl of
+      ExternExpr group fn -> do
+        let ref = EvalExtern qual
+        case Map.lookup ref e.directives >>= Map.lookup (InlineSpineProp prop) of
+          Just InlineAlways ->
+            Just $ evalSpine env (eval (envForGroup env ref (InlineSpineProp prop) group) fn) spine
+          _ -> Nothing
+      _ -> Nothing
+  _ | Just { head: ExternApp args, tail } <- Array.uncons spine ->
+    case impl of
+      ExternExpr group expr -> do
+        let ref = EvalExtern qual
+        case Map.lookup ref e.directives >>= Map.lookup InlineRef of
+          Just InlineAlways ->
+            Just $ evalSpine env (eval (envForGroup env ref InlineRef group) expr) spine
+          _ -> Nothing
+      _ -> Nothing
   _ ->
     Nothing
 
+-- | Tente d'évaluer une référence externe (FFI) si une implémentation sémantique est fournie.
 evalExternRefFromImpl :: Env -> Qualified Ident -> Tuple BackendAnalysis ExternImpl -> BackendSemantics
 evalExternRefFromImpl env qual (Tuple _ impl) = case impl of
   ExternExpr group (NeutralExpr expr)
@@ -1096,6 +1271,7 @@ evalExternRefFromImpl env qual (Tuple _ impl) = case impl of
   _ ->
     NeutVar qual
 
+-- | Vérifie si une expression syntaxique est une simple référence (identifiant).
 isRefExpr :: forall a. BackendSyntax a -> Boolean
 isRefExpr = case _ of
   Var _ -> true
@@ -1106,6 +1282,7 @@ isRefExpr = case _ of
   PrimOp _ -> true
   _ -> false
 
+-- | Modifie les heuristiques d'analyse (taille, pureté) d'une fonction en fonction des directives utilisateur (@inline, @noinline).
 analysisFromDirective :: BackendAnalysis -> InlineDirective -> BackendAnalysis
 analysisFromDirective (BackendAnalysis analysis) = case _ of
   InlineAlways ->
@@ -1117,39 +1294,49 @@ analysisFromDirective (BackendAnalysis analysis) = case _ of
   InlineDefault ->
     BackendAnalysis analysis
 
+-- | Lève une valeur booléenne native (True/False) dans le domaine sémantique du compilateur.
 liftBoolean :: Boolean -> BackendSemantics
 liftBoolean = NeutLit <<< LitBoolean
 
+-- | Lève une valeur entière native dans le domaine sémantique du compilateur.
 liftInt :: Int -> BackendSemantics
 liftInt = NeutLit <<< LitInt
 
+-- | Lève une valeur flottante native dans le domaine sémantique du compilateur.
 liftNumber :: Number -> BackendSemantics
 liftNumber = NeutLit <<< LitNumber
 
+-- | Lève une chaîne de caractères native dans le domaine sémantique du compilateur.
 liftString :: String -> BackendSemantics
 liftString = NeutLit <<< LitString
 
+-- | Lève un opérateur unaire primitif dans le domaine sémantique.
 liftOp1 :: BackendOperator1 -> BackendSemantics -> BackendSemantics
 liftOp1 op a = NeutPrimOp (Op1 op a)
 
+-- | Lève un opérateur binaire primitif dans le domaine sémantique.
 liftOp2 :: BackendOperator2 -> BackendSemantics -> BackendSemantics -> BackendSemantics
 liftOp2 op a b = NeutPrimOp (Op2 op a b)
 
+-- | Extrait statiquement une chaîne de caractères depuis le domaine sémantique, si elle est connue.
 caseString :: BackendSemantics -> Maybe String
 caseString = case _ of
   NeutLit (LitString a) -> Just a
   _ -> Nothing
 
+-- | Extrait statiquement un entier depuis le domaine sémantique, s'il est connu.
 caseInt :: BackendSemantics -> Maybe Int
 caseInt = case _ of
   NeutLit (LitInt a) -> Just a
   _ -> Nothing
 
+-- | Extrait statiquement un nombre flottant depuis le domaine sémantique, s'il est connu.
 caseNumber :: BackendSemantics -> Maybe Number
 caseNumber = case _ of
   NeutLit (LitNumber a) -> Just a
   _ -> Nothing
 
+-- | Contexte utilisé durant la phase de reconstruction (quote), gérant la profondeur (De Bruijn) et la pureté.
 newtype Ctx = Ctx
   { currentLevel :: Int
   , lookupExtern :: Qualified Ident -> Maybe String -> Maybe BackendAnalysis
@@ -1157,23 +1344,30 @@ newtype Ctx = Ctx
   , effect :: Boolean
   }
 
+-- | Incrémente le niveau de De Bruijn dans le contexte courant pour la gestion des variables liées.
 nextLevel :: Ctx -> Tuple Level Ctx
 nextLevel (Ctx ctx) = Tuple (Level ctx.currentLevel) $ Ctx ctx { currentLevel = ctx.currentLevel + 1 }
 
+-- | Marque le contexte d'évaluation comme contenant des effets de bord.
 effectfully :: Ctx -> Ctx
 effectfully (Ctx ctx)
   | ctx.effect = Ctx ctx
   | otherwise = Ctx ctx { effect = true }
 
+-- | Marque le contexte d'évaluation comme étant pur (sans effet de bord).
 purely :: Ctx -> Ctx
 purely (Ctx ctx)
   | ctx.effect = Ctx ctx { effect = false }
   | otherwise = Ctx ctx
 
+-- | Convertit une valeur du domaine sémantique (BackendSemantics) vers l'arbre de syntaxe optimisé (BackendExpr). C'est la phase de 'réification'.
 quote :: Ctx -> BackendSemantics -> BackendExpr
 quote = go
   where
   go ctx = case _ of
+    -- Ours
+    SemTyped ty a ->
+      build ctx $ Typed ty (go ctx a)
     -- Block constructors
     SemLet ident binding k -> do
       let Tuple level ctx' = nextLevel ctx
@@ -1281,6 +1475,7 @@ quote = go
     NeutFail err ->
       build ctx $ Fail err
 
+-- | Reconstruit une expression optimisée à partir de la syntaxe de base.
 build :: Ctx -> BackendSyntax BackendExpr -> BackendExpr
 build ctx = case _ of
   App (ExprSyntax _ (App hd tl1)) tl2 ->
@@ -1337,6 +1532,7 @@ build ctx = case _ of
   expr ->
     buildDefault ctx expr
 
+-- | Reconstruit une condition de branche (case) tout en essayant de la simplifier.
 buildBranchCond :: Ctx -> Pair BackendExpr -> BackendExpr -> BackendExpr
 buildBranchCond ctx pair def
   | Just expr <- simplifyCondIsTag ctx pair def =
@@ -1352,6 +1548,7 @@ buildBranchCond ctx pair def
   | otherwise =
       build ctx (Branch (NonEmptyArray.singleton pair) def)
 
+-- | Tente de simplifier statiquement une condition vérifiant le constructeur (tag) d'un type algébrique.
 simplifyCondIsTag :: Ctx -> Pair BackendExpr -> BackendExpr -> Maybe BackendExpr
 simplifyCondIsTag _ = case _, _ of
   Pair (ExprSyntax _ (PrimOp (Op1 (OpIsTag _) x1))) (ExprSyntax _ (Lit (LitBoolean false))), def@(ExprSyntax _ (PrimOp (Op1 (OpIsTag _) x2)))
@@ -1360,6 +1557,7 @@ simplifyCondIsTag _ = case _, _ of
   _, _ ->
     Nothing
 
+-- | Tente de simplifier statiquement une condition booléenne connue.
 simplifyCondBoolean :: Ctx -> Pair BackendExpr -> BackendExpr -> Maybe BackendExpr
 simplifyCondBoolean ctx = case _, _ of
   Pair expr body@(ExprSyntax _ (Lit (LitBoolean body'))), ExprSyntax _ (Lit (LitBoolean other))
@@ -1377,6 +1575,7 @@ simplifyCondBoolean ctx = case _, _ of
   _, _ ->
     Nothing
 
+-- | Vérifie si une expression est un simple prédicat sans effets de bord.
 isSimplePredicate :: BackendExpr -> Boolean
 isSimplePredicate = case _ of
   ExprSyntax _ expr ->
@@ -1389,6 +1588,7 @@ isSimplePredicate = case _ of
   _ ->
     false
 
+-- | Élimine la branche 'else' (par défaut) si les autres branches couvrent déjà de manière exhaustive les cas possibles statiquement.
 simplifyCondRedundantElse :: Ctx -> Pair BackendExpr -> BackendExpr -> Maybe BackendExpr
 simplifyCondRedundantElse ctx = case _, _ of
   Pair expr1 body1, ExprSyntax _ (Branch pairs _)
@@ -1398,6 +1598,7 @@ simplifyCondRedundantElse ctx = case _, _ of
   _, _ ->
     Nothing
 
+-- | Remonte (lift) les opérateurs logiques 'Et' hors des branches conditionnelles pour simplifier le flot de contrôle.
 simplifyCondLiftAnd :: Ctx -> Pair BackendExpr -> BackendExpr -> Maybe BackendExpr
 simplifyCondLiftAnd ctx pair def1 = case pair of
   Pair x (ExprSyntax _ (Branch pairs def2))
@@ -1407,12 +1608,15 @@ simplifyCondLiftAnd ctx pair def1 = case pair of
   _ ->
     Nothing
 
+-- | Reconstruit une référence marquée comme 'stoppée' pour empêcher son inlining infini.
 buildStop :: Ctx -> Qualified Ident -> BackendExpr
 buildStop ctx@(Ctx { analyze }) stop = ExprRewrite (analyze ctx (Var stop)) (RewriteStop stop)
 
+-- | Reconstruction par défaut (fallback) d'une expression syntaxique.
 buildDefault :: Ctx -> BackendSyntax BackendExpr -> BackendExpr
 buildDefault ctx@(Ctx { analyze }) expr = ExprSyntax (analyze ctx expr) expr
 
+-- | Réécrit une expression inlinée en s'assurant que les noms de variables ne rentrent pas en conflit (alpha-renommage) avec le scope courant.
 rewriteInline :: Maybe Ident -> Level -> BackendExpr -> BackendExpr -> BackendExpr
 rewriteInline ident level binding body = do
   let
@@ -1425,12 +1629,14 @@ rewriteInline ident level binding body = do
         s2
   ExprRewrite (withRewrite (bound level powAnalysis)) $ RewriteInline ident level binding body
 
+-- | Vérifie si une expression Syntaxique n'est qu'une simple référence vers une autre variable.
 isReference :: forall a. BackendSyntax a -> Boolean
 isReference = case _ of
   Var _ -> true
   Local _ _ -> true
   _ -> false
 
+-- | Décide si une fonction peut subir une eta-réduction (ex: transformer \x -> f x en f).
 shouldEtaReduce :: Level -> BackendExpr -> BackendExpr -> Maybe BackendExpr
 shouldEtaReduce level1 binding = case _ of
   ExprSyntax _ (Abs args1 (ExprSyntax _ (App (ExprSyntax _ (Local _ level2)) args2)))
@@ -1445,6 +1651,7 @@ shouldEtaReduce level1 binding = case _ of
     ExprSyntax _ (Local _ l2) -> l1 == l2
     _ -> false
 
+-- | Décide s'il faut inliner l'allocation d'un constructeur de type algébrique.
 shouldUnpackCtor :: Maybe Ident -> Level -> BackendExpr -> BackendExpr -> Maybe BackendExpr
 shouldUnpackCtor ident level a body = do
   let BackendAnalysis s2 = analysisOf body
@@ -1458,6 +1665,7 @@ shouldUnpackCtor ident level a body = do
     _ ->
       Nothing
 
+-- | Décide s'il faut inliner l'allocation d'un enregistrement (record).
 shouldUnpackRecord :: Maybe Ident -> Level -> BackendExpr -> BackendExpr -> Maybe BackendExpr
 shouldUnpackRecord ident level binding body = do
   let BackendAnalysis s2 = analysisOf body
@@ -1471,6 +1679,7 @@ shouldUnpackRecord ident level binding body = do
     _ ->
       Nothing
 
+-- | Décide s'il faut inliner la mise à jour d'un enregistrement.
 shouldUnpackUpdate :: Maybe Ident -> Level -> BackendExpr -> BackendExpr -> Maybe BackendExpr
 shouldUnpackUpdate ident level binding body = do
   let BackendAnalysis s2 = analysisOf body
@@ -1484,6 +1693,7 @@ shouldUnpackUpdate ident level binding body = do
     _ ->
       Nothing
 
+-- | Décide s'il faut inliner l'allocation d'un tableau (array).
 shouldUnpackArray :: Maybe Ident -> Level -> BackendExpr -> BackendExpr -> Maybe BackendExpr
 shouldUnpackArray ident level binding body = do
   let BackendAnalysis s2 = analysisOf body
@@ -1497,6 +1707,7 @@ shouldUnpackArray ident level binding body = do
     _ ->
       Nothing
 
+-- | Décide si une expression conditionnelle (case) doit être distribuée à travers son application.
 shouldDistributeBranches :: Maybe Ident -> Level -> BackendExpr -> BackendExpr -> Maybe BackendExpr
 shouldDistributeBranches ident level a body = do
   let BackendAnalysis s2 = analysisOf body
@@ -1512,6 +1723,7 @@ shouldDistributeBranches ident level a body = do
     _ ->
       Nothing
 
+-- | Distribue les applications régulières sur les branches d'une conditionnelle.
 shouldDistributeBranchApps :: BackendAnalysis -> NonEmptyArray (Pair BackendExpr) -> BackendExpr -> NonEmptyArray BackendExpr -> Maybe BackendExpr
 shouldDistributeBranchApps analysis1 branches def spine =
   if NonEmptyArray.all ((_ <= Deref) <<< _.complexity <<< unwrap <<< analysisOf) spine then do
@@ -1521,6 +1733,7 @@ shouldDistributeBranchApps analysis1 branches def spine =
   else
     Nothing
 
+-- | Distribue les applications décurryfiées sur les branches d'une conditionnelle.
 shouldDistributeBranchUncurriedApps :: BackendAnalysis -> NonEmptyArray (Pair BackendExpr) -> BackendExpr -> Array BackendExpr -> Maybe BackendExpr
 shouldDistributeBranchUncurriedApps analysis1 branches def spine =
   if Array.all ((_ <= Deref) <<< _.complexity <<< unwrap <<< analysisOf) spine then do
@@ -1530,18 +1743,21 @@ shouldDistributeBranchUncurriedApps analysis1 branches def spine =
   else
     Nothing
 
+-- | Distribue l'accès à une propriété sur les branches d'une conditionnelle.
 shouldDistributeBranchAccessor :: BackendAnalysis -> NonEmptyArray (Pair BackendExpr) -> BackendExpr -> BackendAccessor -> Maybe BackendExpr
 shouldDistributeBranchAccessor analysis1 branches def acc = do
   -- TODO: Not sure what what to do about analysis, or if it matters.
   let analysis = bump analysis1
   Just $ ExprRewrite (withRewrite analysis) $ RewriteDistBranchesOp branches def (DistAccessor acc)
 
+-- | Distribue un opérateur primitif unaire sur les branches d'une conditionnelle.
 shouldDistributeBranchPrimOp1 :: BackendAnalysis -> NonEmptyArray (Pair BackendExpr) -> BackendExpr -> BackendOperator1 -> Maybe BackendExpr
 shouldDistributeBranchPrimOp1 analysis1 branches def op = do
   -- TODO: Not sure what what to do about analysis, or if it matters.
   let analysis = bump analysis1
   Just $ ExprRewrite (withRewrite analysis) $ RewriteDistBranchesOp branches def (DistPrimOp1 op)
 
+-- | Distribue un opérateur primitif binaire (argument gauche) sur les branches d'une conditionnelle.
 shouldDistributeBranchPrimOp2L :: BackendAnalysis -> NonEmptyArray (Pair BackendExpr) -> BackendExpr -> BackendOperator2 -> BackendExpr -> Maybe BackendExpr
 shouldDistributeBranchPrimOp2L analysis1 branches def op2 rhs =
   if (unwrap (analysisOf rhs)).complexity <= Deref then do
@@ -1551,6 +1767,7 @@ shouldDistributeBranchPrimOp2L analysis1 branches def op2 rhs =
   else
     Nothing
 
+-- | Distribue un opérateur primitif binaire (argument droit) sur les branches d'une conditionnelle.
 shouldDistributeBranchPrimOp2R :: BackendAnalysis -> NonEmptyArray (Pair BackendExpr) -> BackendExpr -> BackendExpr -> BackendOperator2 -> Maybe BackendExpr
 shouldDistributeBranchPrimOp2R analysis1 branches def lhs op2 =
   if (unwrap (analysisOf lhs)).complexity <= Deref then do
@@ -1560,6 +1777,7 @@ shouldDistributeBranchPrimOp2R analysis1 branches def lhs op2 =
   else
     Nothing
 
+-- | Décide si une abstraction curryfiée imbriquée doit être transformée en une seule abstraction multi-arguments (décurryfication).
 shouldUncurryAbs :: Maybe Ident -> Level -> BackendExpr -> BackendExpr -> Maybe BackendExpr
 shouldUncurryAbs ident level a b = do
   let BackendAnalysis s2 = analysisOf b
@@ -1578,6 +1796,7 @@ shouldUncurryAbs ident level a b = do
     _ ->
       Nothing
 
+-- | Décide s'il est bénéfique d'inliner complètement le contenu d'un bloc 'let' à ses points d'utilisation.
 shouldInlineLet :: Level -> BackendExpr -> BackendExpr -> Boolean
 shouldInlineLet level a b = do
   let BackendAnalysis s1 = analysisOf a
@@ -1594,10 +1813,12 @@ shouldInlineLet level a b = do
         || (isAbs a && (total == 1 || Map.isEmpty s1.usages || s1.size < 16))
         || (isKnownEffect a && total == 1)
 
+-- | Décide s'il faut inliner une référence externe en se basant sur son heuristique de taille et d'usage.
 shouldInlineExternReference :: Qualified Ident -> BackendAnalysis -> NeutralExpr -> Boolean
 shouldInlineExternReference _ (BackendAnalysis s) _ =
   s.complexity <= Deref && s.size < 16
 
+-- | Décide s'il faut inliner l'application d'une fonction externe en analysant le coût et le contexte de l'application.
 shouldInlineExternApp :: Qualified Ident -> BackendAnalysis -> NeutralExpr -> Spine BackendSemantics -> Boolean
 shouldInlineExternApp _ (BackendAnalysis s) _ args =
   (s.complexity <= Deref && s.size < 16)
@@ -1607,15 +1828,45 @@ shouldInlineExternApp _ (BackendAnalysis s) _ args =
   where
   delayed = Array.length s.args > 0
 
+-- | Analyse un argument d'application externe pour déterminer son impact sur la décision d'inlining.
 shouldInlineExternAppArg :: Usage -> BackendSemantics -> Boolean
 shouldInlineExternAppArg (Usage u) = case _ of
   SemLam _ _ -> u.captured <= CaptureBranch && u.total > 0 && u.call == u.total
   _ -> false
 
+-- Ours
+-- | Vérifie si la sémantique d'une expression implique des effets de bord.
+isEffectSemantics :: BackendSemantics -> Boolean
+isEffectSemantics = case _ of
+  SemTyped _ a ->
+    isEffectSemantics a
+  SemMkEffectFn _ ->
+    true
+  SemEffectBind _ _ _ ->
+    true
+  SemEffectPure _ ->
+    true
+  SemEffectDefer _ ->
+    true
+  _ ->
+    false
+
+-- | Vérifie si une expression est l'application partielle d'un opérateur associatif.
+isPartialAssocOp :: BackendSemantics -> Boolean
+isPartialAssocOp = case _ of
+  SemTyped _ a ->
+    isPartialAssocOp a
+  SemAssocOp _ _ ->
+    true
+  _ ->
+    false
+
+-- | Décide s'il faut inliner l'accès externe à un enregistrement.
 shouldInlineExternAccessor :: Qualified Ident -> BackendAnalysis -> NeutralExpr -> BackendAccessor -> Boolean
 shouldInlineExternAccessor _ (BackendAnalysis s) _ _ =
   s.complexity <= Deref && s.size < 16
 
+-- | Décide s'il faut inliner un littéral externe (souvent toujours vrai).
 shouldInlineExternLiteral :: Literal NeutralExpr -> Boolean
 shouldInlineExternLiteral = case _ of
   LitInt _ -> true
@@ -1626,6 +1877,7 @@ shouldInlineExternLiteral = case _ of
   LitArray a -> Array.null a
   LitRecord r -> Array.null r
 
+-- | Vérifie si l'expression est une abstraction (fonction).
 isAbs :: BackendExpr -> Boolean
 isAbs = syntaxOf >>> case _ of
   Just (Abs _ _) -> true
@@ -1634,6 +1886,7 @@ isAbs = syntaxOf >>> case _ of
   Just (EffectDefer _) -> true
   _ -> false
 
+-- | Vérifie si l'expression correspond à un effet de bord connu et inlinable.
 isKnownEffect :: BackendExpr -> Boolean
 isKnownEffect = syntaxOf >>> case _ of
   Just (PrimEffect _) -> true
@@ -1642,10 +1895,12 @@ isKnownEffect = syntaxOf >>> case _ of
   Just (EffectDefer _) -> true
   _ -> false
 
+-- | Une expression syntaxique neutre (normale), qui ne peut plus être réduite ou évaluée statiquement.
 newtype NeutralExpr = NeutralExpr (BackendSyntax NeutralExpr)
 
 derive instance Newtype NeutralExpr _
 
+-- | Le point d'entrée principal de l'optimisation pour une fonction donnée. Orchestre l'évaluation partielle, l'inlining et la réification (quote).
 optimize :: Boolean -> Ctx -> Env -> Qualified Ident -> Int -> BackendExpr -> Tuple (Array BackendExpr) BackendExpr
 optimize traceSteps ctx env (Qualified mn (Ident id)) initN originalExpr =
   go (if traceSteps then pure originalExpr else List.Nil) initN originalExpr
@@ -1668,9 +1923,11 @@ optimize traceSteps ctx env (Qualified mn (Ident id)) initN originalExpr =
         let BackendAnalysis { rewrite } = analysisOf expr2
         Tuple rewrite expr2
 
+-- | Gèle (freeze) une expression optimisée pour la transformer en sémantique neutre, prête à être utilisée ou inlinée par d'autres modules.
 freeze :: BackendExpr -> Tuple BackendAnalysis NeutralExpr
 freeze init = Tuple (analysisOf init) $ foldBackendExpr NeutralExpr (\_ neutExpr -> neutExpr) init
 
+-- | Parcourt de manière récursive (fold) un arbre d'expressions optimisées (BackendExpr).
 foldBackendExpr :: forall a. (BackendSyntax a -> a) -> (BackendRewrite BackendExpr -> a -> a) -> BackendExpr -> a
 foldBackendExpr foldSyntax foldRewrite = go
   where
@@ -1713,6 +1970,7 @@ foldBackendExpr foldSyntax foldRewrite = go
             DistPrimOp2R lhs op2 ->
               foldSyntax $ PrimOp $ Op2 op2 (go lhs) branches'
 
+-- | Évalue et construit une fonction décurryfiée (MkFn) dans le domaine sémantique.
 evalMkFn :: Env -> Int -> BackendSemantics -> MkFn BackendSemantics
 evalMkFn env n sem
   | n == 0 = MkFnApplied sem
@@ -1725,6 +1983,7 @@ evalMkFn env n sem
             let env' = bindLocal env (One nextArg)
             evalMkFn env' (n - 1) (evalApp env' sem [ nextArg ])
 
+-- | Réécrit une application décurryfiée en ajustant l'arité et les arguments selon le contexte.
 mkUncurriedAppRewrite :: Env -> BackendSemantics -> Int -> BackendSemantics
 mkUncurriedAppRewrite env hd = go []
   where
@@ -1734,6 +1993,7 @@ mkUncurriedAppRewrite env hd = go []
         SemLam Nothing \arg ->
           go (Array.snoc acc arg) (n - 1)
 
+-- | Construit une fonction décurryfiée (MkFn) à partir d'une liste d'arguments extraits.
 mkFnFromArgs :: forall f. Eval f => Env -> Array (Tuple (Maybe Ident) Level) -> f -> BackendSemantics
 mkFnFromArgs env args body =
   SemMkFn $ foldr
@@ -1744,11 +2004,13 @@ mkFnFromArgs env args body =
     args
     env
 
+-- | Gestionnaire d'échec silencieux lors de l'évaluation sémantique. Renvoie l'expression non évaluée si l'optimisation échoue.
 guardFail :: BackendSemantics -> (BackendSemantics -> BackendSemantics) -> BackendSemantics
 guardFail sem k = case sem of
   NeutFail err -> NeutFail err
   _ -> k sem
 
+-- | Gestionnaire d'échec sur une structure itérable lors de l'évaluation sémantique.
 guardFailOver :: forall f a. Foldable f => (a -> BackendSemantics) -> f a -> (f a -> BackendSemantics) -> BackendSemantics
 guardFailOver f as k =
   case Foldable.findMap (toFail <<< f) as of

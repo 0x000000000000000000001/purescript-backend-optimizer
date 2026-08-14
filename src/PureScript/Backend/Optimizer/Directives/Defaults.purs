@@ -1,3 +1,6 @@
+-- | Directives par Défaut (Defaults.purs)
+-- | Contient la liste des annotations magiques de compilation appliquées par défaut aux fonctions de la bibliothèque standard (ex: forcer l'inlining de la fonction id ou de certains opérateurs arithmétiques critiques) avant même d'analyser le code utilisateur.
+
 module PureScript.Backend.Optimizer.Directives.Defaults where
 
 defaultDirectives :: String
@@ -28,6 +31,34 @@ defaultDirectives =
   Control.Bind.discard arity=1
 
   Control.Category.categoryFn.identity always
+
+  -- Ours
+  Data.Ring.negate always
+  Data.Ring.sub always
+  Data.Ring.ringInt always
+  Data.Ring.ringNumber always
+  Test.Polymorphism.intMonoidish always
+  Test.Polymorphism.polyLoop always
+  Test.Polymorphism.polyLoop1 always
+  Data.Semiring.add always
+  Data.Semiring.semiringInt always
+  Data.Semiring.semiringNumber always
+  Data.Ord.compare always
+  Data.Ord.lessThan always
+  Data.Ord.greaterThan always
+  Data.Ord.lessThanOrEq always
+  Data.Ord.greaterThanOrEq always
+  Data.Ord.ordInt always
+  Data.Eq.eq always
+  Data.Eq.notEq always
+  Data.Eq.eqInt always
+
+  Test.RBTree.lessThan always
+  Test.RBTree.greaterThan always
+  Test.RBTree.max always
+
+  Test.LazyEvaluation.force always
+  Test.LazyEvaluation.defer always
 
   Control.Monad.ap arity=1
   Control.Monad.lift1 arity=1
@@ -141,7 +172,6 @@ defaultDirectives =
 
   Control.Monad.ST.Internal.modify arity=2
   Effect.applyEffect.apply arity=2
-  Effect.Ref.modify arity=2
   Record.Builder.build arity=1
   Record.Builder.rename arity=8
   """

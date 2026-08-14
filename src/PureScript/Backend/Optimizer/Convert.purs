@@ -1,3 +1,7 @@
+-- | Passerelle CoreFn -> BackendSyntax (Convert.purs)
+-- | La toute première étape de la compilation. Ce module traduit l'AST brut du compilateur PureScript (CoreFn) vers l'AST interne de l'optimiseur (BackendSyntax).
+-- | C'est ici qu'on abandonne le modèle abstrait de PureScript pour un modèle plus proche de l'exécution machine.
+
 -- | ### Algorithm Summary for Optimized Pattern Matching Conversion
 -- |
 -- | The algorithm used for converting `ExprCase` into `BackendExpr` is based on two papers:
@@ -46,6 +50,8 @@
 module PureScript.Backend.Optimizer.Convert where
 
 import Prelude
+-- Ours
+import Debug as Debug
 
 import Control.Alternative (guard, (<|>))
 import Control.Monad.RWS (ask)
@@ -58,7 +64,11 @@ import Data.Function (on)
 import Data.FunctorWithIndex (mapWithIndex)
 import Data.Map (Map, SemigroupMap(..))
 import Data.Map as Map
+-- Ours
+import Data.String as String
 import Data.Maybe (Maybe(..), fromJust, fromMaybe, maybe)
+-- Ours
+import PureScript.Backend.Optimizer.Debug as Debug
 import Data.Monoid as Monoid
 import Data.Monoid.Additive (Additive(..))
 import Data.Newtype (class Newtype, over, unwrap)
@@ -70,8 +80,11 @@ import Data.Traversable (class Foldable, Accum, foldr, for, mapAccumL, mapAccumR
 import Data.TraversableWithIndex (forWithIndex)
 import Data.Tuple (Tuple(..), fst, snd)
 import Partial.Unsafe (unsafeCrashWith, unsafePartial)
-import PureScript.Backend.Optimizer.Analysis (BackendAnalysis, analyze, analyzeEffectBlock)
-import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Comment, ConstructorType(..), Expr(..), Guard(..), Ident(..), Literal(..), Meta(..), Module(..), ModuleName(..), ProperName, Qualified(..), ReExport, findProp, propKey, propValue, qualifiedModuleName, unQualified)
+-- Ours
+import Effect.Unsafe (unsafePerformEffect)
+import Effect.Console as Console
+import PureScript.Backend.Optimizer.Analysis (BackendAnalysis, analyze, analyzeEffectBlock, analysisOf)
+import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), ClassDecl, Comment, ConstructorType(..), DataDecl, Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Meta(..), Module(..), ModuleName(..), ProperName(..), Qualified(..), ReExport, exprAnn, findProp, propKey, propValue, qualifiedModuleName, unQualified)
 import PureScript.Backend.Optimizer.Directives (DirectiveHeaderResult, parseDirectiveHeader)
 import PureScript.Backend.Optimizer.Semantics (BackendExpr(..), BackendSemantics, Ctx(..), DataTypeMeta, Env(..), EvalRef(..), ExternImpl(..), ExternSpine, InlineAccessor(..), InlineDirective(..), InlineDirectiveMap, NeutralExpr(..), build, evalExternFromImpl, evalExternRefFromImpl, freeze, optimize)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
@@ -94,7 +107,10 @@ type BackendModule =
   , bindings :: Array (BackendBindingGroup Ident NeutralExpr)
   , exports :: Set Ident
   , reExports :: Set ReExport
-  , foreign :: Set Ident
+  -- Ours
+  , dataDecls :: Array DataDecl
+  , classDecls :: Array ClassDecl
+  , foreign :: Map Ident (Maybe ExprType)
   , implementations :: BackendImplementations
   , directives :: InlineDirectiveMap
   }
@@ -124,13 +140,11 @@ toBackendModule (Module mod) env = do
 
     ctors :: Array (Tuple ProperName (Tuple Ident (Array String)))
     ctors = do
-      Binding _ _ value <- mod.decls >>= case _ of
-        Rec bindings -> bindings
-        NonRec binding -> pure binding
-      case value of
-        ExprConstructor _ dataTy ctor fields ->
-          pure $ Tuple dataTy (Tuple ctor fields)
-        _ -> []
+      -- Ours
+      decl <- mod.dataDecls
+      ctor <- decl.constructors
+      let fieldNames = Array.mapWithIndex (\i _ -> "value" <> show i) ctor.fields
+      pure $ Tuple (ProperName decl.name) (Tuple (Ident ctor.name) fieldNames)
 
     dataTypes :: Map ProperName DataTypeMeta
     dataTypes = ctors
@@ -161,7 +175,12 @@ toBackendModule (Module mod) env = do
     localExports = Set.fromFoldable mod.exports
 
     isBindingUsed :: forall a. Set (Qualified Ident) -> Tuple Ident a -> Boolean
-    isBindingUsed deps (Tuple ident _) = Set.member ident localExports || Set.member (Qualified (Just mod.name) ident) deps
+    -- Ours
+    isBindingUsed deps (Tuple ident _) = 
+      let res = Set.member ident localExports || Set.member (Qualified (Just mod.name) ident) deps
+      in if unwrap mod.name == "Data.Set"
+         then res
+         else res
 
     usedBindings :: Accum (Set (Qualified Ident)) (Array (BackendBindingGroup Ident NeutralExpr))
     usedBindings = mapAccumR
@@ -202,14 +221,21 @@ toBackendModule (Module mod) env = do
   Tuple moduleBindings.accum.optimizationSteps $
     { name: mod.name
     , comments: mod.comments
+    -- Ours
+    , dataDecls: mod.dataDecls
+    , classDecls: mod.classDecls
     , imports: usedImports
     , dataTypes: Map.filter (Array.any (isBindingUsed usedBindings.accum) <<< Map.toUnfoldable <<< _.constructors) dataTypes
     , bindings: usedBindings.value
     , exports: localExports
     , reExports: Set.fromFoldable mod.reExports
     , implementations: moduleBindings.accum.moduleImplementations
-    , directives: directives.exports
-    , foreign: Set.fromFoldable mod.foreign
+    -- Ours
+    , directives: moduleBindings.accum.directives
+        # Map.filterWithKey (\k _ -> case k of
+            EvalExtern (Qualified (Just mn) _) -> mn == mod.name
+            _ -> false)
+    , foreign: mod.foreign
     }
 
 type WithDeps = Tuple (Set (Qualified Ident))
@@ -248,8 +274,19 @@ toTopLevelBackendBinding group env (Binding _ ident cfn) = do
   let qualifiedIdent = Qualified (Just env.currentModule) ident
   let backendExpr = toBackendExpr cfn env
   let enableTracing = Set.member qualifiedIdent env.traceIdents
+  -- Ours
+  let
+    mbType = case backendExpr of
+      ExprSyntax _ (Typed ty _) -> Just ty
+      _ -> Nothing
   let Tuple mbSteps optimizedExpr = optimize enableTracing (getCtx env) evalEnv qualifiedIdent env.rewriteLimit backendExpr
-  let Tuple impl expr' = toExternImpl env group optimizedExpr
+  -- Ours
+  let
+    optimizedExprWithTy = case mbType of
+      Just ty -> ExprSyntax (analysisOf optimizedExpr) (Typed ty optimizedExpr)
+      Nothing -> optimizedExpr
+  let isDict = fst (isTypeClassDictionaryWithProps cfn)
+  let Tuple impl expr' = toExternImpl env group isDict optimizedExprWithTy
   { accum: env
       { implementations = Map.insert qualifiedIdent impl env.implementations
       , moduleImplementations = Map.insert qualifiedIdent impl env.moduleImplementations
@@ -308,31 +345,86 @@ inferTransitiveDirective directives impl backendExpr cfn = fromImpl <|> fromBack
     _ ->
       Nothing
 
-  fromBackendExpr = case backendExpr of
-    ExprSyntax _ (App (ExprSyntax _ (Var qual)) args) ->
-      case Map.lookup (EvalExtern qual) directives >>= Map.lookup InlineRef of
-        Just (InlineArity n)
-          | ExprApp (Ann { meta: Just IsSyntheticApp }) _ _ <- cfn
-          , arity <- NonEmptyArray.length args
-          , arity >= n ->
-              Just $ Map.singleton InlineRef InlineAlways
-        _ ->
-          Nothing
-    _ ->
-      Nothing
+  -- Ours
+  fromBackendExpr = case cfn of
+    ExprApp (Ann { meta: Just IsSyntheticApp }) _ _ ->
+      Just $ Map.singleton InlineRef InlineAlways
+    ExprAbs (Ann { meta: Just meta }) _ _
+      | meta == IsTypeClassConstructor || meta == IsNewtype ->
+          Just $ Map.singleton InlineRef InlineAlways
+    cfn' | Tuple isDict props <- isTypeClassDictionaryWithProps cfn', isDict ->
+      Just $ Map.fromFoldable $
+        [ Tuple InlineRef InlineAlways ] <> map (\p -> Tuple (InlineProp p) InlineAlways) props
+    _ -> case backendExpr of
+      ExprSyntax _ (App (ExprSyntax _ (Var qual)) args) ->
+        case Map.lookup (EvalExtern qual) directives >>= Map.lookup InlineRef of
+          Just (InlineArity n)
+            | arity <- NonEmptyArray.length args
+            , arity >= n ->
+                Just $ Map.singleton InlineRef InlineAlways
+          _ ->
+            Nothing
+      _ ->
+        Nothing
 
-toExternImpl :: ConvertEnv -> Array (Qualified Ident) -> BackendExpr -> Tuple (Tuple BackendAnalysis ExternImpl) NeutralExpr
-toExternImpl env group expr = case expr of
-  ExprSyntax analysis (Lit (LitRecord props)) -> do
+
+
+isTypeClassDictionaryWithProps :: Expr Ann -> Tuple Boolean (Array String)
+isTypeClassDictionaryWithProps expr = case expr of
+  ExprAbs (Ann { type: Just ty }) _ body | isConstrainedType ty -> 
+    Tuple true (snd (isTypeClassDictionaryWithProps body))
+  ExprAbs _ _ body -> isTypeClassDictionaryWithProps body
+  ExprLet _ _ body -> isTypeClassDictionaryWithProps body
+  ExprApp _ lhs (ExprLit _ (LitRecord props))
+    | Just meta <- getConstructorMeta lhs
+    , meta == IsTypeClassConstructor || meta == IsNewtype -> Tuple true (map propKey props)
+  _ -> Tuple false []
+  where
+  getConstructorMeta = case _ of
+    ExprVar (Ann { meta: Just meta }) _ -> Just meta
+    ExprApp _ lhs _ -> getConstructorMeta lhs
+    _ -> Nothing
+
+-- Ours
+isConstrainedType :: ExprType -> Boolean
+isConstrainedType = case _ of
+  ConstrainedType _ _ -> true
+  ForAll _ ty -> isConstrainedType ty
+  _ -> false
+
+toExternImpl :: ConvertEnv -> Array (Qualified Ident) -> Boolean -> BackendExpr -> Tuple (Tuple BackendAnalysis ExternImpl) NeutralExpr
+toExternImpl env group isDict expr = case unwrapTyped expr of
+  ExprSyntax _ (Lit (LitRecord props)) -> do
     let propsWithAnalysis = map freeze <$> props
-    Tuple (Tuple analysis (ExternDict group propsWithAnalysis)) (NeutralExpr (Lit (LitRecord (map snd <$> propsWithAnalysis))))
+    let Tuple _ expr' = freeze expr
+    Tuple (Tuple (analysisOf expr) (ExternDict group propsWithAnalysis)) expr'
+  app | isDict, Just props <- getLitRecord app -> do
+    let propsWithAnalysis = map freeze <$> props
+    -- Ours
+    let Tuple _ expr' = freeze expr
+    Tuple (Tuple (analysisOf expr) (ExternDict group propsWithAnalysis)) expr'
   ExprSyntax _ (CtorDef ct ty tag fields) -> do
-    let Tuple analysis expr' = freeze expr
+    -- Ours
+    let Tuple _ expr' = freeze expr
     let meta = unsafePartial $ fromJust $ Map.lookup ty env.dataTypes
-    Tuple (Tuple analysis (ExternCtor meta ct ty tag fields)) expr'
+    -- Ours
+    Tuple (Tuple (analysisOf expr) (ExternCtor meta ct ty tag fields)) expr'
   _ -> do
     let Tuple analysis expr' = freeze expr
+    -- Ours
+    let 
+      t = if isDict then Debug.trace "toExternImpl fallback for Dict!" \_ -> unit else unit
     Tuple (Tuple analysis (ExternExpr group expr')) expr'
+  -- Ours
+  where
+  getLitRecord = case _ of
+    ExprSyntax _ (App _ rhs) -> getLitRecord (NonEmptyArray.last rhs)
+    ExprSyntax _ (Lit (LitRecord props)) -> Just props
+    _ -> Nothing
+
+  unwrapTyped = case _ of
+    ExprSyntax _ (Typed _ inner) -> unwrapTyped inner
+    other -> other
 
 topEnv :: Env -> Env
 topEnv (Env env) = Env env { locals = [] }
@@ -409,95 +501,106 @@ currentLevel :: ConvertM Level
 currentLevel env = Level env.currentLevel
 
 toBackendExpr :: Expr Ann -> ConvertM BackendExpr
-toBackendExpr = case _ of
-  ExprVar _ qi -> do
-    { currentModule, toLevel } <- ask
-    case qi of
-      Qualified Nothing ident | Just lvl <- Map.lookup ident toLevel ->
-        buildM (Local (Just ident) lvl)
-      Qualified (Just mn) ident | mn == currentModule, Just lvl <- Map.lookup ident toLevel ->
-        buildM (Local (Just ident) lvl)
-      Qualified (Just (ModuleName "Prim")) (Ident "undefined") ->
-        buildM PrimUndefined
-      Qualified Nothing ident ->
-        buildM (Var (Qualified (Just currentModule) ident))
-      _ ->
-        buildM (Var qi)
-  ExprLit _ lit ->
-    buildM <<< Lit =<< traverse toBackendExpr lit
-  ExprConstructor _ ty name fields -> do
-    { dataTypes } <- ask
-    let
-      ct = case Map.lookup ty dataTypes of
-        Just { constructors } | Map.size constructors == 1 -> ProductType
-        _ -> SumType
-    buildM (CtorDef ct ty name fields)
-  ExprAccessor _ a field ->
-    buildM <<< flip Accessor (GetProp field) =<< toBackendExpr a
-  ExprUpdate _ a bs ->
-    join $ (\x y -> buildM (Update x y))
-      <$> toBackendExpr a
-      <*> traverse (traverse toBackendExpr) bs
-  ExprAbs _ arg body -> do
-    lvl <- currentLevel
-    make $ Abs (NonEmptyArray.singleton (Tuple (Just arg) lvl)) (intro [ arg ] lvl (toBackendExpr body))
-  ExprApp _ a b
-    | ExprVar (Ann { meta: Just IsNewtype }) id <- a -> do
-        toBackendExpr b
-    | otherwise ->
-        make $ App (toBackendExpr a) (NonEmptyArray.singleton (toBackendExpr b))
-  ExprLet _ binds body ->
-    foldr go (toBackendExpr body) binds
-    where
-    go bind' next = case bind' of
-      NonRec (Binding _ ident expr) ->
-        makeLet (Just ident) (toBackendExpr expr) \_ -> next
-      Rec bindings | Just bindings' <- NonEmptyArray.fromArray bindings -> do
-        lvl <- currentLevel
-        let idents = (\(Binding _ ident _) -> ident) <$> bindings'
-        join $ (\x y -> buildM (LetRec lvl x y))
-          <$> intro idents lvl (traverse toBackendBinding bindings')
-          <*> intro idents lvl next
-      Rec _ ->
-        unsafeCrashWith "CoreFn empty Rec binding group"
-  ExprCase _ exprs alts ->
-    foldr
-      ( \expr next idents ->
-          makeLet Nothing (toBackendExpr expr) \tmp ->
-            next (Array.snoc idents tmp)
-      )
-      ( \idents ->
-          toInitialCaseRows idents alts \caseRows ->
-            buildCaseTreeFromRows caseRows
-      )
-      exprs
-      []
+-- Ours
+toBackendExpr expr = do
+  let Ann ann = exprAnn expr
+  backendExpr <- go expr
+  pure case case ann.type of
+               Just t -> Just t
+               Nothing -> inferExprType expr of
+    Just t -> ExprSyntax (analysisOf backendExpr) (Typed t backendExpr)
+    Nothing -> backendExpr
   where
-  toInitialCaseRows :: Array Level -> Array (CaseAlternative Ann) -> (Array CaseRow -> ConvertM BackendExpr) -> ConvertM BackendExpr
-  toInitialCaseRows idents alts useCaseRowsCb =
-    foldr
-      ( \(CaseAlternative bs g) mainCb caseRows -> do
-          patterns <- Array.zipWithA (\ident b -> { column: ident, pattern: _ } <$> binderToPattern b) idents bs
-          let
-            args = Array.sort $ foldMap patternVars patterns
-            buildCaseRow guardFn = { patterns, guardFn, vars: SemigroupMap Map.empty }
+  -- Ours
+  go = case _ of
+    ExprVar _ qi -> do
+      { currentModule, toLevel } <- ask
+      case qi of
+        Qualified Nothing ident | Just lvl <- Map.lookup ident toLevel ->
+          buildM (Local (Just ident) lvl)
+        Qualified (Just mn) ident | mn == currentModule, Just lvl <- Map.lookup ident toLevel ->
+          buildM (Local (Just ident) lvl)
+        Qualified (Just (ModuleName "Prim")) (Ident "undefined") ->
+          buildM PrimUndefined
+        Qualified Nothing ident ->
+          buildM (Var (Qualified (Just currentModule) ident))
+        _ ->
+          buildM (Var qi)
+    ExprLit _ lit ->
+      buildM <<< Lit =<< traverse toBackendExpr lit
+    ExprConstructor _ ty name fields -> do
+      { dataTypes } <- ask
+      let
+        ct = case Map.lookup ty dataTypes of
+          Just { constructors } | Map.size constructors == 1 -> ProductType
+          _ -> SumType
+      buildM (CtorDef ct ty name fields)
+    ExprAccessor _ a field ->
+      buildM <<< flip Accessor (GetProp field) =<< toBackendExpr a
+    ExprUpdate _ a bs ->
+      join $ (\x y -> buildM (Update x y))
+        <$> toBackendExpr a
+        <*> traverse (traverse toBackendExpr) bs
+    ExprAbs _ arg body -> do
+      lvl <- currentLevel
+      make $ Abs (NonEmptyArray.singleton (Tuple (Just arg) lvl)) (intro [ arg ] lvl (toBackendExpr body))
+    ExprApp _ a b
+      | ExprVar (Ann { meta: Just IsNewtype }) id <- a -> do
+          toBackendExpr b
+      | otherwise ->
+          make $ App (toBackendExpr a) (NonEmptyArray.singleton (toBackendExpr b))
+    ExprLet _ binds body ->
+      foldr go (toBackendExpr body) binds
+      where
+      go bind' next = case bind' of
+        NonRec (Binding _ ident expr) ->
+          makeLet (Just ident) (toBackendExpr expr) \_ -> next
+        Rec bindings | Just bindings' <- NonEmptyArray.fromArray bindings -> do
+          lvl <- currentLevel
+          let idents = (\(Binding _ ident _) -> ident) <$> bindings'
+          join $ (\x y -> buildM (LetRec lvl x y))
+            <$> intro idents lvl (traverse toBackendBinding bindings')
+            <*> intro idents lvl next
+        Rec _ ->
+          unsafeCrashWith "CoreFn empty Rec binding group"
+    ExprCase _ exprs alts ->
+      foldr
+        ( \expr next idents ->
+            makeLet Nothing (toBackendExpr expr) \tmp ->
+              next (Array.snoc idents tmp)
+        )
+        ( \idents ->
+            toInitialCaseRows idents alts \caseRows ->
+              buildCaseTreeFromRows caseRows
+        )
+        exprs
+        []
+    where
+    toInitialCaseRows :: Array Level -> Array (CaseAlternative Ann) -> (Array CaseRow -> ConvertM BackendExpr) -> ConvertM BackendExpr
+    toInitialCaseRows idents alts useCaseRowsCb =
+      foldr
+        ( \(CaseAlternative bs g) mainCb caseRows -> do
+            patterns <- Array.zipWithA (\ident b -> { column: ident, pattern: _ } <$> binderToPattern b) idents bs
+            let
+              args = Array.sort $ foldMap patternVars patterns
+              buildCaseRow guardFn = { patterns, guardFn, vars: SemigroupMap Map.empty }
 
-          case g of
-            Unconditional e ->
-              makeLet Nothing (makeUncurriedAbs args (\_ -> toBackendExpr e)) \tmp ->
-                mainCb $ Array.snoc caseRows $ buildCaseRow $ UnconditionalFn tmp
-            Guarded gs ->
-              foldr
-                ( \(Guard pred body) cb xs ->
-                    makeLet Nothing (makeUncurriedAbs args (\_ -> toBackendExpr body)) \tmp ->
-                      cb $ Array.snoc xs (Tuple pred tmp)
-                )
-                ( \xs ->
-                    case NonEmptyArray.fromArray xs of
-                      Nothing -> unsafeCrashWith "CoreFn empty Guarded"
-                      Just xs' ->
-                        mainCb $ Array.snoc caseRows $ buildCaseRow $ GuardedFn xs'
-                )
+            case g of
+              Unconditional e ->
+                makeLet Nothing (makeUncurriedAbs args (\_ -> toBackendExpr e)) \tmp ->
+                  mainCb $ Array.snoc caseRows $ buildCaseRow $ UnconditionalFn tmp
+              Guarded gs ->
+                foldr
+                  ( \(Guard pred body) cb xs ->
+                      makeLet Nothing (makeUncurriedAbs args (\_ -> toBackendExpr body)) \tmp ->
+                        cb $ Array.snoc xs (Tuple pred tmp)
+                  )
+                  ( \xs ->
+                      case NonEmptyArray.fromArray xs of
+                        Nothing -> unsafeCrashWith "CoreFn empty Guarded"
+                        Just xs' ->
+                          mainCb $ Array.snoc caseRows $ buildCaseRow $ GuardedFn xs'
+                  )
                 gs
                 []
       )
@@ -593,23 +696,19 @@ binderToPattern = case _ of
       | otherwise ->
           unsafeCrashWith "Newtype binder didn't wrap 1 arg"
     Just (IsConstructor ProductType _) -> do
-      ctorFields <- lookupCtorFields tyName ctorName
-      let argsWithNames = Array.zip args ctorFields
-      -- We cannot safely expand the fields here because the number of columns
-      -- would change. So, any later rows' `BinderNull` or `BinderVar` would not similarly be expanded.
       ctorPattern
         (PatProduct tyName ctorName)
-        argsWithNames
-        (\idx (Tuple _ fieldName) -> GetCtorField ctorName ProductType (unQualified tyName) (unQualified ctorName) fieldName idx)
-        fst
+        -- Ours
+        args
+        (\idx _ -> GetCtorField ctorName ProductType (unQualified tyName) (unQualified ctorName) ("value" <> show idx) idx)
+        identity
     Just (IsConstructor SumType _) -> do
-      ctorFields <- lookupCtorFields tyName ctorName
-      let argsWithNames = Array.zip args ctorFields
       ctorPattern
         (PatSum tyName ctorName)
-        argsWithNames
-        (\idx (Tuple _ fieldName) -> GetCtorField ctorName SumType (unQualified tyName) (unQualified ctorName) fieldName idx)
-        fst
+        -- Ours
+        args
+        (\idx _ -> GetCtorField ctorName SumType (unQualified tyName) (unQualified ctorName) ("value" <> show idx) idx)
+        identity
     _ ->
       unsafeCrashWith "binderToPattern - invalid meta"
   where
@@ -633,24 +732,6 @@ binderToPattern = case _ of
         , patternCase
         , subterms
         }
-
-  lookupCtorFields
-    :: Qualified ProperName
-    -> Qualified Ident
-    -> ConvertM (Array String)
-  lookupCtorFields ty ctor = do
-    { dataTypes, implementations } <- ask
-    case importedCtorFields implementations <|> localCtorFields dataTypes of
-      Just fields -> pure fields
-      Nothing -> unsafeCrashWith "Invariant broken: could not determine pattern matched constructor's fields during conversion."
-    where
-    importedCtorFields implementations = case Map.lookup ctor implementations of
-      Just (Tuple _ (ExternCtor _ _ _ _ fields)) -> Just fields
-      _ -> Nothing
-
-    localCtorFields dataTypes = do
-      { constructors } <- Map.lookup (unQualified ty) dataTypes
-      _.fields <$> Map.lookup (unQualified ctor) constructors
 
 patternVars :: forall r. { pattern :: Pattern | r } -> Array Ident
 patternVars { pattern: Pattern { vars, subterms } } =
@@ -1009,3 +1090,18 @@ make a = buildM =<< sequence a
 
 toBackendBinding :: Binding Ann -> ConvertM (Tuple Ident BackendExpr)
 toBackendBinding (Binding _ ident expr) = Tuple ident <$> toBackendExpr expr
+-- Ours
+
+inferExprType :: Expr Ann -> Maybe ExprType
+inferExprType (ExprApp _ fn _) = case exprAnn fn of
+  Ann { type: Just ty } -> getReturnType ty
+  _ -> case inferExprType fn of
+         Just ty -> getReturnType ty
+         Nothing -> Nothing
+inferExprType _ = Nothing
+
+getReturnType :: ExprType -> Maybe ExprType
+getReturnType (ForAll _ t) = getReturnType t
+getReturnType (ConstrainedType _ t) = getReturnType t
+getReturnType (Func _ ret) = Just ret
+getReturnType _ = Nothing

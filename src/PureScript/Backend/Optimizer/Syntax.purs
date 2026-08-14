@@ -1,3 +1,7 @@
+-- | AST du Backend (Syntax.purs)
+-- | Définit le BackendSyntax, l'arbre de syntaxe abstrait optimisé (proche d'un langage impératif typé) vers lequel le CoreFn est traduit.
+-- | Ce module contient des constructions comme les boucles, les blocs, les structures de données mutables et non-curryfiées, qui serviront de modèle universel pour tous nos générateurs de code (PHP, Go, JS).
+
 module PureScript.Backend.Optimizer.Syntax where
 
 import Prelude
@@ -7,7 +11,8 @@ import Data.Maybe (Maybe)
 import Data.Newtype (class Newtype)
 import Data.Traversable (class Foldable, class Traversable, foldMap, foldlDefault, foldrDefault, sequenceDefault, traverse)
 import Data.Tuple (Tuple)
-import PureScript.Backend.Optimizer.CoreFn (ConstructorType, Ident, Literal(..), Prop, ProperName, Qualified)
+-- Ours
+import PureScript.Backend.Optimizer.CoreFn (ConstructorType, ExprType, Ident, Literal(..), Prop, ProperName, Qualified)
 
 data BackendSyntax a
   = Var (Qualified Ident)
@@ -33,6 +38,8 @@ data BackendSyntax a
   | PrimEffect (BackendEffect a)
   | PrimUndefined
   | Fail String
+  -- Ours
+  | Typed ExprType a
 
 derive instance Eq a => Eq (BackendSyntax a)
 
@@ -158,6 +165,8 @@ instance Foldable BackendSyntax where
     CtorSaturated _ _ _ _ es -> foldMap (foldMap f) es
     CtorDef _ _ _ _ -> mempty
     Fail _ -> mempty
+    -- Ours
+    Typed _ a -> f a
 
 instance Traversable BackendSyntax where
   sequence a = sequenceDefault a
@@ -215,6 +224,9 @@ instance Traversable BackendSyntax where
       pure PrimUndefined
     Fail a ->
       pure (Fail a)
+    -- Ours
+    Typed t a ->
+      Typed t <$> f a
 
 derive instance Functor Pair
 

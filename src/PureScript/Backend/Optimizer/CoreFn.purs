@@ -1,13 +1,21 @@
+-- | Définition de l'AST CoreFn (CoreFn.purs)
+-- | Définit les structures de données (Types, Records) qui représentent formellement le code PureScript après le désucrage et le typage par le compilateur standard.
+-- | Ce module stocke également nos ajouts personnalisés au TAST (Typed Abstract Syntax Tree), tels que les déclarations de classes (classDecls) et l'agencement mémoire des types algébriques.
+
 module PureScript.Backend.Optimizer.CoreFn where
 
 import Prelude
 
 import Data.Array as Array
 import Data.Foldable (class Foldable, foldMap, foldlDefault, foldrDefault)
+-- Ours
+import Data.Map (Map)
 import Data.Maybe (Maybe(..))
 import Data.Newtype (class Newtype)
 import Data.String.CodeUnits as SCU
 import Data.Traversable (class Traversable, sequenceDefault, traverse)
+-- Ours
+import Data.Tuple (Tuple)
 
 newtype Ident = Ident String
 
@@ -52,7 +60,32 @@ type SourceSpan =
 newtype Ann = Ann
   { span :: SourceSpan
   , meta :: Maybe Meta
+  -- Ours
+  , type :: Maybe ExprType
   }
+
+-- Ours
+data ExprType
+  = Int
+  | Number
+  | String
+  | Char
+  | Boolean
+  | Unit
+  | Any
+  | TypeLevelString String
+  | Array ExprType
+  | TypeVar String
+  | ADT String (Array String) (Array ExprType)
+  | TypeApp ExprType (Array ExprType)
+  | Func (Array ExprType) ExprType
+  | Row (Array (Tuple String ExprType)) (Maybe ExprType)
+  | Record ExprType
+  | ForAll (Array String) ExprType
+  | ConstrainedType (Array (Tuple (Array String) (Array ExprType))) ExprType
+
+derive instance eqExprType :: Eq ExprType
+derive instance ordExprType :: Ord ExprType
 
 data Meta
   = IsConstructor ConstructorType (Array Ident)
@@ -76,6 +109,25 @@ data Comment
   = LineComment String
   | BlockComment String
 
+-- Ours
+type DataConstructor =
+  { name :: String
+  , fields :: Array ExprType
+  }
+
+type DataDecl =
+  { name :: String
+  , vars :: Array String
+  , constructors :: Array DataConstructor
+  }
+
+type ClassDecl =
+  { name :: String
+  , vars :: Array String
+  , superclasses :: Array (Tuple (Array String) (Array ExprType))
+  , methods :: Array (Tuple String ExprType)
+  }
+
 newtype Module a = Module
   { name :: ModuleName
   , path :: String
@@ -83,8 +135,12 @@ newtype Module a = Module
   , imports :: Array (Import a)
   , exports :: Array Ident
   , reExports :: Array ReExport
+  -- Ours
+  , dataDecls :: Array DataDecl
+  , classDecls :: Array ClassDecl
   , decls :: Array (Bind a)
-  , foreign :: Array Ident
+  -- Ours
+  , foreign :: Map Ident (Maybe ExprType)
   , comments :: Array Comment
   }
 
@@ -207,6 +263,8 @@ emptyAnn :: Ann
 emptyAnn = Ann
   { span: emptySpan
   , meta: Nothing
+  -- Ours
+  , type: Nothing
   }
 
 emptySpan :: SourceSpan

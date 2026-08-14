@@ -289,7 +289,7 @@ main cliRoot = do
         let modPath = Path.concat [ args.outputDir, name ]
         mkdirp modPath
         writeTextFile UTF8 (Path.concat [ modPath, "index.js" ]) formatted
-        unless (Set.isEmpty backendMod.foreign) do
+        unless (Map.isEmpty backendMod.foreign) do
           let foreignOutputPath = Path.concat [ modPath, "foreign.js" ]
           origPath <- liftEffect $ Path.resolve [ args.outputDir, ".." ] coreFnMod.path
           let foreignSiblingPath = fromMaybe origPath (String.stripSuffix (Pattern (Path.extname origPath)) origPath) <> ".js"

@@ -27,5 +27,4 @@ package:
     - unsafe-coerce: ">=6.0.0 <7.0.0"
 workspace:
   buildOpts:
-    censorLibraryWarnings:
-      all
+    censorLibraryWarnings: all

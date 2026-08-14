@@ -1,3 +1,6 @@
+-- | Utilitaires de Débogage (Debug.purs)
+-- | Fonctions d'injection de logs (traceWhen, spyWhen) et de profilage temporel (time). Fournit un système conditionnel permettant de logger des états internes du compilateur si et seulement si les flags de débogage sont activés, minimisant l'impact sur les performances en mode production.
+
 module PureScript.Backend.Optimizer.Debug where
 
 import Prelude

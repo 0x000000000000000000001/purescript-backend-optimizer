@@ -32,5 +32,4 @@ package:
     - type-equality: ">=4.0.1 <5.0.0"
     - unsafe-coerce: ">=6.0.0 <7.0.0"
     - variant: ">=8.0.0 <9.0.0"
-workspace:
-  {}
+workspace: {}

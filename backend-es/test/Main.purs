@@ -132,7 +132,7 @@ runSnapshotTests { accept, filter, traceIdents } = do
             let testFilePath = Path.concat [ testFileDir, "index.js" ]
             mkdirp testFileDir
             FS.writeTextFile UTF8 testFilePath formatted
-            unless (Set.isEmpty backendMod.foreign) do
+            unless (Map.isEmpty backendMod.foreign) do
               let foreignSiblingPath = fromMaybe path (String.stripSuffix (Pattern (Path.extname path)) path) <> ".js"
               let foreignOutputPath = Path.concat [ testFileDir, "foreign.js" ]
               copyFile foreignSiblingPath foreignOutputPath
@@ -146,6 +146,7 @@ runSnapshotTests { accept, filter, traceIdents } = do
             let padding = power " " (SCU.length total - SCU.length index)
             Console.log $ "[" <> padding <> index <> " of " <> total <> "] Building " <> unwrap name
             pure coreFnMod
+          , onSkipModule: \_ _ -> pure Nothing
         , traceIdents
         }
       allSteps <- liftEffect (Ref.read stepsRef)

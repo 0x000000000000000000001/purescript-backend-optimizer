@@ -15,7 +15,7 @@ import Data.Lazy as Lazy
 import Data.List (List)
 import Data.Map (Map)
 import Data.Map as Map
-import Data.Maybe (Maybe, maybe)
+import Data.Maybe (Maybe(..), maybe)
 import Data.Set (Set)
 import Data.Set as Set
 import Data.Set.NonEmpty as NonEmptySet
@@ -114,6 +114,7 @@ basicBuildMain options = do
         , foreignSemantics: options.foreignSemantics
         , onCodegenModule: options.onCodegenModule
         , onPrepareModule: options.onPrepareModule
+        , onSkipModule: \_ _ -> pure Nothing
         , traceIdents: options.traceIdents
         }
       options.onCodegenAfter
