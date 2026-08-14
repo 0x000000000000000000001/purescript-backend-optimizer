@@ -20,7 +20,7 @@ import Data.Map as Map
 import Data.Set (Set)
 import Data.Set as Set
 import Data.Foldable (foldl, class Foldable)
-import Data.Maybe (Maybe(..), fromMaybe, maybe)
+import Data.Maybe (Maybe(..), fromMaybe, maybe, isJust)
 import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Expr(..), ExprType(..), Guard(..), Module(..), Prop(..), Ident(..), Qualified(..), unQualified, qualifiedModuleName, ModuleName(..), Literal(..), emptyAnn)
 import Data.Newtype (unwrap)
 import Data.Tuple (Tuple(..))
@@ -230,35 +230,54 @@ collectTypesFromAlt (CaseAlternative _ (Guarded guards)) acc = foldl (\a (Guard 
 mapAnn :: (ExprType -> ExprType) -> Ann -> Ann
 mapAnn f (Ann ann) = Ann (ann { type = map f ann.type })
 
-rewriteExpr :: Map String (Binding Ann) -> Map Ident (Expr Ann) -> (ExprType -> ExprType) -> Expr Ann -> Expr Ann
-rewriteExpr globalAstMap = goLocals
+rewriteExpr :: Boolean -> Map String (Binding Ann) -> Set String -> Map Ident (Expr Ann) -> (ExprType -> ExprType) -> Expr Ann -> Expr Ann
+rewriteExpr inlineAccessorsOnly globalAstMap = goLocals
   where
-  goLocals locals f = go
+  isAccessor = case _ of
+    ExprAbs _ dictIdent (ExprAccessor _ (ExprVar _ (Qualified Nothing dictIdent')) _) | dictIdent == dictIdent' -> true
+    ExprAbs _ dictIdent (ExprCase _ [ExprVar _ (Qualified Nothing dictIdent')] [CaseAlternative [BinderConstructor _ _ (Qualified _ (Ident ctorName)) [BinderVar _ v]] (Unconditional (ExprAccessor _ (ExprVar _ (Qualified Nothing v')) _))]) | dictIdent == dictIdent' && v == v' && String.contains (Pattern "$Dict") ctorName -> true
+    _ -> false
+
+  goLocals inlineStack locals f = go
     where
     go expr = case expr of
-      ExprVar ann q -> ExprVar (mapAnn f ann) q
+      ExprVar ann ident@(Qualified mbMod name) -> 
+        case mbMod of
+          Nothing -> case Map.lookup name locals of
+            Just val | isJust (resolveDict val) -> val
+            _ -> ExprVar (mapAnn f ann) ident
+          Just (ModuleName mn) | inlineAccessorsOnly ->
+            let fullName = mn <> "." <> (\(Ident n) -> n) name
+            in case Map.lookup fullName globalAstMap of
+                 Just (Binding _ _ body@(ExprAbs _ _ _)) -> 
+                   -- We do not substitute global variables directly, they are handled by ExprApp
+                   ExprVar (mapAnn f ann) ident
+                 _ -> ExprVar (mapAnn f ann) ident
+          _ -> ExprVar (mapAnn f ann) ident
       ExprLit ann lit -> ExprLit (mapAnn f ann) (map go lit)
       ExprApp ann e1 e2 ->
         let e1' = go e1
             e2' = go e2
         in case e1' of
-          ExprVar _ (Qualified (Just (ModuleName mn)) (Ident name)) ->
+          ExprVar _ (Qualified (Just (ModuleName mn)) (Ident name)) | inlineAccessorsOnly ->
             let fullName = mn <> "." <> name
             in case Map.lookup fullName globalAstMap of
-                 Just (Binding _ _ (ExprAbs _ ident body)) | isJust (resolveDict e2') ->
-                   goLocals (Map.insert ident e2' locals) f body
+                 Just (Binding _ _ body@(ExprAbs _ ident inner)) | isJust (resolveDict e2') && not (Set.member fullName inlineStack) ->
+                   if isAccessor body then
+                     goLocals (Set.insert fullName inlineStack) (Map.insert ident e2' locals) f inner
+                   else ExprApp (mapAnn f ann) e1' e2'
                  _ -> ExprApp (mapAnn f ann) e1' e2'
           ExprAbs _ ident body | isJust (resolveDict e2') ->
-            goLocals (Map.insert ident e2' locals) f body
+            goLocals inlineStack (Map.insert ident e2' locals) f body
           _ -> ExprApp (mapAnn f ann) e1' e2'
-      ExprAbs ann id e -> ExprAbs (mapAnn f ann) id (goLocals (Map.delete id locals) f e)
+      ExprAbs ann id e -> ExprAbs (mapAnn f ann) id (goLocals inlineStack (Map.delete id locals) f e)
       ExprLet ann binds e -> 
         let 
           binds' = map goBind binds
           newLocals = foldl (\acc b -> case b of
             NonRec (Binding _ ident val) -> Map.insert ident val acc
             _ -> acc) locals binds'
-          e' = goLocals newLocals f e
+          e' = goLocals inlineStack newLocals f e
           
           foldFn b acc = case b of
             NonRec (Binding _ ident val) -> 
@@ -285,7 +304,7 @@ rewriteExpr globalAstMap = goLocals
         in case exprs', alts of
           [e1], [CaseAlternative [BinderConstructor _ _ _ [BinderVar _ ident]] (Unconditional e2)] ->
              case resolveDict e1 of
-               Just lit -> goLocals (Map.insert ident (ExprLit (getExprAnn e1) lit) locals) f e2
+               Just lit -> goLocals inlineStack (Map.insert ident (ExprLit (getExprAnn e1) lit) locals) f e2
                Nothing -> ExprCase (mapAnn f ann) exprs' (map goAlt alts)
           _, _ -> ExprCase (mapAnn f ann) exprs' (map goAlt alts)
       ExprConstructor ann t c ids -> ExprConstructor (mapAnn f ann) t c ids
@@ -294,7 +313,21 @@ rewriteExpr globalAstMap = goLocals
         in case resolveDict e' of
           Just (LitRecord props) ->
             case Array.find (\(Prop p _) -> p == prop) props of
-              Just (Prop _ val) -> go val
+              Just (Prop _ val) -> 
+                let cleanF = case e' of
+                      ExprVar (Ann eAnn) (Qualified mbMod ident) ->
+                        let qualName = case mbMod of
+                              Just (ModuleName mn) -> mn <> "." <> (\(Ident n) -> n) ident
+                              Nothing -> (\(Ident n) -> n) ident
+                        in case Map.lookup qualName globalAstMap of
+                             Just (Binding _ _ globalBody) ->
+                               let genTy = fromMaybe Any (let (Ann a) = getExprAnn globalBody in a.type)
+                                   instTy = fromMaybe Any eAnn.type
+                                   subst' = unify genTy instTy Map.empty
+                               in \t -> stripStaticConstraints [] (substituteExprType subst' t)
+                             Nothing -> f
+                      _ -> f
+                in goLocals inlineStack locals cleanF val
               Nothing -> ExprAccessor (mapAnn f ann) e' prop
           Just (LitArray args) ->
             ExprAccessor (mapAnn f ann) e' prop
@@ -304,7 +337,8 @@ rewriteExpr globalAstMap = goLocals
     resolveDict :: Expr Ann -> Maybe (Literal (Expr Ann))
     resolveDict e = case e of
       ExprLit _ lit@(LitRecord _) -> Just lit
-      ExprApp _ (ExprConstructor _ _ _ _) e' -> resolveDict e'
+      ExprLit _ lit@(LitArray _) -> Just lit
+      ExprApp _ (ExprConstructor _ _ (Ident ctorName) _) e' | String.contains (Pattern "$Dict") ctorName -> resolveDict e'
       ExprVar _ (Qualified mbMod ident) ->
         case mbMod of
           Nothing -> case Map.lookup ident locals of
@@ -382,7 +416,7 @@ monomorphize globalAstMap instMap mod@(Module m) =
                         exprWithDicts = applyDicts info.dictArgs expr
                         resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
                         
-                        specializedExpr = rewriteExpr globalAstMap Map.empty substFn (monomorphizeExpr modNameStr instMap Map.empty resolvedExpr)
+                        specializedExpr = rewriteExpr true globalAstMap Set.empty Map.empty substFn (monomorphizeExpr modNameStr instMap Map.empty resolvedExpr)
                         isAbs = case specializedExpr of
                                       ExprAbs _ _ _ -> "ExprAbs"
                                       ExprCase _ _ _ -> "ExprCase"
@@ -681,7 +715,7 @@ transitiveCollect globalAstMap initialMap = loop initialMap
                 in
                   foldl (\acc3 caller -> 
                     let 
-                      substitutedExpr = rewriteExpr globalAstMap Map.empty substFn resolvedExpr
+                      substitutedExpr = rewriteExpr false globalAstMap Set.empty Map.empty substFn resolvedExpr
                       specializedExpr = monomorphizeExpr caller currentMap Map.empty substitutedExpr
                     in collectExpr caller acc3 substitutedExpr
                   ) acc2 (Set.toUnfoldable info.callers :: Array String)

@@ -445,13 +445,13 @@ evalUncurriedApp env hd spine = go Nothing hd
               Nothing -> SemRef ref sp sem
         in evalRef env ref sp (ExternUncurriedApp spine') sem
     SemLam _ k ->
-      case NonEmptyArray.uncons spine of
-        { head: arg, tail } ->
+      case Array.uncons spine of
+        Just { head: arg, tail } ->
           makeLet Nothing arg \nextArg ->
             let nextHd = k nextArg
-            in case NonEmptyArray.fromArray tail of
-                 Just nextSpine -> evalUncurriedApp env nextHd nextSpine
-                 Nothing -> nextHd
+            in if Array.null tail then nextHd
+               else evalUncurriedApp env nextHd tail
+        Nothing -> SemLam Nothing k
     SemLet ident val k ->
       SemLet ident val \nextVal ->
         makeLet Nothing (k nextVal) \nextFn ->
