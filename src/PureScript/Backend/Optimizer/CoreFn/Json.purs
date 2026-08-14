@@ -276,7 +276,8 @@ decodeModule' decodeAnn' json = do
   exports <- getField (decodeArray decodeIdent) obj "exports"
   reExports <- getField decodeReExports obj "reExports"
   -- Ours
-  dataDecls <- getField (decodeArray decodeDataDecl) obj "dataDecls"
+  mbDataDecls <- getFieldOptional' (decodeArray decodeDataDecl) obj "dataDecls"
+  let dataDecls = fromMaybe [] mbDataDecls
   mbClassDecls <- getFieldOptional' (decodeArray decodeClassDecl) obj "classDecls"
   let classDecls = fromMaybe [] mbClassDecls
   decls <- getField (decodeArray (decodeBind (decodeAnn' path))) obj "decls"

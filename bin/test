@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+
+# Use the local compiler and local spago to execute all tests in the workspace
+npx spago test "$@"
