@@ -20,7 +20,7 @@ import PureScript.Backend.Optimizer.CoreFn (Ident, ModuleName, Qualified(..))
 import PureScript.Backend.Optimizer.Semantics (ExternImpl)
 
 -- | Computes the set of reachable modules starting from a list of entry modules.
-moduleReachability :: Array ModuleName -> Map ModuleName BackendModule -> Set ModuleName
+moduleReachability :: forall r. Array ModuleName -> Map ModuleName { imports :: Set ModuleName, implementations :: Map (Qualified Ident) (Tuple BackendAnalysis ExternImpl) | r } -> Set ModuleName
 moduleReachability entryMods modulesMap =
   go Set.empty entryMods
   where

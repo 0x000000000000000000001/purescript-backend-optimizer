@@ -27,7 +27,7 @@ import Data.String as String
 import Data.Tuple (Tuple(..), fst, snd)
 import Partial.Unsafe (unsafeCrashWith)
 import PureScript.Backend.Optimizer.Analysis (class HasAnalysis, BackendAnalysis(..), Capture(..), Complexity(..), ResultTerm(..), Usage(..), analysisOf, bound, bump, complex, resultOf, updated, withResult, withRewrite)
-import PureScript.Backend.Optimizer.CoreFn (ConstructorType, ExprType, Ident(..), Literal(..), ModuleName, Prop(..), ProperName, Qualified(..), findProp, propKey, propValue)
+import PureScript.Backend.Optimizer.CoreFn (ConstructorType, ExprType(..), Ident(..), Literal(..), ModuleName, Prop(..), ProperName, Qualified(..), findProp, propKey, propValue)
 import PureScript.Backend.Optimizer.Syntax (class HasSyntax, BackendAccessor(..), BackendEffect, BackendOperator(..), BackendOperator1(..), BackendOperator2(..), BackendOperatorNum(..), BackendOperatorOrd(..), BackendSyntax(..), Level(..), Pair(..), syntaxOf)
 import PureScript.Backend.Optimizer.Utils (foldl1Array, foldr1Array)
 
@@ -432,9 +432,23 @@ evalApp env hd spine = go Nothing env hd (List.fromFoldable spine)
       NeutFail err
     SemLam _ k, List.Cons arg args ->
       makeLet Nothing arg \nextArg ->
-        go Nothing env' (k nextArg) args
+        let
+          nextTy = case mbTy of
+            Just (Func args' retTy) -> case Array.uncons args' of
+              Just { tail } | Array.length tail > 0 -> Just (Func tail retTy)
+              _ -> Just retTy
+            _ -> Nothing
+        in
+        go nextTy env' (k nextArg) args
     SemRef ref sp sem, List.Cons arg args ->
-      go Nothing env' (evalRef env' ref sp (ExternApp [ arg ]) sem) args
+      let
+        nextTy = case mbTy of
+          Just (Func args' retTy) -> case Array.uncons args' of
+            Just { tail } | Array.length tail > 0 -> Just (Func tail retTy)
+            _ -> Just retTy
+          _ -> Nothing
+      in
+      go nextTy env' (evalRef env' ref sp (ExternApp [ arg ]) sem) args
     SemLet ident val k, args ->
       SemLet ident val \nextVal ->
         makeLet Nothing (k nextVal) \nextFn ->

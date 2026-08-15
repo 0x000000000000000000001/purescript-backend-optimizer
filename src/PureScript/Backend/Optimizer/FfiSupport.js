@@ -57,10 +57,10 @@ function getScanDirs(mbFfiDir, extraSpagoDirs) {
     
     if (mbFfiDir) {
         scanDirs.push(path.join(rootDir, mbFfiDir));
-    } else {
-        // Fallback to searching the local src/ dir if mbFfiDir is not provided
-        scanDirs.push(rootDir);
     }
+    
+    // Always search local dir
+    scanDirs.push(rootDir);
     
     cachedScanDirs = scanDirs;
     return scanDirs;
@@ -104,7 +104,7 @@ export const findFfiFileImpl = function(extension) {
                         if (mbModulePath) {
                             const ffiPath = mbModulePath.replace(/\.purs$/, extension);
                             if (fs.existsSync(ffiPath)) {
-                                console.log("findFfiFile [" + modNameStr + "] -> " + ffiPath);
+                                // console.log("findFfiFile [" + modNameStr + "] -> " + ffiPath);
                                 return ffiPath;
                             }
                         }
@@ -122,12 +122,12 @@ export const findFfiFileImpl = function(extension) {
                             ];
                             for (const p of searchPaths) {
                                 if (index.has(p)) {
-                                    console.log("findFfiFile [" + modNameStr + "] -> " + p);
+                                    // console.log("findFfiFile [" + modNameStr + "] -> " + p);
                                     return p;
                                 }
                             }
                         }
-                        console.log("findFfiFile [" + modNameStr + "] -> null");
+                        // console.log("findFfiFile [" + modNameStr + "] -> null");
                         return null;
                     };
                 };
