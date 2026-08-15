@@ -1501,13 +1501,18 @@ build ctx = case _ of
         expr'
   EffectBind ident level (ExprSyntax _ (EffectPure binding)) body ->
     build ctx $ EffectDefer $ build ctx $ Let ident level binding body
-  EffectBind ident level (ExprSyntax _ (EffectDefer binding)) body ->
+  EffectBind ident level binding1 body
+    | ExprSyntax _ (EffectDefer binding) <- unwrapBackendExpr binding1 ->
     build ctx $ EffectBind ident level binding body
-  EffectBind ident level binding (ExprSyntax _ (EffectDefer body)) ->
+  EffectBind ident level binding body1
+    | ExprSyntax _ (EffectDefer body) <- unwrapBackendExpr body1 ->
     build ctx $ EffectBind ident level binding body
-  EffectBind _ level binding (ExprSyntax _ (EffectPure (ExprSyntax _ (Local _ level2)))) | level == level2 ->
+  EffectBind _ level binding body1
+    | ExprSyntax _ (EffectPure expr) <- unwrapBackendExpr body1
+    , ExprSyntax _ (Local _ level2) <- unwrapBackendExpr expr
+    , level == level2 ->
     binding
-  EffectDefer expr@(ExprSyntax _ (EffectDefer _)) ->
+  EffectDefer expr | ExprSyntax _ (EffectDefer _) <- unwrapBackendExpr expr ->
     expr
   PrimOp (Op1 OpBooleanNot (ExprSyntax _ (PrimOp (Op1 OpBooleanNot expr)))) ->
     expr
@@ -2008,6 +2013,12 @@ unwrapSemTyped :: BackendSemantics -> BackendSemantics
 unwrapSemTyped = case _ of
   SemTyped _ a -> unwrapSemTyped a
   a -> a
+
+unwrapBackendExpr :: BackendExpr -> BackendExpr
+unwrapBackendExpr expr@(ExprSyntax _ syn) = case syn of
+  Typed _ inner -> unwrapBackendExpr inner
+  _ -> expr
+unwrapBackendExpr expr = expr
 
 untypedExpr :: BackendExpr -> BackendExpr
 untypedExpr = case _ of

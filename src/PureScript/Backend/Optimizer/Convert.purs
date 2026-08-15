@@ -1088,5 +1088,7 @@ inferExprType _ = Nothing
 getReturnType :: ExprType -> Maybe ExprType
 getReturnType (ForAll _ t) = getReturnType t
 getReturnType (ConstrainedType _ t) = getReturnType t
-getReturnType (Func _ ret) = Just ret
+getReturnType (Func args ret) = case Array.uncons args of
+  Just { tail } | Array.length tail > 0 -> Just (Func tail ret)
+  _ -> Just ret
 getReturnType _ = Nothing
