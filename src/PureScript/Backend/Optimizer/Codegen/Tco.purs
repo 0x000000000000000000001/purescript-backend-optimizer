@@ -193,7 +193,6 @@ type TcoRefBinding =
 
 tcoRefBinding :: TcoRef -> TcoExpr -> Maybe TcoRefBinding
 tcoRefBinding ref (TcoExpr _ expr) = case expr of
-  -- Ours
   Abs args inner ->
     case tcoRefBinding ref inner of
       Just child -> Just { ref, analysis: child.analysis, arity: NonEmptyArray.length args + child.arity }
@@ -213,7 +212,6 @@ tcoEnvGroup :: (Ident -> TcoRef) -> NonEmptyArray (Tuple Ident NeutralExpr) -> T
 tcoEnvGroup toTcoRef = fold <<< traverse go <<< NonEmptyArray.toArray
   where
   go (Tuple ident (NeutralExpr expr)) =
-    -- Ours
     Tuple (toTcoRef ident) <$> syntacticArity (NeutralExpr expr)
 
 localTcoRefBindings :: Level -> NonEmptyArray (Tuple Ident TcoExpr) -> Maybe (NonEmptyArray TcoRefBinding)
@@ -241,7 +239,6 @@ tcoRoleJoins env analysis group = do
   guard (isTailCalledIn analysis group)
   Array.nub $ foldMap (\b -> Array.mapMaybe (\(Tuple ref arity) -> ref <$ (guard =<< isUniformTailCall b.analysis ref arity)) env) group
 
--- Ours
 syntacticArity :: NeutralExpr -> Maybe Int
 syntacticArity (NeutralExpr expr) = case expr of
   Abs args inner ->
@@ -263,34 +260,25 @@ analyze env (NeutralExpr expr) = case expr of
     TcoExpr (tcoCall (TcoTopLevel ident) 0 mempty) $ Var ident
   Local ident level ->
     TcoExpr (tcoCall (TcoLocal ident level) 0 mempty) $ Local ident level
-  -- Ours
   App hd tl | Just (Tuple ref arity) <- unwrapAppHead hd (NonEmptyArray.length tl) -> do
     let hd' = analyze env hd
     let tl' = overTcoAnalysis tcoNoTailCalls <<< analyze env <$> tl
-    -- Ours
     let analysis2 = tcoCall ref arity (foldMap tcoAnalysisOf tl')
     TcoExpr analysis2 $ App hd' tl'
-  -- Ours
   UncurriedApp hd tl | Just (Tuple ref arity) <- unwrapAppHead hd (Array.length tl) -> do
     let hd' = analyze env hd
     let tl' = overTcoAnalysis tcoNoTailCalls <<< analyze env <$> tl
-    -- Ours
     let analysis2 = tcoCall ref arity (foldMap tcoAnalysisOf tl')
     TcoExpr analysis2 $ UncurriedApp hd' tl'
-  -- Ours
   PrimEffect (EffectRefRead ref) | Just refId <- unwrapRefHead ref -> do
     let ref' = analyze env ref
-    -- Ours
     let analysis = tcoRefEffect refId mempty
     TcoExpr analysis $ PrimEffect (EffectRefRead ref')
-  -- Ours
   PrimEffect (EffectRefWrite ref val) | Just refId <- unwrapRefHead ref -> do
     let ref' = analyze env ref
     let val' = analyze env val
-    -- Ours
     let analysis = tcoRefEffect refId $ tcoAnalysisOf val'
     TcoExpr analysis $ PrimEffect (EffectRefWrite ref' val')
-  -- Ours
   Typed ty inner -> do
     let inner' = analyze env inner
     TcoExpr (tcoAnalysisOf inner') (Typed ty inner')
@@ -330,7 +318,6 @@ analyze env (NeutralExpr expr) = case expr of
   _ -> do
     let expr' = analyze env <$> expr
     TcoExpr (tcoNoTailCalls (foldMap tcoAnalysisOf expr')) expr'
--- Ours
 
 unwrapAppHead :: NeutralExpr -> Int -> Maybe (Tuple TcoRef Int)
 unwrapAppHead (NeutralExpr expr) arity = case expr of

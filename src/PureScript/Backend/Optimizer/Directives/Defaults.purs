@@ -32,7 +32,6 @@ defaultDirectives =
 
   Control.Category.categoryFn.identity always
 
-  -- Ours
   Data.Ring.negate always
   Data.Ring.sub always
   Data.Ring.ringInt always

@@ -2,7 +2,6 @@
 -- | Le point d'entrée central du compilateur. Il orchestre l'ensemble du pipeline d'optimisation.
 -- | Il s'occupe de la lecture des fichiers CoreFn (output/), lance la conversion en BackendSyntax, déclenche les passes d'analyse et de monomorphisation (Dead Code Elimination, inlining), et enfin rassemble le code final prêt à être consommé par les générateurs de code des différents backends (gopurs, phpurs, etc.).
 
--- Ours
 module PureScript.Backend.Optimizer.App
   ( coreFnModulesFromOutput
   , readCoreFnModule
@@ -15,28 +14,25 @@ module PureScript.Backend.Optimizer.App
 
 import Prelude
 
-import Effect (Effect)
-
+import Data.Argonaut.Decode.Error (printJsonDecodeError)
+import Data.Argonaut.Parser (jsonParser)
+import Data.Array as Array
+import Data.Bifunctor (lmap)
+import Data.Either (Either(..))
+import Data.List as List
+import Data.Maybe (Maybe(..), isJust)
+import Data.String as String
+import Data.String.Pattern (Pattern(..))
+import Data.Traversable (traverse)
 import Effect.Aff (Aff, attempt)
 import Effect.Class (liftEffect)
 import Effect.Console as Console
+import Node.Encoding (Encoding(..))
 import Node.FS.Aff as FS
 import Node.FS.Stats as Stats
-import Node.Encoding (Encoding(..))
-import Data.Argonaut.Parser (jsonParser)
-import Data.Either (Either(..), isRight)
-import Data.Bifunctor (lmap)
-import Data.Argonaut.Decode.Error (printJsonDecodeError)
-import Data.Array as Array
-import Data.List as List
-import Data.Maybe (Maybe(..), isJust)
-import Data.Traversable (traverse)
+import PureScript.Backend.Optimizer.CoreFn (Ann, Module)
 import PureScript.Backend.Optimizer.CoreFn.Json (decodeModule)
 import PureScript.Backend.Optimizer.CoreFn.Sort (sortModules)
-import PureScript.Backend.Optimizer.CoreFn (Module, Ann)
-import Data.String as String
-import Data.String.Pattern (Pattern(..))
-import Data.Map (Map)
 import PureScript.Backend.Optimizer.Directives (parseDirectiveFile)
 import PureScript.Backend.Optimizer.Directives.Defaults (defaultDirectives)
 import PureScript.Backend.Optimizer.Semantics (InlineDirectiveMap)
@@ -57,7 +53,8 @@ readCoreFnModule filePath = do
         pure Nothing
     Left err -> do
       let errStr = show err
-      if String.contains (Pattern "ENOENT") errStr then pure unit else
+      if String.contains (Pattern "ENOENT") errStr then pure unit
+      else
         liftEffect $ Console.error $ "Failed to stat " <> filePath <> ": " <> errStr
       pure Nothing
 
@@ -129,5 +126,5 @@ loadDirectives = do
   let parsedDirectives = parseDirectiveFile defaultDirectives
   when (not (Array.null parsedDirectives.errors)) do
     liftEffect $ Console.log "DIRECTIVE PARSE ERRORS"
-    -- could iterate and print errors here if needed
+  -- could iterate and print errors here if needed
   pure parsedDirectives.directives

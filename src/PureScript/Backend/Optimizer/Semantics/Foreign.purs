@@ -12,7 +12,6 @@ import Data.Enum (fromEnum)
 import Data.List as List
 import Data.Map (Map)
 import Data.Map as Map
--- Ours
 import Debug
 import Data.Maybe (Maybe(..))
 import Data.String as String
@@ -64,7 +63,6 @@ coreForeignSemantics = Map.fromFoldable semantics
     , data_ord_ordBoolean
     , data_ord_ordChar
     , data_ord_ordInt
-    -- Ours
     , data_ord_ordIntImpl
     , data_ord_ordNumber
     , data_ord_ordString
@@ -187,7 +185,6 @@ data_ord_ordBoolean = Tuple (qualified "Data.Ord" "ordBoolean") $ primOrdOperato
 data_ord_ordInt :: ForeignSemantics
 data_ord_ordInt = Tuple (qualified "Data.Ord" "ordInt") $ primOrdOperator OpIntOrd
 
--- Ours
 data_ord_ordIntImpl :: ForeignSemantics
 data_ord_ordIntImpl = Tuple (qualified "Data.Ord" "ordIntImpl") $ primOrdImplOperator OpIntOrd
 
@@ -365,7 +362,6 @@ primOrdOperator op env _ = case _ of
   _ ->
     Nothing
 
--- Ours
 primOrdImplOperator :: (BackendOperatorOrd -> BackendOperator2) -> ForeignEval
 primOrdImplOperator op env _ = case _ of
   [ ExternApp [ _, _, _, a, b ], ExternPrimOp (OpIsTag tag) ]
@@ -602,7 +598,6 @@ record_unsafe_union_unsafeUnionFn = Tuple (qualified "Record.Unsafe.Union" "unsa
       Just $ NeutLit (LitRecord (NonEmptyArray.head <$> Array.groupAllBy (comparing propKey) (props1 <> props2)))
     _ ->
       Nothing
--- Ours
 
 test_data_undefinedOr_compareUndefinedOrImpl :: ForeignSemantics
 test_data_undefinedOr_compareUndefinedOrImpl = Tuple (qualified "Test.Data.UndefinedOr" "compareUndefinedOrImpl") go

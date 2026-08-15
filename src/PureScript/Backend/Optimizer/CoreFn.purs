@@ -4,13 +4,11 @@ import Prelude
 
 import Data.Array as Array
 import Data.Foldable (class Foldable, foldMap, foldlDefault, foldrDefault)
--- Ours
 import Data.Map (Map)
 import Data.Maybe (Maybe(..))
 import Data.Newtype (class Newtype)
 import Data.String.CodeUnits as SCU
 import Data.Traversable (class Traversable, sequenceDefault, traverse)
--- Ours
 import Data.Tuple (Tuple)
 
 newtype Ident = Ident String
@@ -60,11 +58,9 @@ type SourceSpan =
 newtype Ann = Ann
   { span :: SourceSpan
   , meta :: Maybe Meta
-  -- Ours
   , type :: Maybe ExprType
   }
 
--- Ours
 -- | Represents the structural PureScript type of an expression.
 -- | Preserved in the TAST (Typed Abstract Syntax Tree) to allow AOT backends 
 -- | to generate strictly typed native code without falling back to dynamic types.
@@ -262,7 +258,6 @@ data Comment
   = LineComment String
   | BlockComment String
 
--- Ours
 type DataConstructor =
   { name :: String
   , fields :: Array ExprType
@@ -288,11 +283,9 @@ newtype Module a = Module
   , imports :: Array (Import a)
   , exports :: Array Ident
   , reExports :: Array ReExport
-  -- Ours
   , dataDecls :: Array DataDecl
   , classDecls :: Array ClassDecl
   , decls :: Array (Bind a)
-  -- Ours
   , foreign :: Map Ident (Maybe ExprType)
   , comments :: Array Comment
   }
@@ -483,7 +476,6 @@ emptyAnn :: Ann
 emptyAnn = Ann
   { span: emptySpan
   , meta: Nothing
-  -- Ours
   , type: Nothing
   }
 

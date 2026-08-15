@@ -20,8 +20,6 @@ import Data.List as List
 import Data.Map (Map)
 import Data.Map as Map
 import Data.Maybe (Maybe(..))
-import Data.Tuple.Nested ((/\))
-import Debug (trace)
 import Data.Monoid (power)
 import Data.Newtype (class Newtype, unwrap)
 import Data.Set as Set
@@ -29,7 +27,6 @@ import Data.String as String
 import Data.Tuple (Tuple(..), fst, snd)
 import Partial.Unsafe (unsafeCrashWith)
 import PureScript.Backend.Optimizer.Analysis (class HasAnalysis, BackendAnalysis(..), Capture(..), Complexity(..), ResultTerm(..), Usage(..), analysisOf, bound, bump, complex, resultOf, updated, withResult, withRewrite)
--- Ours
 import PureScript.Backend.Optimizer.CoreFn (ConstructorType, ExprType, Ident(..), Literal(..), ModuleName, Prop(..), ProperName, Qualified(..), findProp, propKey, propValue)
 import PureScript.Backend.Optimizer.Syntax (class HasSyntax, BackendAccessor(..), BackendEffect, BackendOperator(..), BackendOperator1(..), BackendOperator2(..), BackendOperatorNum(..), BackendOperatorOrd(..), BackendSyntax(..), Level(..), Pair(..), syntaxOf)
 import PureScript.Backend.Optimizer.Utils (foldl1Array, foldr1Array)
@@ -47,7 +44,6 @@ data MkFn a
 
 -- | Le type central de l'évaluateur. Représente les valeurs du programme pendant l'évaluation sémantique (réduites, neutres, primitives).
 data BackendSemantics
-  -- Ours
   = SemTyped ExprType BackendSemantics
   | SemRef EvalRef (Array ExternSpine) (Lazy BackendSemantics)
   | SemLam (Maybe Ident) (BackendSemantics -> BackendSemantics)
@@ -163,7 +159,6 @@ instance HasAnalysis BackendExpr where
     ExprRewrite s _ -> s
 
 instance HasSyntax BackendExpr where
-  -- Ours
   syntaxOf = go
     where
     go = case _ of
@@ -336,7 +331,6 @@ instance Eval f => Eval (BackendSyntax f) where
       NeutCtorDef (Qualified (Just (unwrap env).currentModule) tag) ct ty tag fields
     CtorSaturated qual ct ty tag fields ->
       guardFailOver snd (map (eval env) <$> fields) $ NeutData qual ct ty tag
-    -- Ours
     Typed t a ->
       SemTyped t (eval env a)
 
@@ -427,10 +421,8 @@ snocApp prev next = case Array.last prev of
 
 -- | Évalue l'application d'une fonction à ses arguments (l'épine). Gère la beta-réduction si la fonction est une abstraction connue.
 evalApp :: Env -> BackendSemantics -> Spine BackendSemantics -> BackendSemantics
--- Ours
 evalApp env hd spine = go Nothing env hd (List.fromFoldable spine)
   where
-  -- Ours
   go mbTy env' = case _, _ of
     SemTyped ty fn, args ->
       go (Just ty) env' fn args
@@ -440,37 +432,26 @@ evalApp env hd spine = go Nothing env hd (List.fromFoldable spine)
       NeutFail err
     SemLam _ k, List.Cons arg args ->
       makeLet Nothing arg \nextArg ->
-        -- Ours
         go Nothing env' (k nextArg) args
     SemRef ref sp sem, List.Cons arg args ->
-      -- Ours
-      let
-        fn = case mbTy of
-          Just ty -> SemTyped ty (SemRef ref sp sem)
-          Nothing -> SemRef ref sp sem
-      in
-        go Nothing env' (evalRef env' ref sp (ExternApp [ arg ]) sem) args
+      go Nothing env' (evalRef env' ref sp (ExternApp [ arg ]) sem) args
     SemLet ident val k, args ->
       SemLet ident val \nextVal ->
         makeLet Nothing (k nextVal) \nextFn ->
-          -- Ours
           go mbTy (bindLocal (bindLocal env' (One nextVal)) (One nextFn)) nextFn args
     SemLetRec vals k, args ->
       SemLetRec vals \nextVals ->
         makeLet Nothing (k nextVals) \nextFn ->
-          -- Ours
           go mbTy (bindLocal (bindLocal env' (Group nextVals)) (One nextFn)) nextFn args
-    NeutCtorDef qual ct ty tag fields, args
+    NeutCtorDef _ _ _ _ fields, args
       | Array.length fields == List.length args ->
           unsafeCrashWith "CRASH CtorDef"
     fn, List.Nil ->
-      -- Ours
       case mbTy of
         Just ty -> SemTyped ty fn
         Nothing -> fn
     fn, args ->
-      -- Ours
-      let 
+      let
         fn' = case mbTy of
           Just ty -> SemTyped ty fn
           Nothing -> fn
@@ -480,7 +461,6 @@ evalApp env hd spine = go Nothing env hd (List.fromFoldable spine)
 -- | Évalue l'application d'une fonction décurryfiée. Tente de saturer la fonction avec 
 -- | les arguments fournis.
 evalUncurriedApp :: Env -> BackendSemantics -> Spine BackendSemantics -> BackendSemantics
--- Ours
 evalUncurriedApp env hd spine = go Nothing hd
   where
   go mbTy = case _ of
@@ -490,10 +470,7 @@ evalUncurriedApp env hd spine = go Nothing hd
       evalUncurriedBeta NeutUncurriedApp mk spine
     SemRef ref sp sem ->
       guardFailOver identity spine \spine' ->
-        let fn = case mbTy of
-              Just ty -> SemTyped ty (SemRef ref sp sem)
-              Nothing -> SemRef ref sp sem
-        in evalRef env ref sp (ExternUncurriedApp spine') sem
+        evalRef env ref sp (ExternUncurriedApp spine') sem
     SemLet ident val k ->
       SemLet ident val \nextVal ->
         makeLet Nothing (k nextVal) \nextFn ->
@@ -501,15 +478,15 @@ evalUncurriedApp env hd spine = go Nothing hd
     NeutFail err ->
       NeutFail err
     hd' ->
-      let 
+      let
         finalHd = case mbTy of
           Just ty -> SemTyped ty hd'
           Nothing -> hd'
-      in guardFailOver identity spine (NeutUncurriedApp finalHd)
+      in
+        guardFailOver identity spine (NeutUncurriedApp finalHd)
 
 -- | Évalue l'application d'une fonction décurryfiée avec effets (UncurriedEffectApp).
 evalUncurriedEffectApp :: Env -> BackendSemantics -> Spine BackendSemantics -> BackendSemantics
--- Ours
 evalUncurriedEffectApp env hd spine = go Nothing hd
   where
   go mbTy = case _ of
@@ -528,7 +505,8 @@ evalUncurriedEffectApp env hd spine = go Nothing hd
         finalHd = case mbTy of
           Just ty -> SemTyped ty hd'
           Nothing -> hd'
-      in guardFailOver identity spine (NeutUncurriedEffectApp finalHd)
+      in
+        guardFailOver identity spine (NeutUncurriedEffectApp finalHd)
 
 -- | Applique la beta-réduction sur une fonction décurryfiée saturée.
 evalUncurriedBeta :: (BackendSemantics -> Spine BackendSemantics -> BackendSemantics) -> MkFn BackendSemantics -> Spine BackendSemantics -> BackendSemantics
@@ -589,7 +567,6 @@ neutralApp hd spine
 -- | Évalue l'accès à une propriété d'un enregistrement (record). Si l'enregistrement est statique, extrait directement la valeur.
 evalAccessor :: Env -> BackendSemantics -> BackendAccessor -> BackendSemantics
 evalAccessor env lhs accessor = floatLet lhs case _ of
-  -- Ours
   SemTyped _ a ->
     evalAccessor env a accessor
   SemRef ref spine sem ->
@@ -621,7 +598,6 @@ evalAccessor env lhs accessor = floatLet lhs case _ of
 -- | Évalue la mise à jour d'un enregistrement (record update).
 evalUpdate :: BackendSemantics -> Array (Prop BackendSemantics) -> BackendSemantics
 evalUpdate lhs props = floatLet lhs case _ of
-  -- Ours
   SemTyped _ a ->
     evalUpdate a props
   NeutLit (LitRecord props') ->
@@ -702,7 +678,6 @@ makeLet = floatLetWith go
       k binding
     NeutVar _ ->
       k binding
-    -- Ours
     NeutLit _ ->
       k binding
     NeutData _ _ _ _ _ ->
@@ -737,7 +712,6 @@ floatLetWith = go
 -- | Déréférence une variable ou une expression, tentant d'obtenir sa valeur sous-jacente.
 deref :: BackendSemantics -> BackendSemantics
 deref = case _ of
-  -- Ours
   SemTyped _ a ->
     deref a
   SemRef _ _ sem ->
@@ -996,7 +970,6 @@ isAssocPrimOp = case _ of
 -- | Évalue ou réorganise une opération associative (comme l'addition ou la concaténation de chaînes) pour maximiser le repliage de constantes (constant folding).
 evalAssocOp :: Env -> Either (Qualified Ident) BackendOperator2 -> BackendSemantics -> BackendSemantics -> BackendSemantics
 evalAssocOp env op1 = case _, _ of
-  -- Ours
   SemTyped _ a, b ->
     evalAssocOp env op1 a b
   a, SemTyped _ b ->
@@ -1222,7 +1195,6 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case spine of
             Nothing
       _ ->
         Nothing
-  -- Ours
   _ | Just { head: ExternAccessor acc@(GetProp prop), tail } <- Array.uncons spine ->
     case impl of
       ExternExpr group expr -> do
@@ -1238,16 +1210,17 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case spine of
             Just $ evalSpine env (eval (envForGroup env ref (InlineProp prop) group) body) tail
           _ -> Nothing
       _ -> Nothing
-  _ | Just { head: ExternApp _, tail: tail1 } <- Array.uncons spine
+  _
+    | Just { head: ExternApp _, tail: tail1 } <- Array.uncons spine
     , Just { head: ExternAccessor (GetProp prop), tail: tail2 } <- Array.uncons tail1 ->
-    case impl of
-      ExternExpr group fn -> do
-        let ref = EvalExtern qual
-        case Map.lookup ref e.directives >>= Map.lookup (InlineSpineProp prop) of
-          Just InlineAlways ->
-            Just $ evalSpine env (eval (envForGroup env ref (InlineSpineProp prop) group) fn) spine
+        case impl of
+          ExternExpr group fn -> do
+            let ref = EvalExtern qual
+            case Map.lookup ref e.directives >>= Map.lookup (InlineSpineProp prop) of
+              Just InlineAlways ->
+                Just $ evalSpine env (eval (envForGroup env ref (InlineSpineProp prop) group) fn) spine
+              _ -> Nothing
           _ -> Nothing
-      _ -> Nothing
   _ | Just { head: ExternApp args, tail } <- Array.uncons spine ->
     case impl of
       ExternExpr group expr -> do
@@ -1369,7 +1342,6 @@ quote :: Ctx -> BackendSemantics -> BackendExpr
 quote = go
   where
   go ctx = case _ of
-    -- Ours
     SemTyped ty a ->
       build ctx $ Typed ty (go ctx a)
     -- Block constructors
@@ -1846,7 +1818,6 @@ shouldInlineExternAppArg (Usage u) = case _ of
   SemLam _ _ -> u.captured <= CaptureBranch && u.total > 0 && u.call == u.total
   _ -> false
 
--- Ours
 -- | Vérifie si la sémantique d'une expression implique des effets de bord.
 isEffectSemantics :: BackendSemantics -> Boolean
 isEffectSemantics = case _ of
@@ -2032,7 +2003,6 @@ guardFailOver f as k =
   toFail expr = case expr of
     NeutFail _ -> Just expr
     _ -> Nothing
-
 
 unwrapSemTyped :: BackendSemantics -> BackendSemantics
 unwrapSemTyped = case _ of

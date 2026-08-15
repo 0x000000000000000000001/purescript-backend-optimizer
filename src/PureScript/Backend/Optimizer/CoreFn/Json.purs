@@ -21,7 +21,6 @@ import Data.Either (Either(..), note)
 import Data.Enum (toEnum)
 import Data.Foldable (intercalate)
 import Data.Int as Int
--- Ours
 import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.String.CodePoints (CodePoint, fromCodePointArray)
@@ -32,7 +31,6 @@ import Foreign.Object (Object)
 import Foreign.Object as Object
 import Partial.Unsafe (unsafePartial)
 import Prelude as Prelude
--- Ours
 import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), ClassDecl, Comment(..), ConstructorType(..), DataConstructor, DataDecl, Expr(..), ExprType(..), Guard(..), Ident(..), Import(..), Literal(..), Meta(..), Module(..), ModuleName(..), Prop(..), ProperName(..), Qualified(..), ReExport(..), SourcePos, SourceSpan, emptySpan)
 import Safe.Coerce (coerce)
 import Unsafe.Coerce (unsafeCoerce)
@@ -113,7 +111,6 @@ decodeMeta json = do
     _ ->
       throwError $ TypeMismatch "Meta"
 
--- Ours
 decodeExprType :: Json -> JsonDecode ExprType
 decodeExprType json = decodeStr <|> decodeObj
   where
@@ -225,7 +222,6 @@ decodeAnn _path json = do
   -- Currently disabled because spans are not used and are a performance drain.
   -- span <- getField (decodeSourceSpan path) obj "sourceSpan"
   meta <- getFieldOptional' decodeMeta obj "meta"
-  -- Ours
   type_ <- getFieldOptional' decodeExprType obj "type"
   pure $ Ann { span: emptySpan, meta, type: type_ }
 
@@ -236,7 +232,6 @@ decodeImport decodeAnn' json = do
   mod <- getField decodeModuleName obj "moduleName"
   pure $ Import ann mod
 
--- Ours
 decodeDataConstructor :: Json -> JsonDecode DataConstructor
 decodeDataConstructor json = do
   obj <- decodeJObject json
@@ -275,13 +270,11 @@ decodeModule' decodeAnn' json = do
   imports <- getField (decodeArray (decodeImport (decodeAnn' path))) obj "imports"
   exports <- getField (decodeArray decodeIdent) obj "exports"
   reExports <- getField decodeReExports obj "reExports"
-  -- Ours
   mbDataDecls <- getFieldOptional' (decodeArray decodeDataDecl) obj "dataDecls"
   let dataDecls = fromMaybe [] mbDataDecls
   mbClassDecls <- getFieldOptional' (decodeArray decodeClassDecl) obj "classDecls"
   let classDecls = fromMaybe [] mbClassDecls
   decls <- getField (decodeArray (decodeBind (decodeAnn' path))) obj "decls"
-  -- Ours
   foreign_arr <- getField (decodeArray decodeIdent) obj "foreign"
   foreign_anns <- fromMaybe Object.empty <$> getFieldOptional' decodeJObject obj "foreignAnnotations"
   foreign_list <- traverse (\ident@(Ident identName) ->
@@ -301,7 +294,6 @@ decodeModule' decodeAnn' json = do
     , imports
     , exports
     , reExports
-    -- Ours
     , dataDecls
     , classDecls
     , decls
@@ -343,13 +335,11 @@ decodeExpr decAnn json = do
       ExprLit ann <$> getField (decodeLiteral (decodeExpr decAnn)) obj "value"
     "Constructor" -> do
       tyn <- getField decodeProperName obj "typeName"
-      -- Ours
       con <- getField decodeIdent obj "name" <|> \_ -> getField decodeIdent obj "constructorName"
       is <- getField (decodeArray decodeStringLiteral) obj "fields" <|> \_ -> getField (decodeArray decodeStringLiteral) obj "fieldNames"
       pure $ ExprConstructor ann tyn con is
     "Accessor" -> do
       e <- getField (decodeExpr decAnn) obj "expression"
-      -- Ours
       f <- getField decodeStringLiteral obj "fieldName"
       pure $ ExprAccessor ann e f
     "ObjectUpdate" -> do
@@ -408,7 +398,6 @@ decodeBinder decAnn json = do
       BinderLit ann <$> getField (decodeLiteral (decodeBinder decAnn)) obj "literal"
     "ConstructorBinder" -> do
       tyn <- getField (decodeQualified decodeProperName) obj "typeName"
-      -- Ours
       ctn <- getField (decodeQualified decodeIdent) obj "name" <|> \_ -> getField (decodeQualified decodeIdent) obj "constructorName"
       binders <- getField (decodeArray (decodeBinder decAnn)) obj "binders"
       pure $ BinderConstructor ann tyn ctn binders
@@ -451,7 +440,6 @@ decodeRecord = decodeArray <<< decodeProp
     arr <- decodeJArray json
     case arr of
       [ a, b ] -> do
-        -- Ours
         prop <- decodeStringLiteral a
         value <- decoder b
         pure $ Prop prop value
@@ -557,7 +545,6 @@ decodeInt json = do
   num <- decodeNumber json
   case Int.fromNumber num of
     Nothing ->
-      -- Ours
       if num == 2147483648.0 then
         Right bottom
       else

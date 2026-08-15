@@ -394,7 +394,6 @@ analyze externAnalysis expr = case expr of
     analysis =
       withResult KnownNeutral
         $ analyzeDefault expr
-  -- Ours
   Typed _ a ->
     analysisOf a
 
@@ -439,7 +438,6 @@ analyzeEffectBlock externAnalysis expr = case expr of
     withResult Unknown
       $ complex NonTrivial
       $ analyzeDefault expr
-  -- Ours
   Typed _ a ->
     analysisOf a
   _ ->

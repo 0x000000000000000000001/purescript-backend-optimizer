@@ -288,7 +288,6 @@ printBackendSyntax = case _ of
     primOp "" "undefined"
   Fail _ ->
     printUncurriedApp false (primOp "" "fail") []
-  -- Ours
   Typed _ a ->
     a
 

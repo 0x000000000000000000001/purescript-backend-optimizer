@@ -15,7 +15,6 @@ import Data.List (List, foldM)
 import Data.List as List
 import Data.Map (Map)
 import Data.Map as Map
--- Ours
 import Data.Maybe (Maybe(..))
 import Data.Set (Set)
 import Data.Tuple (Tuple(..))
@@ -37,7 +36,6 @@ type BuildOptions m =
   , directives :: InlineDirectiveMap
   , foreignSemantics :: Map (Qualified Ident) ForeignEval
   , onPrepareModule :: BuildEnv -> Module Ann -> m (Module Ann)
-  -- Ours
   , onSkipModule :: BuildEnv -> Module Ann -> m (Maybe BackendModule)
   , onCodegenModule :: BuildEnv -> Module Ann -> BackendModule -> OptimizationSteps -> m Unit
   , traceIdents :: Set (Qualified Ident)
@@ -53,7 +51,6 @@ buildModules options coreFnModules =
   go { directives, implementations, moduleIndex } coreFnModule = do
     let buildEnv = { implementations, moduleCount, moduleIndex }
     coreFnModule'@(Module { name }) <- options.onPrepareModule buildEnv coreFnModule
-    -- Ours
     mbCachedMod <- options.onSkipModule buildEnv coreFnModule'
     case mbCachedMod of
       Just cachedMod -> do
