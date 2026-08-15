@@ -502,3 +502,11 @@ litChildren = case _ of
 
 isPrimModule :: ModuleName -> Boolean
 isPrimModule (ModuleName name) = name == "Prim" || SCU.take 5 name == "Prim."
+
+binderAnn :: forall a. Binder a -> a
+binderAnn = case _ of
+  BinderNull a -> a
+  BinderVar a _ -> a
+  BinderNamed a _ _ -> a
+  BinderLit a _ -> a
+  BinderConstructor a _ _ _ -> a
