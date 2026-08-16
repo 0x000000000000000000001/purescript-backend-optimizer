@@ -57,6 +57,7 @@ import Control.Monad.RWS (ask)
 import Data.Array as Array
 import Data.Array.NonEmpty (NonEmptyArray)
 import Data.Array.NonEmpty as NonEmptyArray
+import Debug as Debug
 import Data.Foldable (foldMap, foldl)
 import Data.FoldableWithIndex (foldMapWithIndex, foldlWithIndex, foldrWithIndex)
 import Data.Function (on)
@@ -72,6 +73,7 @@ import Data.Semigroup.Foldable (maximum)
 import Data.Set (Set)
 import Data.Set as Set
 import Data.String as String
+import Debug as Debug
 import Data.Traversable (class Foldable, Accum, foldr, for, mapAccumL, mapAccumR, sequence, traverse)
 import Data.TraversableWithIndex (forWithIndex)
 import Data.Tuple (Tuple(..), fst, snd)
@@ -259,6 +261,27 @@ toBackendTopLevelBindingGroup env = case _ of
 -- | - everything in-between the two are the steps that were taken from `head` to `last`
 type OptimizationSteps = Array (Tuple (Qualified Ident) (NonEmptyArray BackendExpr))
 
+
+
+
+
+
+
+
+
+
+printExpr :: BackendExpr -> String
+printExpr (ExprRewrite _ e) = "ExprRewrite (...)"
+printExpr (ExprSyntax _ syn) = case syn of
+  Typed _ a -> "Typed (" <> printExpr a <> ")"
+  Abs _ _ -> "Abs (...)"
+  App f a -> "App (" <> printExpr f <> ") (" <> printExpr (NonEmptyArray.head a) <> ")"
+  Let _ _ _ a -> "Let (" <> printExpr a <> ")"
+  Var _ -> "Var"
+  Local _ _ -> "Local"
+  _ -> "Other"
+
+
 toTopLevelBackendBinding :: Array (Qualified Ident) -> ConvertEnv -> Binding Ann -> Accum ConvertEnv (Tuple Ident (WithDeps NeutralExpr))
 toTopLevelBackendBinding group env (Binding _ ident cfn) = do
   let evalEnv = Env { currentModule: env.currentModule, evalExternRef: makeExternEvalRef env, evalExternSpine: makeExternEvalSpine env, locals: [], directives: env.directives }
@@ -275,6 +298,7 @@ toTopLevelBackendBinding group env (Binding _ ident cfn) = do
       Just ty -> ExprSyntax (analysisOf optimizedExpr) (Typed ty optimizedExpr)
       Nothing -> optimizedExpr
   let isDict = fst (isTypeClassDictionaryWithProps cfn)
+  let _ = if ident == Ident "contains" then Debug.trace ("OPTIMIZED AST FOR CONTAINS: " <> printExpr optimizedExprWithTy) (\_ -> unit) else unit
   let Tuple impl expr' = toExternImpl env group isDict optimizedExprWithTy
   { accum: env
       { implementations = Map.insert qualifiedIdent impl env.implementations
