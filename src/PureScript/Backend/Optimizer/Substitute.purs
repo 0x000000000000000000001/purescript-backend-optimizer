@@ -2,7 +2,7 @@
 -- | S'occupe du remplacement (substitution) des variables dans l'AST lors des phases d'inlining et de monomorphisation.
 -- | Inclut des algorithmes pour l'alpha-renommage (renommer des variables locales de manière unique) garantissant qu'aucune variable capturée ne rentre en conflit avec une variable globale (shadowing).
 
-module PureScript.Backend.Optimizer.Substitute where
+module PureScript.Backend.Optimizer.Substitute (unify, substituteExprType, setTcoExprType, setBackendSyntaxType, substituteAst, mapTcoExprTypes) where
 
 import Prelude
 

@@ -1,4 +1,42 @@
-module PureScript.Backend.Optimizer.CoreFn where
+module PureScript.Backend.Optimizer.CoreFn
+  ( Ann(..)
+  , Bind(..)
+  , Binder(..)
+  , Binding(..)
+  , CaseAlternative(..)
+  , CaseGuard(..)
+  , ClassDecl
+  , Comment(..)
+  , ConstructorType(..)
+  , DataConstructor
+  , DataDecl
+  , Expr(..)
+  , ExprType(..)
+  , Guard(..)
+  , Ident(..)
+  , Import(..)
+  , Literal(..)
+  , Meta(..)
+  , Module(..)
+  , ModuleName(..)
+  , Prop(..)
+  , ProperName(..)
+  , Qualified(..)
+  , ReExport(..)
+  , SourcePos
+  , SourceSpan
+  , emptySpan
+  , importName
+  , isPrimModule
+  , moduleName
+  , findProp
+  , propKey
+  , propValue
+  , binderAnn
+  , exprAnn
+  , qualifiedModuleName
+  , unQualified
+  ) where
 
 import Prelude
 
@@ -94,14 +132,14 @@ data ExprType
   -- | 2. The exact same fully qualified name, but split into an array of its path components (e.g., `["Data", "Either", "Either"]`).
   -- | 3. The actual type arguments applied to this ADT to instantiate it (e.g., `[String, Int]` for `Either String Int`).
   | ADT String (Array String) (Array ExprType)
-  
+
   -- | Type application. Applies a base type to one or more type arguments.
   -- | While `ADT` is used for known named types, `TypeApp` is often used for higher-kinded types,
   -- | type aliases, or applying types to type variables (e.g., `f a` where `f` is a `TypeVar`).
   -- | 
   -- | Ex: `TypeApp (TypeVar "f") [Int]` translates to `f Int`.
   | TypeApp ExprType (Array ExprType)
-  
+
   -- | A function type.
   -- | Note: The standard PureScript compiler treats all functions as curried (`a -> b -> c` is `a -> (b -> c)`).
   -- | However, the TAST (Typed AST) flattens this representation to match how native functions work in Go/PHP/JS.
@@ -111,7 +149,7 @@ data ExprType
   -- | 
   -- | Ex: `Func [Int, String] Boolean` represents a native function taking an Int and a String, and returning a Boolean.
   | Func (Array ExprType) ExprType
-  
+
   -- | A Row type (used as the backing structure for Records or Effects).
   -- | A Row represents an unordered collection of labeled types.
   -- | 
@@ -119,7 +157,7 @@ data ExprType
   -- | 2. `Maybe ExprType`: An optional "tail". If `Just (TypeVar "r")`, this is an "open row" (`(name :: String | r)`),
   -- |    meaning it can be extended. If `Nothing`, it is a "closed row" representing a strictly defined set of fields.
   | Row (Array (Tuple String ExprType)) (Maybe ExprType)
-  
+
   -- | A Record type. 
   -- | While a `Row` defines an abstract collection of labeled types, a `Record` turns it into a concrete value type.
   -- | 
@@ -127,7 +165,7 @@ data ExprType
   -- | 
   -- | Ex: `Record (Row [("name", String)] Nothing)` represents the PureScript type `{ name :: String }`.
   | Record ExprType
-  
+
   -- | A universally quantified type (`forall`).
   -- | Defines polymorphism by declaring generic type variables that are in scope for the underlying type.
   -- | 
@@ -136,7 +174,7 @@ data ExprType
   -- | 
   -- | Ex: `ForAll ["a"] (Func [TypeVar "a"] (TypeVar "a"))` represents `forall a. a -> a`.
   | ForAll (Array String) ExprType
-  
+
   -- | A constrained type (e.g., `Eq a => a -> a`).
   -- | Represents a type that requires one or more type class instances (dictionaries) to be passed at runtime.
   -- | 
@@ -179,7 +217,7 @@ data Meta
   -- | Optimization: Backends use this to generate fast native allocations (e.g., `&Data_Either_Left{value0: x}`) 
   -- | instead of treating the constructor as an opaque curried function.
   = IsConstructor ConstructorType (Array Ident)
-  
+
   -- | Indicates that this binding is a `newtype` constructor.
   -- | In PureScript, newtypes are guaranteed to have zero runtime overhead. 
   -- | 
@@ -193,7 +231,7 @@ data Meta
   -- | Optimization: Backends use this to completely erase the constructor call, replacing it 
   -- | with a direct cast or an identity function.
   | IsNewtype
-  
+
   -- | Indicates that this binding is a constructor for a Type Class dictionary.
   -- | In PureScript, Type Classes do not exist at runtime. They are compiled using "Dictionary Passing".
   -- | A class is compiled into a Record (a dictionary) containing its methods, and the compiler 
@@ -211,7 +249,7 @@ data Meta
   -- | Optimization: Backends can treat these as strict struct instantiations rather than 
   -- | generic function applications.
   | IsTypeClassConstructor
-  
+
   -- | Indicates that this binding represents a Foreign Function Interface (FFI) import.
   -- | It has no PureScript body and must be provided natively by the backend (e.g., in a `.go` or `.php` file).
   -- | 
@@ -224,7 +262,7 @@ data Meta
   -- | 
   -- | Optimization: The backend knows it must link this binding to a native implementation.
   | IsForeign
-  
+
   -- | Indicates that this binding originated from a `where` clause in the PureScript source.
   -- | Mainly used for tracking source origin.
   -- | 
@@ -235,7 +273,7 @@ data Meta
   -- | ```
   -- | -> The local binding for `bar` gets `IsWhere`.
   | IsWhere
-  
+
   -- | Indicates that this application was synthetically generated by the compiler 
   -- | (e.g., during the desugaring of type classes or partial type applications) 
   -- | rather than explicitly written by the user.
@@ -323,7 +361,7 @@ data Bind a
   -- | The variable cannot reference itself in its own expression body.
   -- | Ex: `let x = 10 in x + 1`
   = NonRec (Binding a)
-  
+
   -- | A group of one or more mutually recursive variable definitions.
   -- | All variables defined in this array are in scope within each other's bodies.
   -- | Ex: `let ping n = pong (n-1); pong n = ping (n-1) in ping 10`
@@ -440,20 +478,20 @@ data Binder a
   -- | A wildcard pattern that matches anything and discards it.
   -- | Ex: `_ -> ...`
   = BinderNull a
-  
+
   -- | A variable pattern that binds the matched value to an identifier.
   -- | Ex: `x -> x + 1`
   | BinderVar a Ident
-  
+
   -- | A named pattern (also known as an "as-pattern" or "alias pattern").
   -- | It binds the entire matched value to an identifier, while still matching the inner sub-pattern.
   -- | Ex: `arr@[x, y] -> ...` (Here `arr` is the `Ident`, and `[x, y]` is the inner `Binder a`)
   | BinderNamed a Ident (Binder a)
-  
+
   -- | A literal pattern (e.g., matching on a specific string, number, array, or record shape).
   -- | Ex: `42 -> ...` or `{ name: "John" } -> ...`
   | BinderLit a (Literal (Binder a))
-  
+
   -- | A constructor pattern (matching on an Algebraic Data Type).
   -- | 1. `Qualified ProperName`: The fully qualified name of the Type being matched (e.g., `Data.Either.Either`).
   -- | 2. `Qualified Ident`: The fully qualified name of the Constructor being matched (e.g., `Data.Either.Left`).
@@ -472,13 +510,6 @@ data Binder a
 
 derive instance functorBinder :: Functor Binder
 
-emptyAnn :: Ann
-emptyAnn = Ann
-  { span: emptySpan
-  , meta: Nothing
-  , type: Nothing
-  }
-
 emptySpan :: SourceSpan
 emptySpan = { path: "<internal>", start: zero, end: zero }
 
@@ -493,12 +524,6 @@ exprAnn = case _ of
   ExprApp a _ _ -> a
   ExprCase a _ _ -> a
   ExprLet a _ _ -> a
-
-litChildren :: forall a. Literal a -> Array a
-litChildren = case _ of
-  LitArray as -> as
-  LitRecord ps -> propValue <$> ps
-  _ -> []
 
 isPrimModule :: ModuleName -> Boolean
 isPrimModule (ModuleName name) = name == "Prim" || SCU.take 5 name == "Prim."

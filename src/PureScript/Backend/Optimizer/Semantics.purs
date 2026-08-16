@@ -2,7 +2,51 @@
 -- | Ce module implémente une véritable machine virtuelle simplifiée au sein même du compilateur.
 -- | Il définit les règles d'évaluation partielle du BackendSyntax, permettant à l'optimiseur de "faire tourner" virtuellement le programme pour simplifier les expressions statiques, fusionner les applications de fonctions (Beta-réduction) et propager des constantes.
 
-module PureScript.Backend.Optimizer.Semantics where
+module PureScript.Backend.Optimizer.Semantics
+  ( Env(..)
+  , DataTypeMeta
+  , CtorMeta
+  , LocalBinding(..)
+  , MkFn(..)
+  , Spine
+  , RecSpine
+  , SemConditional(..)
+  , BackendExpr(..)
+  , LetBindingAssoc
+  , EffectBindingAssoc
+  , BackendRewrite(..)
+  , UnpackOp(..)
+  , DistOp(..)
+  , Ctx(..)
+  , NeutralExpr(..)
+  , EvalRef(..)
+  , InlineAccessor(..)
+  , InlineDirective(..)
+  , InlineDirectiveMap
+  , insertDirective
+  , ExternImpl(..)
+  , BackendSemantics(..)
+  , ExternSpine(..)
+  , evalAccessor
+  , evalApp
+  , evalAssocOp
+  , evalMkFn
+  , evalPrimOp
+  , evalUncurriedApp
+  , evalUncurriedEffectApp
+  , evalUpdate
+  , liftBoolean
+  , liftInt
+  , makeEffectBind
+  , makeLet
+  , build
+  , evalExternFromImpl
+  , evalExternRefFromImpl
+  , freeze
+  , optimize
+  , unwrapSemTyped
+  , foldBackendExpr
+  ) where
 
 import Prelude
 
@@ -566,17 +610,6 @@ neutralSpine = foldl go
       NeutAccessor hd acc
     ExternPrimOp op1 ->
       NeutPrimOp (Op1 op1 hd)
-
--- | Crée une application neutre (qui ne peut pas être évaluée plus avant) à partir d'une épine.
-neutralApp :: BackendSemantics -> Spine BackendSemantics -> BackendSemantics
-neutralApp hd spine
-  | Array.null spine =
-      hd
-  | otherwise = case hd of
-      NeutApp hd' spine' ->
-        NeutApp hd' (spine' <> spine)
-      _ ->
-        NeutApp hd spine
 
 -- | Évalue l'accès à une propriété d'un enregistrement (record). Si l'enregistrement est statique, extrait directement la valeur.
 evalAccessor :: Env -> BackendSemantics -> BackendAccessor -> BackendSemantics
@@ -1273,18 +1306,6 @@ isRefExpr = case _ of
   PrimOp _ -> true
   _ -> false
 
--- | Modifie les heuristiques d'analyse (taille, pureté) d'une fonction en fonction des directives utilisateur (@inline, @noinline).
-analysisFromDirective :: BackendAnalysis -> InlineDirective -> BackendAnalysis
-analysisFromDirective (BackendAnalysis analysis) = case _ of
-  InlineAlways ->
-    mempty
-  InlineNever ->
-    BackendAnalysis analysis { complexity = NonTrivial, size = top }
-  InlineArity n ->
-    BackendAnalysis analysis { args = Array.take n analysis.args }
-  InlineDefault ->
-    BackendAnalysis analysis
-
 -- | Lève une valeur booléenne native (True/False) dans le domaine sémantique du compilateur.
 liftBoolean :: Boolean -> BackendSemantics
 liftBoolean = NeutLit <<< LitBoolean
@@ -1308,24 +1329,6 @@ liftOp1 op a = NeutPrimOp (Op1 op a)
 -- | Lève un opérateur binaire primitif dans le domaine sémantique.
 liftOp2 :: BackendOperator2 -> BackendSemantics -> BackendSemantics -> BackendSemantics
 liftOp2 op a b = NeutPrimOp (Op2 op a b)
-
--- | Extrait statiquement une chaîne de caractères depuis le domaine sémantique, si elle est connue.
-caseString :: BackendSemantics -> Maybe String
-caseString = case _ of
-  NeutLit (LitString a) -> Just a
-  _ -> Nothing
-
--- | Extrait statiquement un entier depuis le domaine sémantique, s'il est connu.
-caseInt :: BackendSemantics -> Maybe Int
-caseInt = case _ of
-  NeutLit (LitInt a) -> Just a
-  _ -> Nothing
-
--- | Extrait statiquement un nombre flottant depuis le domaine sémantique, s'il est connu.
-caseNumber :: BackendSemantics -> Maybe Number
-caseNumber = case _ of
-  NeutLit (LitNumber a) -> Just a
-  _ -> Nothing
 
 -- | Contexte utilisé durant la phase de reconstruction (quote), gérant la profondeur (De Bruijn) et la pureté.
 newtype Ctx = Ctx
@@ -1632,12 +1635,8 @@ rewriteInline ident level binding body = do
         s2
   ExprRewrite (withRewrite (bound level powAnalysis)) $ RewriteInline ident level binding body
 
--- | Vérifie si une expression Syntaxique n'est qu'une simple référence vers une autre variable.
-isReference :: forall a. BackendSyntax a -> Boolean
-isReference = case _ of
-  Var _ -> true
-  Local _ _ -> true
-  _ -> false
+
+
 
 -- | Décide si une fonction peut subir une eta-réduction (ex: transformer \x -> f x en f).
 shouldEtaReduce :: Level -> BackendExpr -> BackendExpr -> Maybe BackendExpr

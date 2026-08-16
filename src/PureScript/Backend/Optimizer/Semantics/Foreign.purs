@@ -1,7 +1,12 @@
 -- | Sémantique FFI (Foreign.purs)
 -- | Étend le moteur d'évaluation (Semantics) pour lui permettre de comprendre et de gérer le comportement (du moins l'empreinte de dépendance) du code FFI (fonctions étrangères), afin d'éviter de casser ou d'éliminer à tort des fonctions implémentées nativement.
 
-module PureScript.Backend.Optimizer.Semantics.Foreign where
+module PureScript.Backend.Optimizer.Semantics.Foreign
+  ( ForeignEval
+  , ForeignSemantics
+  , coreForeignSemantics
+  , qualified
+  ) where
 
 import Data.Array as Array
 import Data.Array.NonEmpty as NonEmptyArray
@@ -105,17 +110,7 @@ effect_bindE = Tuple (qualified "Effect" "bindE") effectBind
 effect_pureE :: ForeignSemantics
 effect_pureE = Tuple (qualified "Effect" "pureE") effectPure
 
-effect_ref_new :: ForeignSemantics
-effect_ref_new = Tuple (qualified "Effect.Ref" "_new") effectRefNew
 
-effect_ref_read :: ForeignSemantics
-effect_ref_read = Tuple (qualified "Effect.Ref" "read") effectRefRead
-
-effect_ref_write :: ForeignSemantics
-effect_ref_write = Tuple (qualified "Effect.Ref" "write") effectRefWrite
-
-effect_ref_modify :: ForeignSemantics
-effect_ref_modify = Tuple (qualified "Effect.Ref" "modify") effectRefModify
 
 effect_unsafe_unsafePerformEffect :: ForeignSemantics
 effect_unsafe_unsafePerformEffect = Tuple (qualified "Effect.Unsafe" "unsafePerformEffect") effectUnsafePerform
@@ -597,50 +592,4 @@ record_unsafe_union_unsafeUnionFn = Tuple (qualified "Record.Unsafe.Union" "unsa
     _ ->
       Nothing
 
-test_data_undefinedOr_compareUndefinedOrImpl :: ForeignSemantics
-test_data_undefinedOr_compareUndefinedOrImpl = Tuple (qualified "Test.Data.UndefinedOr" "compareUndefinedOrImpl") go
-  where
-  go env _ = case _ of
-    [ ExternApp [ lt, eq, gt, compareFn, a, b ] ] ->
-      Just $ goCmp env lt eq gt compareFn a b
-    [ ExternApp [ lt, eq, gt, compareFn, a ] ] ->
-      Just $ SemLam Nothing \b ->
-        goCmp env lt eq gt compareFn a b
-    [ ExternApp [ lt, eq, gt, compareFn ] ] ->
-      Just $ SemLam Nothing \a ->
-        SemLam Nothing \b ->
-          goCmp env lt eq gt compareFn a b
-    [ ExternApp [ lt, eq, gt ] ] ->
-      Just $ SemLam Nothing \compareFn ->
-        SemLam Nothing \a ->
-          SemLam Nothing \b ->
-            goCmp env lt eq gt compareFn a b
-    [ ExternApp [ lt, eq ] ] ->
-      Just $ SemLam Nothing \gt ->
-        SemLam Nothing \compareFn ->
-          SemLam Nothing \a ->
-            SemLam Nothing \b ->
-              goCmp env lt eq gt compareFn a b
-    [ ExternApp [ lt ] ] ->
-      Just $ SemLam Nothing \eq ->
-        SemLam Nothing \gt ->
-          SemLam Nothing \compareFn ->
-            SemLam Nothing \a ->
-              SemLam Nothing \b ->
-                goCmp env lt eq gt compareFn a b
-    [] ->
-      Just $ SemLam Nothing \lt ->
-        SemLam Nothing \eq ->
-          SemLam Nothing \gt ->
-            SemLam Nothing \compareFn ->
-              SemLam Nothing \a ->
-                SemLam Nothing \b ->
-                  goCmp env lt eq gt compareFn a b
-    _ ->
-      Nothing
 
-  goCmp env lt eq gt compareFn a b = case a, b of
-    NeutPrimUndefined, NeutPrimUndefined -> eq
-    NeutPrimUndefined, _ -> lt
-    _, NeutPrimUndefined -> gt
-    _, _ -> evalApp env compareFn [ a, b ]

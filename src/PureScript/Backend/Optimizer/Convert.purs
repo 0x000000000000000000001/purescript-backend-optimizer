@@ -1,7 +1,3 @@
--- | Passerelle CoreFn -> BackendSyntax (Convert.purs)
--- | La toute première étape de la compilation. Ce module traduit l'AST brut du compilateur PureScript (CoreFn) vers l'AST interne de l'optimiseur (BackendSyntax).
--- | C'est ici qu'on abandonne le modèle abstrait de PureScript pour un modèle plus proche de l'exécution machine.
-
 -- | ### Algorithm Summary for Optimized Pattern Matching Conversion
 -- |
 -- | The algorithm used for converting `ExprCase` into `BackendExpr` is based on two papers:
@@ -47,17 +43,21 @@
 -- |                 2. put a copy of the row in Problem B
 -- |         3. If the chosen column is an expandable type, recurse on Problem A
 -- |         4. Otherwise, guard against the chosen pattern, recursing on Problem A if it succeeds and recursing on Problem B if it fails.
-module PureScript.Backend.Optimizer.Convert where
+module PureScript.Backend.Optimizer.Convert
+  ( BackendBindingGroup
+  , BackendImplementations
+  , BackendModule
+  , OptimizationSteps
+  , toBackendModule
+  ) where
 
 import Prelude
-
 
 import Control.Alternative (guard, (<|>))
 import Control.Monad.RWS (ask)
 import Data.Array as Array
 import Data.Array.NonEmpty (NonEmptyArray)
 import Data.Array.NonEmpty as NonEmptyArray
-
 import Data.Foldable (foldMap, foldl)
 import Data.FoldableWithIndex (foldMapWithIndex, foldlWithIndex, foldrWithIndex)
 import Data.Function (on)
@@ -73,7 +73,6 @@ import Data.Semigroup.Foldable (maximum)
 import Data.Set (Set)
 import Data.Set as Set
 import Data.String as String
-
 import Data.Traversable (class Foldable, Accum, foldr, for, mapAccumL, mapAccumR, sequence, traverse)
 import Data.TraversableWithIndex (forWithIndex)
 import Data.Tuple (Tuple(..), fst, snd)
@@ -261,15 +260,6 @@ toBackendTopLevelBindingGroup env = case _ of
 -- | - everything in-between the two are the steps that were taken from `head` to `last`
 type OptimizationSteps = Array (Tuple (Qualified Ident) (NonEmptyArray BackendExpr))
 
-
-
-
-
-
-
-
-
-
 printExpr :: BackendExpr -> String
 printExpr (ExprRewrite _ _) = "ExprRewrite (...)"
 printExpr (ExprSyntax _ syn) = case syn of
@@ -280,7 +270,6 @@ printExpr (ExprSyntax _ syn) = case syn of
   Var _ -> "Var"
   Local _ _ -> "Local"
   _ -> "Other"
-
 
 toTopLevelBackendBinding :: Array (Qualified Ident) -> ConvertEnv -> Binding Ann -> Accum ConvertEnv (Tuple Ident (WithDeps NeutralExpr))
 toTopLevelBackendBinding group env (Binding _ ident cfn) = do
@@ -489,12 +478,6 @@ getCtx env = Ctx
       ExternCtor _ _ _ _ _ ->
         Nothing
 
-fromExternImpl :: ExternImpl -> Maybe NeutralExpr
-fromExternImpl = case _ of
-  ExternExpr _ a -> Just a
-  ExternDict _ _ -> Nothing
-  ExternCtor _ _ _ _ _ -> Nothing
-
 levelUp :: forall a. ConvertM a -> ConvertM a
 levelUp f env = f (env { currentLevel = env.currentLevel + 1 })
 
@@ -584,22 +567,22 @@ toBackendExprWithType mbTy expr = do
           Just (CaseAlternative binders _) -> binders
           Nothing -> []
       in
-      foldr
-        ( \(Tuple i altExpr) next idents ->
-            let 
-              altTy = case Array.index firstBinders i of
-                Just binder -> let Ann bAnn = binderAnn binder in bAnn.type
-                Nothing -> Nothing
-            in
-            makeLet Nothing (toBackendExprWithType altTy altExpr) \tmp ->
-              next (Array.snoc idents tmp)
-        )
-        ( \idents ->
-            toInitialCaseRows idents alts \caseRows ->
-              buildCaseTreeFromRows caseRows
-        )
-        (Array.mapWithIndex Tuple exprs)
-        []
+        foldr
+          ( \(Tuple i altExpr) next idents ->
+              let
+                altTy = case Array.index firstBinders i of
+                  Just binder -> let Ann bAnn = binderAnn binder in bAnn.type
+                  Nothing -> Nothing
+              in
+                makeLet Nothing (toBackendExprWithType altTy altExpr) \tmp ->
+                  next (Array.snoc idents tmp)
+          )
+          ( \idents ->
+              toInitialCaseRows idents alts \caseRows ->
+                buildCaseTreeFromRows caseRows
+          )
+          (Array.mapWithIndex Tuple exprs)
+          []
     where
     toInitialCaseRows :: Array Level -> Array (CaseAlternative Ann) -> (Array CaseRow -> ConvertM BackendExpr) -> ConvertM BackendExpr
     toInitialCaseRows idents alts useCaseRowsCb =
@@ -1113,7 +1096,6 @@ make a = buildM =<< sequence a
 
 toBackendBinding :: Binding Ann -> ConvertM (Tuple Ident BackendExpr)
 toBackendBinding (Binding _ ident expr) = Tuple ident <$> toBackendExpr expr
-
 
 inferExprType :: Expr Ann -> Maybe ExprType
 inferExprType (ExprApp _ fn _) = case exprAnn fn of
