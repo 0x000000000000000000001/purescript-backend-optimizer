@@ -263,12 +263,12 @@ analyze env (NeutralExpr expr) = case expr of
   App hd tl | Just (Tuple ref arity) <- unwrapAppHead hd (NonEmptyArray.length tl) -> do
     let hd' = analyze env hd
     let tl' = overTcoAnalysis tcoNoTailCalls <<< analyze env <$> tl
-    let analysis2 = tcoCall ref arity (foldMap tcoAnalysisOf tl')
+    let analysis2 = tcoCall ref arity (appArgsAnalysis hd' <> foldMap tcoAnalysisOf tl')
     TcoExpr analysis2 $ App hd' tl'
   UncurriedApp hd tl | Just (Tuple ref arity) <- unwrapAppHead hd (Array.length tl) -> do
     let hd' = analyze env hd
     let tl' = overTcoAnalysis tcoNoTailCalls <<< analyze env <$> tl
-    let analysis2 = tcoCall ref arity (foldMap tcoAnalysisOf tl')
+    let analysis2 = tcoCall ref arity (appArgsAnalysis hd' <> foldMap tcoAnalysisOf tl')
     TcoExpr analysis2 $ UncurriedApp hd' tl'
   PrimEffect (EffectRefRead ref) | Just refId <- unwrapRefHead ref -> do
     let ref' = analyze env ref
@@ -318,6 +318,14 @@ analyze env (NeutralExpr expr) = case expr of
   _ -> do
     let expr' = analyze env <$> expr
     TcoExpr (tcoNoTailCalls (foldMap tcoAnalysisOf expr')) expr'
+
+appArgsAnalysis :: TcoExpr -> TcoAnalysis
+appArgsAnalysis (TcoExpr _ expr) = case expr of
+  App fn args -> appArgsAnalysis fn <> foldMap (tcoAnalysisOf) args
+  UncurriedApp fn args -> appArgsAnalysis fn <> foldMap (tcoAnalysisOf) args
+  UncurriedEffectApp fn args -> appArgsAnalysis fn <> foldMap (tcoAnalysisOf) args
+  Typed _ inner -> appArgsAnalysis inner
+  _ -> mempty
 
 unwrapAppHead :: NeutralExpr -> Int -> Maybe (Tuple TcoRef Int)
 unwrapAppHead (NeutralExpr expr) arity = case expr of
