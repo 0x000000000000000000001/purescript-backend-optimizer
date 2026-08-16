@@ -15,7 +15,6 @@ import Data.Set (Set)
 import Data.Set as Set
 import Data.Tuple (Tuple(..))
 import PureScript.Backend.Optimizer.Analysis (BackendAnalysis(..))
-import PureScript.Backend.Optimizer.Convert (BackendModule)
 import PureScript.Backend.Optimizer.CoreFn (Ident, ModuleName, Qualified(..))
 import PureScript.Backend.Optimizer.Semantics (ExternImpl)
 

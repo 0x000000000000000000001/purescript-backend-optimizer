@@ -57,7 +57,7 @@ import Control.Monad.RWS (ask)
 import Data.Array as Array
 import Data.Array.NonEmpty (NonEmptyArray)
 import Data.Array.NonEmpty as NonEmptyArray
-import Debug as Debug
+
 import Data.Foldable (foldMap, foldl)
 import Data.FoldableWithIndex (foldMapWithIndex, foldlWithIndex, foldrWithIndex)
 import Data.Function (on)
@@ -73,7 +73,7 @@ import Data.Semigroup.Foldable (maximum)
 import Data.Set (Set)
 import Data.Set as Set
 import Data.String as String
-import Debug as Debug
+
 import Data.Traversable (class Foldable, Accum, foldr, for, mapAccumL, mapAccumR, sequence, traverse)
 import Data.TraversableWithIndex (forWithIndex)
 import Data.Tuple (Tuple(..), fst, snd)
@@ -271,7 +271,7 @@ type OptimizationSteps = Array (Tuple (Qualified Ident) (NonEmptyArray BackendEx
 
 
 printExpr :: BackendExpr -> String
-printExpr (ExprRewrite _ e) = "ExprRewrite (...)"
+printExpr (ExprRewrite _ _) = "ExprRewrite (...)"
 printExpr (ExprSyntax _ syn) = case syn of
   Typed _ a -> "Typed (" <> printExpr a <> ")"
   Abs _ _ -> "Abs (...)"
@@ -298,7 +298,6 @@ toTopLevelBackendBinding group env (Binding _ ident cfn) = do
       Just ty -> ExprSyntax (analysisOf optimizedExpr) (Typed ty optimizedExpr)
       Nothing -> optimizedExpr
   let isDict = fst (isTypeClassDictionaryWithProps cfn)
-  let _ = if ident == Ident "contains" then Debug.trace ("OPTIMIZED AST FOR CONTAINS: " <> printExpr optimizedExprWithTy) (\_ -> unit) else unit
   let Tuple impl expr' = toExternImpl env group isDict optimizedExprWithTy
   { accum: env
       { implementations = Map.insert qualifiedIdent impl env.implementations
@@ -569,8 +568,8 @@ toBackendExprWithType mbTy expr = do
       foldr goBind (toBackendExpr body) binds
       where
       goBind bind' next = case bind' of
-        NonRec (Binding _ ident expr) ->
-          makeLet (Just ident) (toBackendExpr expr) \_ -> next
+        NonRec (Binding _ ident exprBody) ->
+          makeLet (Just ident) (toBackendExpr exprBody) \_ -> next
         Rec bindings | Just bindings' <- NonEmptyArray.fromArray bindings -> do
           lvl <- currentLevel
           let idents = (\(Binding _ ident _) -> ident) <$> bindings'
@@ -586,13 +585,13 @@ toBackendExprWithType mbTy expr = do
           Nothing -> []
       in
       foldr
-        ( \(Tuple i expr) next idents ->
+        ( \(Tuple i altExpr) next idents ->
             let 
-              mbTy = case Array.index firstBinders i of
+              altTy = case Array.index firstBinders i of
                 Just binder -> let Ann bAnn = binderAnn binder in bAnn.type
                 Nothing -> Nothing
             in
-            makeLet Nothing (toBackendExprWithType mbTy expr) \tmp ->
+            makeLet Nothing (toBackendExprWithType altTy altExpr) \tmp ->
               next (Array.snoc idents tmp)
         )
         ( \idents ->

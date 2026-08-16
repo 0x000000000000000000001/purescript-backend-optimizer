@@ -466,11 +466,11 @@ evalApp env hd spine = go Nothing env hd (List.fromFoldable spine)
         Nothing -> fn
     fn, args ->
       let
-        fn' = case mbTy of
-          Just ty -> SemTyped ty fn
-          Nothing -> fn
+        app = NeutApp fn (List.toUnfoldable args)
       in
-        NeutApp fn' (List.toUnfoldable args)
+        case mbTy of
+          Just ty -> SemTyped ty app
+          Nothing -> app
 
 -- | Évalue l'application d'une fonction décurryfiée. Tente de saturer la fonction avec 
 -- | les arguments fournis.
@@ -493,11 +493,11 @@ evalUncurriedApp env hd spine = go Nothing hd
       NeutFail err
     hd' ->
       let
-        finalHd = case mbTy of
-          Just ty -> SemTyped ty hd'
-          Nothing -> hd'
+        app spine' = NeutUncurriedApp hd' spine'
       in
-        guardFailOver identity spine (NeutUncurriedApp finalHd)
+        guardFailOver identity spine \spine' -> case mbTy of
+          Just ty -> SemTyped ty (app spine')
+          Nothing -> app spine'
 
 -- | Évalue l'application d'une fonction décurryfiée avec effets (UncurriedEffectApp).
 evalUncurriedEffectApp :: Env -> BackendSemantics -> Spine BackendSemantics -> BackendSemantics
@@ -516,11 +516,11 @@ evalUncurriedEffectApp env hd spine = go Nothing hd
       NeutFail err
     hd' ->
       let
-        finalHd = case mbTy of
-          Just ty -> SemTyped ty hd'
-          Nothing -> hd'
+        app spine' = NeutUncurriedEffectApp hd' spine'
       in
-        guardFailOver identity spine (NeutUncurriedEffectApp finalHd)
+        guardFailOver identity spine \spine' -> case mbTy of
+          Just ty -> SemTyped ty (app spine')
+          Nothing -> app spine'
 
 -- | Applique la beta-réduction sur une fonction décurryfiée saturée.
 evalUncurriedBeta :: (BackendSemantics -> Spine BackendSemantics -> BackendSemantics) -> MkFn BackendSemantics -> Spine BackendSemantics -> BackendSemantics

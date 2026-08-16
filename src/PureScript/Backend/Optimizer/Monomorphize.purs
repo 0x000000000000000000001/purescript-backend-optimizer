@@ -1,9 +1,9 @@
--- | Monomorphisation et Spécialisation (Monomorphize.purs)
+-- | Monomorphisation, Spécialisation et DPE (Dictionary Passing Elimination)
 -- | L'une des passes d'optimisation les plus sophistiquées.
 -- | Elle a pour rôle d'éliminer l'overhead de l'abstraction fonctionnelle :
 -- | 1. En spécialisant le code polymorphe (générique) pour des types concrets.
--- | 2. En inlinant les dictionnaires de Type Classes pour transformer des appels dynamiques en appels directs statiques.
--- | 3. En décurryfiant les fonctions (transformation d'appels imbriqués f(a)(b) en f(a,b) via UncurriedEffectApp).
+-- | 2. En inlinant les dictionnaires de Type Classes pour transformer des appels dynamiques en appels directs statiques (DPE).
+-- | 3. En préparant la décurryfication (via eta-expansion) pour s'assurer que l'arité des fonctions reste visible après l'élimination des dictionnaires.
 
 module PureScript.Backend.Optimizer.Monomorphize
   ( InstantiationMap

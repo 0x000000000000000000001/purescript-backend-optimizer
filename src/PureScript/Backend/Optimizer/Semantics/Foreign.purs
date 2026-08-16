@@ -3,8 +3,6 @@
 
 module PureScript.Backend.Optimizer.Semantics.Foreign where
 
-import Prelude
-
 import Data.Array as Array
 import Data.Array.NonEmpty as NonEmptyArray
 import Data.Either (Either(..))
@@ -12,10 +10,10 @@ import Data.Enum (fromEnum)
 import Data.List as List
 import Data.Map (Map)
 import Data.Map as Map
-import Debug
 import Data.Maybe (Maybe(..))
 import Data.String as String
 import Data.Tuple (Tuple(..))
+import Prelude (comparing, eq, map, not, otherwise, show, ($), (&&), (-), (<$>), (<<<), (<=), (<>), (==))
 import PureScript.Backend.Optimizer.CoreFn (Ident(..), Literal(..), ModuleName(..), Prop(..), Qualified(..), propKey)
 import PureScript.Backend.Optimizer.Semantics (BackendSemantics(..), Env, EvalRef(..), ExternSpine(..), evalAccessor, evalApp, evalAssocOp, evalMkFn, evalPrimOp, evalUncurriedApp, evalUncurriedEffectApp, evalUpdate, liftBoolean, makeEffectBind, makeLet)
 import PureScript.Backend.Optimizer.Syntax (BackendAccessor(..), BackendEffect(..), BackendOperator(..), BackendOperator1(..), BackendOperator2(..), BackendOperatorNum(..), BackendOperatorOrd(..))
