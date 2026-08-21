@@ -111,14 +111,17 @@ checkCache version corefnPath cachePath = do
   cacheStatRes <- attempt (FS.stat cachePath)
   case corefnStatRes, cacheStatRes of
     Right corefnStat, Right cacheStat | Stats.modifiedTimeMs cacheStat >= Stats.modifiedTimeMs corefnStat -> do
-      cacheContent <- FS.readTextFile UTF8 cachePath
-      pure (parse version cacheContent)
+      cacheContentRes <- attempt (FS.readTextFile UTF8 cachePath)
+      case cacheContentRes of
+        Right cacheContent -> pure (parse version cacheContent)
+        Left _ -> pure Nothing
     _, _ -> pure Nothing
 
 -- | Writes a BackendModule to the cache file.
 writeCache :: forall a. String -> String -> a -> Aff Unit
 writeCache version cachePath backendMod = do
-  FS.writeTextFile UTF8 cachePath (stringify version backendMod)
+  _ <- attempt $ FS.writeTextFile UTF8 cachePath (stringify version backendMod)
+  pure unit
 
 -- | Loads and parses default directives, printing any errors to the console
 loadDirectives :: Aff InlineDirectiveMap

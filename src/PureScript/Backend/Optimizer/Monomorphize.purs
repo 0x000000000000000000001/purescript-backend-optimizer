@@ -26,12 +26,13 @@ import Data.Array as Array
 import Data.Foldable (foldl)
 import Data.Map (Map)
 import Data.Map as Map
-import Data.Maybe (Maybe(..), fromMaybe, maybe)
+import Data.Maybe (Maybe(..), fromMaybe, maybe, isJust)
 import Data.Newtype (unwrap)
 import Data.Set (Set)
 import Data.Set as Set
 import Data.String as String
 import Data.String.Pattern (Pattern(..))
+import Debug (trace)
 import Data.Tuple (Tuple(..))
 import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Module(..), ModuleName(..), Prop(..), Qualified(..))
 import PureScript.Backend.Optimizer.FfiSupport (hashString)
@@ -166,11 +167,13 @@ collectExpr modName acc expr = case expr of
     in
       case f of
         ExprVar (Ann ann) (Qualified mbMod (Ident name)) ->
-          case ann.type >>= extractFuncType of
+          let annType = ann.type
+          in case annType >>= extractFuncType of
             Just { fArgs, fRet } ->
               let
-                genericType = fromMaybe Any ann.type
+                genericType = fromMaybe Any annType
                 { dictArgs, normalArgs } = partitionArgs genericType args
+                dictArgs' = dictArgs
                 argTypes = Array.mapMaybe inferExprType normalArgs
                 substArgs = Array.foldl (\substAcc (Tuple fArg xTy) -> unify fArg xTy substAcc) Map.empty (Array.zip fArgs argTypes)
 
@@ -192,9 +195,9 @@ collectExpr modName acc expr = case expr of
                   Nothing -> modName <> "." <> name
               in
                 if qualName == "Data.Functor.map" then
-                  Map.insertWith (\new old -> Map.unionWith (\a b -> { dictArgs: a.dictArgs, callers: Set.union a.callers b.callers }) new old) qualName (Map.singleton (defaultToAny instType) { dictArgs, callers: Set.singleton modName }) acc2
+                  Map.insertWith (\new old -> Map.unionWith (\a b -> { dictArgs: a.dictArgs, callers: Set.union a.callers b.callers }) new old) qualName (Map.singleton (defaultToAny instType) { dictArgs: dictArgs', callers: Set.singleton modName }) acc2
                 else if Map.isEmpty subst then acc2
-                else Map.insertWith (\new old -> Map.unionWith (\a b -> { dictArgs: a.dictArgs, callers: Set.union a.callers b.callers }) new old) qualName (Map.singleton (defaultToAny instType) { dictArgs, callers: Set.singleton modName }) acc2
+                else Map.insertWith (\new old -> Map.unionWith (\a b -> { dictArgs: a.dictArgs, callers: Set.union a.callers b.callers }) new old) qualName (Map.singleton (defaultToAny instType) { dictArgs: dictArgs', callers: Set.singleton modName }) acc2
             _ -> acc2
         _ -> acc2
 
