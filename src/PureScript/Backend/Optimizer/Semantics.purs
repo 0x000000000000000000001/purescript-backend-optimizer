@@ -511,8 +511,13 @@ evalApp env hd spine = go Nothing env hd (List.fromFoldable spine)
     fn, args ->
       let
         app = NeutApp fn (List.toUnfoldable args)
+        finalTy = case mbTy of
+          Just (Func args' retTy) ->
+            let remaining = Array.drop (List.length args) args'
+            in if Array.length remaining > 0 then Just (Func remaining retTy) else Just retTy
+          _ -> mbTy
       in
-        case mbTy of
+        case finalTy of
           Just ty -> SemTyped ty app
           Nothing -> app
 
