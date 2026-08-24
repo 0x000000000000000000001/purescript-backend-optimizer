@@ -216,13 +216,19 @@ decodeConstraint j = do
   args <- getField (decodeArray decodeExprType) o "args"
   pure (Tuple fqn args)
 
-decodeAnn :: String -> Json -> JsonDecode Ann
-decodeAnn _path json = do
+decodeAnn :: Array ExprType -> String -> Json -> JsonDecode Ann
+decodeAnn typeTable _path json = do
   obj <- decodeJObject json
   -- Currently disabled because spans are not used and are a performance drain.
   -- span <- getField (decodeSourceSpan path) obj "sourceSpan"
   meta <- getFieldOptional' decodeMeta obj "meta"
-  type_ <- getFieldOptional' decodeExprType obj "type"
+  
+  typeId <- getFieldOptional' decodeInt obj "typeId"
+  typeObj <- getFieldOptional' decodeExprType obj "type"
+  let type_ = case typeId of
+                Just id -> Array.index typeTable id
+                Nothing -> typeObj
+                
   pure $ Ann { span: emptySpan, meta, type: type_ }
 
 decodeImport :: forall a. (Json -> JsonDecode a) -> Json -> JsonDecode (Import a)
@@ -261,26 +267,27 @@ decodeClassDecl json = do
 decodeModule :: Json -> JsonDecode (Module Ann)
 decodeModule = decodeModule' decodeAnn
 
-decodeModule' :: forall a. (String -> Json -> JsonDecode a) -> Json -> JsonDecode (Module a)
+decodeModule' :: forall a. (Array ExprType -> String -> Json -> JsonDecode a) -> Json -> JsonDecode (Module a)
 decodeModule' decodeAnn' json = do
   obj <- decodeJObject json
+  typeTable <- fromMaybe [] <$> getFieldOptional' (decodeArray decodeExprType) obj "typeTable"
   name <- getField decodeModuleName obj "moduleName"
   path <- getField decodeString obj "modulePath"
   span <- getField (decodeSourceSpan path) obj "sourceSpan"
-  imports <- getField (decodeArray (decodeImport (decodeAnn' path))) obj "imports"
+  imports <- getField (decodeArray (decodeImport (decodeAnn' typeTable path))) obj "imports"
   exports <- getField (decodeArray decodeIdent) obj "exports"
   reExports <- getField decodeReExports obj "reExports"
   mbDataDecls <- getFieldOptional' (decodeArray decodeDataDecl) obj "dataDecls"
   let dataDecls = fromMaybe [] mbDataDecls
   mbClassDecls <- getFieldOptional' (decodeArray decodeClassDecl) obj "classDecls"
   let classDecls = fromMaybe [] mbClassDecls
-  decls <- getField (decodeArray (decodeBind (decodeAnn' path))) obj "decls"
+  decls <- getField (decodeArray (decodeBind (decodeAnn' typeTable path))) obj "decls"
   foreign_arr <- getField (decodeArray decodeIdent) obj "foreign"
   foreign_anns <- fromMaybe Object.empty <$> getFieldOptional' decodeJObject obj "foreignAnnotations"
   foreign_list <- traverse (\ident@(Ident identName) ->
     case Object.lookup identName foreign_anns of
       Just annJson -> do
-        Ann { type: type_ } <- decodeAnn path annJson
+        Ann { type: type_ } <- decodeAnn typeTable path annJson
         pure (Tuple ident type_)
       Nothing ->
         pure (Tuple ident Nothing)
