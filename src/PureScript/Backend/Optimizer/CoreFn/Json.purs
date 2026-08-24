@@ -223,11 +223,10 @@ decodeAnn typeTable _path json = do
   -- span <- getField (decodeSourceSpan path) obj "sourceSpan"
   meta <- getFieldOptional' decodeMeta obj "meta"
   
-  typeId <- getFieldOptional' decodeInt obj "typeId"
-  typeObj <- getFieldOptional' decodeExprType obj "type"
+  typeId <- getFieldOptional' decodeInt obj "type"
   let type_ = case typeId of
                 Just id -> Array.index typeTable id
-                Nothing -> typeObj
+                Nothing -> Nothing
                 
   pure $ Ann { span: emptySpan, meta, type: type_ }
 
