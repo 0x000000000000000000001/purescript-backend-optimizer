@@ -103,6 +103,7 @@ getExprAnn = case _ of
   ExprApp ann _ _ -> ann
   ExprAbs ann _ _ -> ann
   ExprLet ann _ _ -> ann
+  ExprTypeApp ann _ _ -> ann
   ExprCase ann _ _ -> ann
   ExprConstructor ann _ _ _ -> ann
   ExprAccessor ann _ _ -> ann
@@ -206,6 +207,7 @@ collectExpr modName acc expr = case expr of
   ExprAccessor _ e _ -> collectExpr modName acc e
   ExprUpdate _ e props -> foldl (collectProp modName) (collectExpr modName acc e) props
   ExprAbs _ _ e -> collectExpr modName acc e
+  ExprTypeApp _ e _ -> collectExpr modName acc e
   ExprCase _ exprs alts -> foldl (collectAlt modName) (foldl (collectExpr modName) acc exprs) alts
   ExprLet _ binds e -> foldl (collectBind modName) (collectExpr modName acc e) binds
 
@@ -230,6 +232,7 @@ collectTypesFromExpr expr acc = case expr of
   ExprApp (Ann ann) f arg -> collectTypesFromExpr arg (collectTypesFromExpr f (maybe acc (\t -> Set.insert t acc) ann.type))
   ExprAbs (Ann ann) _ e -> collectTypesFromExpr e (maybe acc (\t -> Set.insert t acc) ann.type)
   ExprLet (Ann ann) binds e -> foldl (\a b -> collectTypesFromBind b a) (collectTypesFromExpr e (maybe acc (\t -> Set.insert t acc) ann.type)) binds
+  ExprTypeApp (Ann ann) e _ -> collectTypesFromExpr e (maybe acc (\t -> Set.insert t acc) ann.type)
   ExprCase (Ann ann) exprs alts -> foldl (\a alt -> collectTypesFromAlt alt a) (foldl (flip collectTypesFromExpr) (maybe acc (\t -> Set.insert t acc) ann.type) exprs) alts
   ExprConstructor (Ann ann) _ _ _ -> maybe acc (\t -> Set.insert t acc) ann.type
   ExprAccessor (Ann ann) e _ -> collectTypesFromExpr e (maybe acc (\t -> Set.insert t acc) ann.type)
@@ -291,6 +294,8 @@ rewriteExpr globalAstMap = goLocals
           filtered = Array.foldr foldFn { used: collectFreeVars e', binds: [] } binds'
         in
           if Array.length filtered.binds == 0 then e' else ExprLet (mapAnn f ann) filtered.binds e'
+      ExprTypeApp ann e t ->
+        ExprTypeApp (mapAnn f ann) (go e) t
       ExprCase ann exprs alts ->
         let
           exprs' = map go exprs
@@ -476,6 +481,8 @@ collectFreeVars = case _ of
         binds
     in
       Set.difference used bound
+  ExprTypeApp _ e _ ->
+    collectFreeVars e
   ExprCase _ exprs alts ->
     foldl (\acc alt -> Set.union acc (collectFreeVarsAlt alt)) (foldl (\acc e -> Set.union acc (collectFreeVars e)) Set.empty exprs) alts
   ExprConstructor _ _ _ _ -> Set.empty
@@ -570,6 +577,7 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
         binds
     in
       ExprLet ann (map (monomorphizeBindLocal modName instMap newLocalDicts) binds) (monomorphizeExpr modName instMap newLocalDicts e)
+  ExprTypeApp ann e t -> ExprTypeApp ann (monomorphizeExpr modName instMap localDicts e) t
   ExprCase ann exprs alts -> ExprCase ann (map (monomorphizeExpr modName instMap localDicts) exprs) (map (monomorphizeAlt modName instMap localDicts) alts)
   ExprConstructor ann t c ids -> ExprConstructor ann t c ids
   ExprAccessor ann e prop -> ExprAccessor ann (monomorphizeExpr modName instMap localDicts e) prop
@@ -668,6 +676,8 @@ resolveGlobals definerMod = go
         ExprLet ann binds' (go bound' body)
     ExprConstructor ann t c idents ->
       ExprConstructor ann t c idents
+    ExprTypeApp ann e t ->
+      ExprTypeApp ann (go bound e) t
     ExprCase ann exprs alts ->
       ExprCase ann (map (go bound) exprs)
         ( map

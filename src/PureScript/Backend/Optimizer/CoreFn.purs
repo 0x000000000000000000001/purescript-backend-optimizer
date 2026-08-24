@@ -385,6 +385,7 @@ data Expr a
   | ExprApp a (Expr a) (Expr a)
   | ExprCase a (Array (Expr a)) (Array (CaseAlternative a))
   | ExprLet a (Array (Bind a)) (Expr a)
+  | ExprTypeApp a (Expr a) ExprType
 
 derive instance functorExpr :: Functor Expr
 
@@ -524,6 +525,7 @@ exprAnn = case _ of
   ExprApp a _ _ -> a
   ExprCase a _ _ -> a
   ExprLet a _ _ -> a
+  ExprTypeApp a _ _ -> a
 
 isPrimModule :: ModuleName -> Boolean
 isPrimModule (ModuleName name) = name == "Prim" || SCU.take 5 name == "Prim."

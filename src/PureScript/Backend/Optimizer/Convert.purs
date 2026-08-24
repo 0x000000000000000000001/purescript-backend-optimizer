@@ -373,6 +373,7 @@ isTypeClassDictionaryWithProps expr = case expr of
     Tuple true (snd (isTypeClassDictionaryWithProps body))
   ExprAbs _ _ body -> isTypeClassDictionaryWithProps body
   ExprLet _ _ body -> isTypeClassDictionaryWithProps body
+  ExprTypeApp _ expr _ -> isTypeClassDictionaryWithProps expr
   ExprApp _ lhs (ExprLit _ (LitRecord props))
     | Just meta <- getConstructorMeta lhs
     , meta == IsTypeClassConstructor || meta == IsNewtype -> Tuple true (map propKey props)
@@ -561,6 +562,8 @@ toBackendExprWithType mbTy expr = do
             <*> intro idents lvl next
         Rec _ ->
           unsafeCrashWith "CoreFn empty Rec binding group"
+    ExprTypeApp _ expr _ ->
+      go expr
     ExprCase _ exprs alts ->
       let
         firstBinders = case Array.head alts of

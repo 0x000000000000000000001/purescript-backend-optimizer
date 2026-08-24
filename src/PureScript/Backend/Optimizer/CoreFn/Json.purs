@@ -354,6 +354,10 @@ decodeExpr decAnn json = do
       e1 <- getField (decodeExpr decAnn) obj "abstraction"
       e2 <- getField (decodeExpr decAnn) obj "argument"
       pure $ ExprApp ann e1 e2
+    "TypeApp" -> do
+      e <- getField (decodeExpr decAnn) obj "expression"
+      t <- getField decodeExprType obj "typeArgument"
+      pure $ ExprTypeApp ann e t
     "Case" -> do
       cs <- getField (decodeArray (decodeExpr decAnn)) obj "caseExpressions"
       cas <- getField (decodeArray (decodeCaseAlternative decAnn)) obj "caseAlternatives"
