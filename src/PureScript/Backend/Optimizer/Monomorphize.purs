@@ -236,8 +236,8 @@ collectTypesFromExpr expr acc = case expr of
   ExprUpdate (Ann ann) e props -> foldl (\a (Prop _ v) -> collectTypesFromExpr v a) (collectTypesFromExpr e (maybe acc (\t -> Set.insert t acc) ann.type)) props
 
 collectTypesFromBind :: Bind Ann -> Set ExprType -> Set ExprType
-collectTypesFromBind (NonRec (Binding _ _ e)) acc = collectTypesFromExpr e acc
-collectTypesFromBind (Rec binds) acc = foldl (\a (Binding _ _ e) -> collectTypesFromExpr e a) acc binds
+collectTypesFromBind (NonRec (Binding (Ann ann) _ e)) acc = collectTypesFromExpr e (maybe acc (\t -> Set.insert t acc) ann.type)
+collectTypesFromBind (Rec binds) acc = foldl (\a (Binding (Ann ann) _ e) -> collectTypesFromExpr e (maybe a (\t -> Set.insert t a) ann.type)) acc binds
 
 collectTypesFromAlt :: CaseAlternative Ann -> Set ExprType -> Set ExprType
 collectTypesFromAlt (CaseAlternative _ (Unconditional e)) acc = collectTypesFromExpr e acc
