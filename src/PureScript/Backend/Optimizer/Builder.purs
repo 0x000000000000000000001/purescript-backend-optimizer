@@ -39,6 +39,7 @@ type BuildOptions m =
   , onSkipModule :: BuildEnv -> Module Ann -> m (Maybe BackendModule)
   , onCodegenModule :: BuildEnv -> Module Ann -> BackendModule -> OptimizationSteps -> m Unit
   , traceIdents :: Set (Qualified Ident)
+  , rewriteLimit :: Int
   }
 
 -- | Builds modules given a _sorted_ list of modules.
@@ -73,7 +74,7 @@ buildModules options coreFnModules =
             , directives
             , dataTypes: Map.empty
             , foreignSemantics: options.foreignSemantics
-            , rewriteLimit: 10_000
+            , rewriteLimit: options.rewriteLimit
             , traceIdents: options.traceIdents
             , optimizationSteps: []
             }

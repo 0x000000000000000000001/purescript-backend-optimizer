@@ -21,6 +21,7 @@ import Data.Bifunctor (lmap)
 import Data.Either (Either(..))
 import Data.List as List
 import Data.Maybe (Maybe(..), isJust)
+import Data.Int as Int
 import Data.String as String
 import Data.String.Pattern (Pattern(..))
 import Data.Traversable (traverse)
@@ -79,6 +80,7 @@ type CLIArgs =
   , mbAutoloadPath :: Maybe String
   , mbFfiDir :: Maybe String
   , mbOutputDir :: Maybe String
+  , mbRewriteLimit :: Maybe Int
   , bundle :: Boolean
   }
 
@@ -94,6 +96,7 @@ parseCLIArgs argsRaw =
     , mbAutoloadPath: getArg "--autoload-path"
     , mbFfiDir: getArg "--ffi"
     , mbOutputDir: getArg "--output"
+    , mbRewriteLimit: getArg "--rewrite-limit" >>= Int.fromString
     , bundle: isJust (Array.elemIndex "--bundle" args)
     }
 
