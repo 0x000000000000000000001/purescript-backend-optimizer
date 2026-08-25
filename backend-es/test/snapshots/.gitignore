@@ -1,4 +1,5 @@
-/output/
+output/
+output.bak/
 /output-es
 /.psc-package/
 /.psc*

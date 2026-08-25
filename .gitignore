@@ -1,7 +1,8 @@
 /bower_components/
 /node_modules/
 /.pulp-cache/
-/output/
+output/
+output.bak/
 /output-es/
 /examples-deps/
 /bundle/
