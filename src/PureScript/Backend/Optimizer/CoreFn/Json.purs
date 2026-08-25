@@ -3,10 +3,12 @@
 
 -- @inline Data.Argonaut.Core.caseJson always
 module PureScript.Backend.Optimizer.CoreFn.Json
-  ( decodeModule
+  ( decodeAnn
+  , decodeInt
+  , decodeModule
   , decodeModule'
-  , decodeAnn
-  ) where
+  )
+  where
 
 import Prelude hiding (bind)
 
@@ -25,12 +27,13 @@ import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.String.CodePoints (CodePoint, fromCodePointArray)
 import Data.String.CodeUnits as SCU
-import Data.Traversable (traverse)
+import Data.Traversable (traverse, sequence)
 import Data.Tuple (Tuple(..))
 import Foreign.Object (Object)
 import Foreign.Object as Object
 import Partial.Unsafe (unsafePartial)
 import Prelude as Prelude
+import PureScript.Backend.Optimizer.CoreFn.TypeTable (decodeTypeTableST)
 import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), ClassDecl, Comment(..), ConstructorType(..), DataConstructor, DataDecl, Expr(..), ExprType(..), Guard(..), Ident(..), Import(..), Literal(..), Meta(..), Module(..), ModuleName(..), Prop(..), ProperName(..), Qualified(..), ReExport(..), SourcePos, SourceSpan, emptySpan)
 import Safe.Coerce (coerce)
 import Unsafe.Coerce (unsafeCoerce)
@@ -111,109 +114,56 @@ decodeMeta json = do
     _ ->
       throwError $ TypeMismatch "Meta"
 
-decodeExprType :: Json -> JsonDecode ExprType
-decodeExprType json = decodeStr <|> decodeObj
-  where
-  decodeStr = do
-    str <- decodeString json
-    case str of
-      "Int" -> pure Int
-      "Number" -> pure Number
-      "String" -> pure String
-      "Char" -> pure Char
-      "Boolean" -> pure Boolean
-      "Unit" -> pure Unit
-      "Any" -> pure Any
-      _ -> throwError $ TypeMismatch "ExprType"
 
-  decodeObj _ = do
-    obj <- decodeJObject json
-    case Object.lookup "Func" obj of
-      Just funcJson -> do
-        funcObj <- decodeJObject funcJson
-        args <- getField (decodeArray decodeExprType) funcObj "args"
-        ret <- getField decodeExprType funcObj "ret"
-        pure (Func args ret)
-      Nothing -> case Object.lookup "Record" obj of
-        Just recordJson -> do
-          recordObj <- decodeJObject recordJson
-          let entries = Object.toArrayWithKey Tuple recordObj
-          parsedEntries <- traverse (\(Tuple k v) -> Tuple k <$> decodeExprType v) entries
-          pure (Record (Row parsedEntries Nothing))
-        Nothing -> case Object.lookup "Array" obj of
-          Just arrayJson -> do
-            innerType <- decodeExprType arrayJson
-            pure (Array innerType)
-          Nothing -> case Object.lookup "ADT" obj of
-            Just adtJson -> do
-              adtObj <- decodeJObject adtJson
-              adtPath <- getField (decodeArray decodeString) adtObj "path"
-              adtArgs <- getField (decodeArray decodeExprType) adtObj "args"
-              pure (ADT (intercalate "." adtPath) adtPath adtArgs)
-            Nothing -> case Object.lookup "TypeVar" obj of
-              Just tvJson -> do
-                tv <- decodeString tvJson
-                pure (TypeVar tv)
-              Nothing -> do
-                -- Fallback to the original "type" field decoding
-                typ <- getField decodeString obj "type"
-                case typ of
-                  "Int" -> pure Int
-                  "Number" -> pure Number
-                  "String" -> pure String
-                  "Char" -> pure Char
-                  "Boolean" -> pure Boolean
-                  "Unit" -> pure Unit
-                  "Any" -> pure Any
-                  "TypeLevelString" -> TypeLevelString <$> getField decodeString obj "value"
-                  "Array" -> Array <$> getField decodeExprType obj "element"
-                  "TypeVar" -> TypeVar <$> getField decodeString obj "name"
-                  "Adt" -> do
-                    fqn <- getField (decodeArray decodeString) obj "fqn"
-                    args <- getField (decodeArray decodeExprType) obj "args"
-                    pure (ADT (intercalate "." fqn) fqn args)
-                  "TypeApp" -> do
-                    constructor <- getField decodeExprType obj "constructor"
-                    args <- getField (decodeArray decodeExprType) obj "args"
-                    pure (TypeApp constructor args)
-                  "Func" -> do
-                    args <- getField (decodeArray decodeExprType) obj "args"
-                    ret <- getField decodeExprType obj "ret"
-                    pure (Func args ret)
-                  "Row" -> do
-                    fields <- getField (decodeArray decodeField) obj "fields"
-                    tail <- getFieldOptional' decodeExprType obj "tail"
-                    pure (Row fields tail)
-                  "Record" -> Record <$> getField decodeExprType obj "row"
-                  "ForAll" -> do
-                    vars <- getField (decodeArray decodeString) obj "vars"
-                    body <- getField decodeExprType obj "body"
-                    pure (ForAll vars body)
-                  "ConstrainedType" -> do
-                    constraints <- getField (decodeArray decodeConstraint) obj "constraints"
-                    body <- getField decodeExprType obj "body"
-                    pure (ConstrainedType constraints body)
-                  _ -> throwError $ TypeMismatch "ExprType"
 
-decodeField :: Json -> JsonDecode (Tuple String ExprType)
-decodeField j = do
+
+decodeTypeTable :: Json -> JsonDecode (Array ExprType)
+decodeTypeTable json = do
+  typeTableJson <- decodeJArray json
+  case ST.run (decodeTypeTableST typeTableJson) of
+    Left err -> Left err
+    Right val -> Right val
+
+
+type FieldRef = { label :: String, typeId :: Int }
+
+decodeFieldRef :: Json -> JsonDecode FieldRef
+decodeFieldRef j = do
   o <- decodeJObject j
-  l <- getField decodeString o "label"
-  t <- getField decodeExprType o "type"
-  pure (Tuple l t)
+  label <- getField decodeString o "label"
+  typeId <- getField decodeInt o "type"
+  pure { label, typeId }
 
-decodeMethod :: Json -> JsonDecode (Tuple String ExprType)
-decodeMethod j = do
-  o <- decodeJObject j
-  name <- getField decodeString o "name"
-  t <- getField decodeExprType o "type"
-  pure (Tuple name t)
+type ConstraintRef = { fqn :: Array String, args :: Array Int }
 
-decodeConstraint :: Json -> JsonDecode (Tuple (Array String) (Array ExprType))
-decodeConstraint j = do
+decodeConstraintRef :: Json -> JsonDecode ConstraintRef
+decodeConstraintRef j = do
   o <- decodeJObject j
   fqn <- getField (decodeArray decodeString) o "fqn"
-  args <- getField (decodeArray decodeExprType) o "args"
+  args <- getField (decodeArray decodeInt) o "args"
+  pure { fqn, args }
+decodeField :: Array ExprType -> Json -> JsonDecode (Tuple String ExprType)
+decodeField tt j = do
+  o <- decodeJObject j
+  l <- getField decodeString o "label"
+  tId <- getField decodeInt o "type"
+  t <- note (TypeMismatch "FieldType") (Array.index tt tId)
+  pure (Tuple l t)
+
+decodeMethod :: Array ExprType -> Json -> JsonDecode (Tuple String ExprType)
+decodeMethod tt j = do
+  o <- decodeJObject j
+  name <- getField decodeString o "name"
+  tId <- getField decodeInt o "type"
+  t <- note (TypeMismatch "MethodType") (Array.index tt tId)
+  pure (Tuple name t)
+
+decodeConstraint :: Array ExprType -> Json -> JsonDecode (Tuple (Array String) (Array ExprType))
+decodeConstraint tt j = do
+  o <- decodeJObject j
+  fqn <- getField (decodeArray decodeString) o "fqn"
+  argsIds <- getField (decodeArray decodeInt) o "args"
+  args <- traverse (\i -> note (TypeMismatch "ConstraintArg") (Array.index tt i)) argsIds
   pure (Tuple fqn args)
 
 decodeAnn :: Array ExprType -> String -> Json -> JsonDecode Ann
@@ -237,30 +187,31 @@ decodeImport decodeAnn' json = do
   mod <- getField decodeModuleName obj "moduleName"
   pure $ Import ann mod
 
-decodeDataConstructor :: Json -> JsonDecode DataConstructor
-decodeDataConstructor json = do
+decodeDataConstructor :: Array ExprType -> Json -> JsonDecode DataConstructor
+decodeDataConstructor tt json = do
   obj <- decodeJObject json
   name <- getField decodeString obj "name" <|> \_ -> getField decodeString obj "constructorName"
-  fields <- getField (decodeArray decodeExprType) obj "fields" <|> \_ -> getField (decodeArray decodeExprType) obj "fieldTypes"
+  fieldIds <- getField (decodeArray decodeInt) obj "fields" <|> \_ -> getField (decodeArray decodeInt) obj "fieldTypes"
+  fields <- traverse (\i -> note (TypeMismatch "ConstructorField") (Array.index tt i)) fieldIds
   pure { name, fields }
 
-decodeDataDecl :: Json -> JsonDecode DataDecl
-decodeDataDecl json = do
+decodeDataDecl :: Array ExprType -> Json -> JsonDecode DataDecl
+decodeDataDecl tt json = do
   obj <- decodeJObject json
   name <- getField decodeString obj "name" <|> \_ -> getField decodeString obj "typeName"
   mbTypeVars <- getFieldOptional' (decodeArray decodeString) obj "vars" <|> \_ -> getFieldOptional' (decodeArray decodeString) obj "typeVars"
   let vars = fromMaybe [] mbTypeVars
-  constructors <- getField (decodeArray decodeDataConstructor) obj "constructors"
+  constructors <- getField (decodeArray (decodeDataConstructor tt)) obj "constructors"
   pure { name, vars, constructors }
 
-decodeClassDecl :: Json -> JsonDecode ClassDecl
-decodeClassDecl json = do
+decodeClassDecl :: Array ExprType -> Json -> JsonDecode ClassDecl
+decodeClassDecl tt json = do
   obj <- decodeJObject json
   name <- getField decodeString obj "name"
   mbVars <- getFieldOptional' (decodeArray decodeString) obj "vars"
   let vars = fromMaybe [] mbVars
-  superclasses <- getField (decodeArray decodeConstraint) obj "superclasses"
-  methods <- getField (decodeArray decodeMethod) obj "methods"
+  superclasses <- getField (decodeArray (decodeConstraint tt)) obj "superclasses"
+  methods <- getField (decodeArray (decodeMethod tt)) obj "methods"
   pure { name, vars, superclasses, methods }
 
 decodeModule :: Json -> JsonDecode (Module Ann)
@@ -269,18 +220,18 @@ decodeModule = decodeModule' decodeAnn
 decodeModule' :: forall a. (Array ExprType -> String -> Json -> JsonDecode a) -> Json -> JsonDecode (Module a)
 decodeModule' decodeAnn' json = do
   obj <- decodeJObject json
-  typeTable <- fromMaybe [] <$> getFieldOptional' (decodeArray decodeExprType) obj "typeTable"
+  typeTable <- fromMaybe [] <$> getFieldOptional' decodeTypeTable obj "typeTable"
   name <- getField decodeModuleName obj "moduleName"
   path <- getField decodeString obj "modulePath"
   span <- getField (decodeSourceSpan path) obj "sourceSpan"
   imports <- getField (decodeArray (decodeImport (decodeAnn' typeTable path))) obj "imports"
   exports <- getField (decodeArray decodeIdent) obj "exports"
   reExports <- getField decodeReExports obj "reExports"
-  mbDataDecls <- getFieldOptional' (decodeArray decodeDataDecl) obj "dataDecls"
+  mbDataDecls <- getFieldOptional' (decodeArray (decodeDataDecl typeTable)) obj "dataDecls"
   let dataDecls = fromMaybe [] mbDataDecls
-  mbClassDecls <- getFieldOptional' (decodeArray decodeClassDecl) obj "classDecls"
+  mbClassDecls <- getFieldOptional' (decodeArray (decodeClassDecl typeTable)) obj "classDecls"
   let classDecls = fromMaybe [] mbClassDecls
-  decls <- getField (decodeArray (decodeBind (decodeAnn' typeTable path))) obj "decls"
+  decls <- getField (decodeArray (decodeBind typeTable (decodeAnn' typeTable path))) obj "decls"
   foreign_arr <- getField (decodeArray decodeIdent) obj "foreign"
   foreign_anns <- fromMaybe Object.empty <$> getFieldOptional' decodeJObject obj "foreignAnnotations"
   foreign_list <- traverse (\ident@(Ident identName) ->
@@ -313,24 +264,24 @@ decodeReExports json = do
   all <- traverse (traverse (decodeArray decodeIdent)) $ Object.toArrayWithKey Tuple obj
   pure $ all >>= \(Tuple mn idents) -> ReExport (ModuleName mn) <$> idents
 
-decodeBind :: forall a. (Json -> JsonDecode a) -> Json -> JsonDecode (Bind a)
-decodeBind decAnn json = do
+decodeBind :: forall a. Array ExprType -> (Json -> JsonDecode a) -> Json -> JsonDecode (Bind a)
+decodeBind tt decAnn json = do
   obj <- decodeJObject json
   typ <- getField decodeString obj "bindType"
   case typ of
-    "NonRec" -> NonRec <$> decodeBinding decAnn obj
-    "Rec" -> Rec <$> getField (decodeArray (decodeJObject >=> decodeBinding decAnn)) obj "binds"
+    "NonRec" -> NonRec <$> decodeBinding tt decAnn obj
+    "Rec" -> Rec <$> getField (decodeArray (decodeJObject >=> decodeBinding tt decAnn)) obj "binds"
     _ -> throwError $ TypeMismatch "Bind"
 
-decodeBinding :: forall a. (Json -> JsonDecode a) -> Object Json -> JsonDecode (Binding a)
-decodeBinding decAnn obj = do
+decodeBinding :: forall a. Array ExprType -> (Json -> JsonDecode a) -> Object Json -> JsonDecode (Binding a)
+decodeBinding tt decAnn obj = do
   ann <- getField decAnn obj "annotation"
   ident <- getField decodeIdent obj "identifier"
-  expr <- getField (decodeExpr decAnn) obj "expression"
+  expr <- getField (decodeExpr tt decAnn) obj "expression"
   pure $ Binding ann ident expr
 
-decodeExpr :: forall a. (Json -> JsonDecode a) -> Json -> JsonDecode (Expr a)
-decodeExpr decAnn json = do
+decodeExpr :: forall a. Array ExprType -> (Json -> JsonDecode a) -> Json -> JsonDecode (Expr a)
+decodeExpr tt decAnn json = do
   obj <- decodeJObject json
   ann <- getField decAnn obj "annotation"
   typ <- getField decodeString obj "type"
@@ -338,60 +289,61 @@ decodeExpr decAnn json = do
     "Var" ->
       ExprVar ann <$> getField (decodeQualified decodeIdent) obj "value"
     "Literal" ->
-      ExprLit ann <$> getField (decodeLiteral (decodeExpr decAnn)) obj "value"
+      ExprLit ann <$> getField (decodeLiteral (decodeExpr tt decAnn)) obj "value"
     "Constructor" -> do
       tyn <- getField decodeProperName obj "typeName"
       con <- getField decodeIdent obj "name" <|> \_ -> getField decodeIdent obj "constructorName"
       is <- getField (decodeArray decodeStringLiteral) obj "fields" <|> \_ -> getField (decodeArray decodeStringLiteral) obj "fieldNames"
       pure $ ExprConstructor ann tyn con is
     "Accessor" -> do
-      e <- getField (decodeExpr decAnn) obj "expression"
+      e <- getField (decodeExpr tt decAnn) obj "expression"
       f <- getField decodeStringLiteral obj "fieldName"
       pure $ ExprAccessor ann e f
     "ObjectUpdate" -> do
-      e <- getField (decodeExpr decAnn) obj "expression"
-      us <- getField (decodeRecord (decodeExpr decAnn)) obj "updates"
+      e <- getField (decodeExpr tt decAnn) obj "expression"
+      us <- getField (decodeRecord (decodeExpr tt decAnn)) obj "updates"
       pure $ ExprUpdate ann e us
     "Abs" -> do
       idn <- getField decodeIdent obj "argument"
-      e <- getField (decodeExpr decAnn) obj "body"
+      e <- getField (decodeExpr tt decAnn) obj "body"
       pure $ ExprAbs ann idn e
     "App" -> do
-      e1 <- getField (decodeExpr decAnn) obj "abstraction"
-      e2 <- getField (decodeExpr decAnn) obj "argument"
+      e1 <- getField (decodeExpr tt decAnn) obj "abstraction"
+      e2 <- getField (decodeExpr tt decAnn) obj "argument"
       pure $ ExprApp ann e1 e2
     "TypeApp" -> do
-      e <- getField (decodeExpr decAnn) obj "expression"
-      t <- getField decodeExprType obj "typeArgument"
+      e <- getField (decodeExpr tt decAnn) obj "expression"
+      tId <- getField decodeInt obj "typeArgument"
+      t <- note (TypeMismatch "ExprTypeApp") (Array.index tt tId)
       pure $ ExprTypeApp ann e t
     "Case" -> do
-      cs <- getField (decodeArray (decodeExpr decAnn)) obj "caseExpressions"
-      cas <- getField (decodeArray (decodeCaseAlternative decAnn)) obj "caseAlternatives"
+      cs <- getField (decodeArray (decodeExpr tt decAnn)) obj "caseExpressions"
+      cas <- getField (decodeArray (decodeCaseAlternative tt decAnn)) obj "caseAlternatives"
       pure $ ExprCase ann cs cas
     "Let" -> do
-      bs <- getField (decodeArray (decodeBind decAnn)) obj "binds"
-      e <- getField (decodeExpr decAnn) obj "expression"
+      bs <- getField (decodeArray (decodeBind tt decAnn)) obj "binds"
+      e <- getField (decodeExpr tt decAnn) obj "expression"
       pure $ ExprLet ann bs e
     _ ->
       throwError $ TypeMismatch "Expr"
 
-decodeCaseAlternative :: forall a. (Json -> JsonDecode a) -> Json -> JsonDecode (CaseAlternative a)
-decodeCaseAlternative decAnn json = do
+decodeCaseAlternative :: forall a. Array ExprType -> (Json -> JsonDecode a) -> Json -> JsonDecode (CaseAlternative a)
+decodeCaseAlternative tt decAnn json = do
   obj <- decodeJObject json
   binders <- getField (decodeArray (decodeBinder decAnn)) obj "binders"
   isGuarded <- getField decodeBoolean obj "isGuarded"
   if isGuarded then do
-    es <- getField (decodeArray (decodeGuard decAnn)) obj "expressions"
+    es <- getField (decodeArray (decodeGuard tt decAnn)) obj "expressions"
     pure $ CaseAlternative binders (Guarded es)
   else do
-    e <- getField (decodeExpr decAnn) obj "expression"
+    e <- getField (decodeExpr tt decAnn) obj "expression"
     pure $ CaseAlternative binders (Unconditional e)
 
-decodeGuard :: forall a. (Json -> JsonDecode a) -> Json -> JsonDecode (Guard a)
-decodeGuard decAnn json = do
+decodeGuard :: forall a. Array ExprType -> (Json -> JsonDecode a) -> Json -> JsonDecode (Guard a)
+decodeGuard tt decAnn json = do
   obj <- decodeJObject json
-  guard <- getField (decodeExpr decAnn) obj "guard"
-  expr <- getField (decodeExpr decAnn) obj "expression"
+  guard <- getField (decodeExpr tt decAnn) obj "guard"
+  expr <- getField (decodeExpr tt decAnn) obj "expression"
   pure $ Guard guard expr
 
 decodeBinder :: forall a. (Json -> JsonDecode a) -> Json -> JsonDecode (Binder a)
