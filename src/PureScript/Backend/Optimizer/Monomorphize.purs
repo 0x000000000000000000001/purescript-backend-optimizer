@@ -381,62 +381,68 @@ monomorphize :: Map String (Binding Ann) -> InstantiationMap -> Module Ann -> Mo
 monomorphize globalAstMap instMap (Module m) =
   let
     modNameStr = unwrap m.name
-    decls' = Array.concatMap (monomorphizeBind modNameStr instMap Map.empty) m.decls
 
-    injectedBinds = Array.concatMap
-      ( \(Tuple qualName typeMap) ->
-          let
-            processBinding = case Map.lookup qualName globalAstMap of
-              Just (Binding ann (Ident name) expr) ->
-                Array.mapMaybe
-                  ( \(Tuple ty info) ->
-                      if hasTypeVariables ty then Nothing
-                      else
-                        let
-                          definerMod = case String.split (Pattern ".") qualName of
-                            parts -> String.joinWith "." (fromMaybe [] (Array.init parts))
-                        in
-                          if modNameStr == definerMod then
-                            let
-                              substFn t = stripStaticConstraints info.dictArgs (substituteExprType info.subst t)
+    getInjectedBindsFor qualName = case Map.lookup qualName instMap of
+      Just typeMap ->
+        let
+          processBinding = case Map.lookup qualName globalAstMap of
+            Just (Binding ann (Ident name) expr) ->
+              Array.mapMaybe
+                ( \(Tuple ty info) ->
+                    if hasTypeVariables ty then Nothing
+                    else
+                      let
+                        definerMod = case String.split (Pattern ".") qualName of
+                          parts -> String.joinWith "." (fromMaybe [] (Array.init parts))
+                      in
+                        if modNameStr == definerMod then
+                          let
+                            substFn t = stripStaticConstraints info.dictArgs (substituteExprType info.subst t)
 
-                              exprWithDicts = applyDicts info.dictArgs expr
-                              resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
+                            exprWithDicts = applyDicts info.dictArgs expr
+                            resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
 
-                              specializedExpr = rewriteExpr globalAstMap Map.empty substFn (monomorphizeExpr modNameStr instMap Map.empty resolvedExpr)
+                            specializedExpr = rewriteExpr globalAstMap Map.empty substFn (monomorphizeExpr modNameStr instMap Map.empty resolvedExpr)
 
-                              etaExpandedExpr = case specializedExpr of
-                                ExprAbs _ _ _ -> specializedExpr
-                                _ | Array.length info.dictArgs == 0 -> specializedExpr
-                                _ ->
-                                  let
-                                    finalTy = stripTypeVariables (substFn ty)
-                                    monomorphizedAnn = mapAnn (\_ -> finalTy) ann
-                                  in
-                                    case extractFuncType finalTy of
-                                      Just { fArgs } ->
-                                        let
-                                          idents = Array.mapWithIndex (\i _ -> Ident ("__eta" <> show i)) fArgs
-                                          vars = map (\id -> ExprVar monomorphizedAnn (Qualified Nothing id)) idents
-                                          app = foldl (\acc v -> ExprApp monomorphizedAnn acc v) specializedExpr vars
-                                        in
-                                          Array.foldr (\id acc -> ExprAbs monomorphizedAnn id acc) app idents
-                                      Nothing -> specializedExpr
+                            etaExpandedExpr = case specializedExpr of
+                              ExprAbs _ _ _ -> specializedExpr
+                              _ | Array.length info.dictArgs == 0 -> specializedExpr
+                              _ ->
+                                let
+                                  finalTy = stripTypeVariables (substFn ty)
+                                  monomorphizedAnn = mapAnn (\_ -> finalTy) ann
+                                in
+                                  case extractFuncType finalTy of
+                                    Just { fArgs } ->
+                                      let
+                                        idents = Array.mapWithIndex (\i _ -> Ident ("__eta" <> show i)) fArgs
+                                        vars = map (\id -> ExprVar monomorphizedAnn (Qualified Nothing id)) idents
+                                        app = foldl (\acc v -> ExprApp monomorphizedAnn acc v) specializedExpr vars
+                                      in
+                                        Array.foldr (\id acc -> ExprAbs monomorphizedAnn id acc) app idents
+                                    Nothing -> specializedExpr
 
-                              newName = Ident (name <> "__" <> hashString (mangleType ty))
-                              newBinding = NonRec (Binding (mapAnn (\t -> stripTypeVariables (substFn t)) ann) newName etaExpandedExpr)
-                            in
-                              Just newBinding
-                          else Nothing
-                  )
-                  (Map.toUnfoldable typeMap :: Array _)
-              Nothing -> []
-          in
-            processBinding
-      )
-      (Map.toUnfoldable instMap)
+                            newName = Ident (name <> "__" <> hashString (mangleType ty))
+                            newBinding = NonRec (Binding (mapAnn (\t -> stripTypeVariables (substFn t)) ann) newName etaExpandedExpr)
+                          in
+                            Just newBinding
+                        else Nothing
+                )
+                (Map.toUnfoldable typeMap :: Array _)
+            Nothing -> []
+        in
+          processBinding
+      Nothing -> []
 
-    finalDecls = decls' <> injectedBinds
+    processDecl bind =
+      let
+        originalBinds = monomorphizeBind modNameStr instMap Map.empty bind
+        injectedBinds = case bind of
+          NonRec (Binding _ (Ident name) _) -> getInjectedBindsFor (modNameStr <> "." <> name)
+          Rec bindings -> Array.concatMap (\(Binding _ (Ident name) _) -> getInjectedBindsFor (modNameStr <> "." <> name)) bindings
+      in originalBinds <> injectedBinds
+
+    finalDecls = Array.concatMap processDecl m.decls
     newIdents = getBindIdents finalDecls
   in
     Module (m { decls = finalDecls, exports = newIdents })
