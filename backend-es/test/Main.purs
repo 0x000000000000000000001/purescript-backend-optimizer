@@ -147,7 +147,8 @@ runSnapshotTests { accept, filter, traceIdents } = do
             Console.log $ "[" <> padding <> index <> " of " <> total <> "] Building " <> unwrap name
             pure coreFnMod
           , onSkipModule: \_ _ -> pure Nothing
-        , traceIdents
+          , rewriteLimit: 1000
+          , traceIdents
         }
       allSteps <- liftEffect (Ref.read stepsRef)
       unless (Array.null allSteps) do

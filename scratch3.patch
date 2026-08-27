@@ -1,0 +1,10 @@
+--- src/PureScript/Backend/Optimizer/Monomorphize.purs
++++ src/PureScript/Backend/Optimizer/Monomorphize.purs
+@@ -395,6 +395,7 @@ monomorphize globalAstMap instMap (Module m) =
+                       in
+                         if modNameStr == definerMod then
+                           let
++                            _ = Debug.Trace.trace ("monomorphize binding " <> name <> " dictArgs length: " <> show (Array.length info.dictArgs)) \_ -> unit
+                             substFn t = stripStaticConstraints info.dictArgs (substituteExprType info.subst t)
+ 
+                             exprWithDicts = applyDicts info.dictArgs expr

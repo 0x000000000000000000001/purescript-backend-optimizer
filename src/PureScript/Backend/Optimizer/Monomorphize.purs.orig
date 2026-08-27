@@ -30,6 +30,8 @@ import Data.Maybe (Maybe(..), fromMaybe, maybe, isJust)
 import Data.Newtype (unwrap)
 import Data.Set (Set)
 import Data.Set as Set
+import Effect.Class.Console as Effect.Class.Console
+import Effect.Unsafe (unsafePerformEffect)
 import Data.String as String
 import Data.String.Pattern (Pattern(..))
 import Debug (trace)
@@ -397,6 +399,7 @@ monomorphize globalAstMap instMap (Module m) =
                       in
                         if modNameStr == definerMod then
                           let
+                            _ = unsafePerformEffect (Effect.Class.Console.log ("monomorphize binding " <> name <> " dictArgs length: " <> show (Array.length info.dictArgs)))
                             substFn t = stripStaticConstraints info.dictArgs (substituteExprType info.subst t)
 
                             exprWithDicts = applyDicts info.dictArgs expr
@@ -621,7 +624,7 @@ hasTypeVariables Boolean = false
 hasTypeVariables Unit = false
 hasTypeVariables (TypeLevelString _) = false
 hasTypeVariables (ADT _ _ args) = Array.any hasTypeVariables args
-hasTypeVariables Any = true
+hasTypeVariables Any = false
 
 stripTypeVariables :: ExprType -> ExprType
 stripTypeVariables (ForAll _ t) = stripTypeVariables t

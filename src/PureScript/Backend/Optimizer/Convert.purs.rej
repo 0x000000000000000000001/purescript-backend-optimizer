@@ -1,0 +1,8 @@
+@@ -20,6 +20,7 @@
+ import Data.Tuple (Tuple(..), fst, snd)
+ import Debug.Trace as Trace
+ import Effect.Class.Console as Effect.Class.Console
++import Debug as Debug
+ import Effect.Unsafe (unsafePerformEffect)
+ import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), Expr(..), ExprType(..), Ident(..), Literal(..), Module(..), ModuleName(..), Prop(..), Qualified(..), getExprAnn, getExprMeta)
+ import PureScript.Backend.Optimizer.Directives (Directives, EvalExtern(..), InferExtern(..))

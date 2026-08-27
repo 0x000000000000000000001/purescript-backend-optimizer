@@ -115,6 +115,7 @@ basicBuildMain options = do
         , onCodegenModule: options.onCodegenModule
         , onPrepareModule: options.onPrepareModule
         , onSkipModule: \_ _ -> pure Nothing
+        , rewriteLimit: 1000
         , traceIdents: options.traceIdents
         }
       options.onCodegenAfter
