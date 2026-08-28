@@ -247,7 +247,7 @@ toBackendTopLevelBindingGroup env = case _ of
     let group = (\(Binding _ ident _) -> Qualified (Just env.currentModule) ident) <$> bindings
     mapAccumL (toTopLevelBackendBinding group) env bindings
       # overValue { recursive: true, bindings: _ }
-  NonRec binding ->
+  NonRec binding@(Binding _ ident _) -> do
     mapAccumL (toTopLevelBackendBinding []) env [ binding ]
       # overValue { recursive: false, bindings: _ }
   where
@@ -293,7 +293,7 @@ toTopLevelBackendBinding group env (Binding _ ident cfn) = do
       , moduleImplementations = Map.insert qualifiedIdent impl env.moduleImplementations
       , optimizationSteps = maybe env.optimizationSteps (Array.snoc env.optimizationSteps <<< Tuple qualifiedIdent) $ NonEmptyArray.fromArray mbSteps
       , directives =
-          case inferTransitiveDirective env.directives (snd impl) backendExpr cfn of
+          case inferTransitiveDirective env.directives (unwrap (fst impl)).size (snd impl) backendExpr cfn of
             Just dirs ->
               Map.alter
                 case _ of
@@ -309,8 +309,8 @@ toTopLevelBackendBinding group env (Binding _ ident cfn) = do
   , value: Tuple ident (Tuple (unwrap (fst impl)).deps expr')
   }
 
-inferTransitiveDirective :: InlineDirectiveMap -> ExternImpl -> BackendExpr -> Expr Ann -> Maybe (Map InlineAccessor InlineDirective)
-inferTransitiveDirective directives impl backendExpr cfn = fromImpl <|> fromBackendExpr
+inferTransitiveDirective :: InlineDirectiveMap -> Int -> ExternImpl -> BackendExpr -> Expr Ann -> Maybe (Map InlineAccessor InlineDirective)
+inferTransitiveDirective directives dictSize impl backendExpr cfn = fromImpl <|> fromBackendExpr
   where
   fromImpl = case impl of
     ExternExpr _ (NeutralExpr (App (NeutralExpr (Var qual)) args)) ->
@@ -350,9 +350,11 @@ inferTransitiveDirective directives impl backendExpr cfn = fromImpl <|> fromBack
     ExprApp (Ann { meta: Just IsSyntheticApp }) _ _ ->
       Just $ Map.singleton InlineRef InlineAlways
     ExprAbs (Ann { meta: Just meta }) _ _
-      | meta == IsTypeClassConstructor || meta == IsNewtype ->
+      | meta == IsTypeClassConstructor || meta == IsNewtype
+      , dictSize <= 512 ->
           Just $ Map.singleton InlineRef InlineAlways
-    cfn' | Tuple isDict props <- isTypeClassDictionaryWithProps cfn', isDict ->
+    cfn' | Tuple isDict props <- isTypeClassDictionaryWithProps cfn', isDict
+         , dictSize <= 512 ->
       Just $ Map.fromFoldable $
         [ Tuple InlineRef InlineAlways ] <> map (\p -> Tuple (InlineProp p) InlineAlways) props
     _ -> case backendExpr of
@@ -370,7 +372,7 @@ inferTransitiveDirective directives impl backendExpr cfn = fromImpl <|> fromBack
 isTypeClassDictionaryWithProps :: Expr Ann -> Tuple Boolean (Array String)
 isTypeClassDictionaryWithProps expr = case expr of
   ExprAbs (Ann { type: Just ty }) _ body | isConstrainedType ty ->
-    Tuple true (snd (isTypeClassDictionaryWithProps body))
+    isTypeClassDictionaryWithProps body
   ExprAbs _ _ body -> isTypeClassDictionaryWithProps body
   ExprLet _ _ body -> isTypeClassDictionaryWithProps body
   ExprTypeApp _ expr _ -> isTypeClassDictionaryWithProps expr
