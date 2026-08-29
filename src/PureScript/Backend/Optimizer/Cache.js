@@ -183,6 +183,7 @@ export const clearPurmetaCacheImpl = function() {
     // If RSS has grown by more than 1GB since the last GC, force GC to release memory to OS
     if (diffRss > 1024 * 1024 * 1024) { 
       global.gc();
+      console.log('CALLED GLOBAL GC');
       baselineRss = process.memoryUsage().rss; 
     }
   }
