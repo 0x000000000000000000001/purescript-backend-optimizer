@@ -25,7 +25,7 @@ import PureScript.Backend.Optimizer.CoreFn (Ann, Ident, Module(..), Qualified)
 import PureScript.Backend.Optimizer.Semantics (BackendExpr, Ctx, ExternImpl, InlineDirectiveMap)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
 import PureScript.Backend.Optimizer.Syntax (BackendSyntax)
-import PureScript.Backend.Optimizer.Cache (writePurmetaSync)
+import PureScript.Backend.Optimizer.Cache (writePurmetaSync, clearPurmetaCache)
 import Effect.Unsafe (unsafePerformEffect)
 
 type BuildEnv =
@@ -67,6 +67,7 @@ buildModules options coreFnModules =
       Just cachedMod -> do
         let
           newDirectives = foldrWithIndex Map.insert directives cachedMod.directives
+          _ = unsafePerformEffect clearPurmetaCache
           
         go 
           { directives: newDirectives
@@ -98,6 +99,7 @@ buildModules options coreFnModules =
         
         -- Write this module's implementations to disk
         let _ = unsafePerformEffect (writePurmetaSync name backendMod.implementations)
+        let _ = unsafePerformEffect clearPurmetaCache
         
         go
           { directives: newDirectives
@@ -106,3 +108,4 @@ buildModules options coreFnModules =
           , exports: newExports
           }
           remainingModules
+
