@@ -16,3 +16,4 @@ output.bak/
 /*.purs*
 /**/.DS_Store
 .psc-ide-port
+.purmeta
