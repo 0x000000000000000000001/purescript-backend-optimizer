@@ -11,17 +11,18 @@ module PureScript.Backend.Optimizer.Builder
 import Prelude
 
 import Data.FoldableWithIndex (foldrWithIndex)
-import Data.List (List, foldM)
+import Data.List (List(..))
 import Data.List as List
 import Data.Map (Map)
 import Data.Map as Map
 import Data.Maybe (Maybe(..))
 import Data.Set (Set)
+import Data.Set as Set
 import Data.Tuple (Tuple(..))
 import PureScript.Backend.Optimizer.Analysis (BackendAnalysis)
 import PureScript.Backend.Optimizer.Convert (BackendModule, OptimizationSteps, toBackendModule)
-import PureScript.Backend.Optimizer.CoreFn (Ann, Ident, Module(..), Qualified)
-import PureScript.Backend.Optimizer.Semantics (BackendExpr, Ctx, ExternImpl, InlineDirectiveMap)
+import PureScript.Backend.Optimizer.CoreFn (Ann, Ident, Module(..), Qualified(..))
+import PureScript.Backend.Optimizer.Semantics (BackendExpr, Ctx, ExternImpl(..), InlineDirectiveMap, EvalRef(..))
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
 import PureScript.Backend.Optimizer.Syntax (BackendSyntax)
 
@@ -46,22 +47,47 @@ type BuildOptions m =
 -- | See `PureScript.Backend.Optimizer.CoreFn.Sort.sortModules`.
 buildModules :: forall m. Monad m => BuildOptions m -> List (Module Ann) -> m Unit
 buildModules options coreFnModules =
-  void $ foldM go { directives: options.directives, implementations: Map.empty, moduleIndex: 0 } coreFnModules
+  void $ go { directives: options.directives, implementations: Map.empty, moduleIndex: 0, exports: Map.empty } coreFnModules
   where
   moduleCount = List.length coreFnModules
-  go { directives, implementations, moduleIndex } coreFnModule = do
+  
+  go acc Nil = pure acc
+  go ( { directives, implementations, moduleIndex, exports } ) (Cons coreFnModule remainingModules) = do
     let buildEnv = { implementations, moduleCount, moduleIndex }
-    coreFnModule'@(Module { name }) <- options.onPrepareModule buildEnv coreFnModule
+    coreFnModule'@(Module { name, exports: modExportsArray }) <- options.onPrepareModule buildEnv coreFnModule
     mbCachedMod <- options.onSkipModule buildEnv coreFnModule'
+    
+    let
+      modExports = Set.fromFoldable modExportsArray
+      newExports = Map.insert name modExports exports
+
+      doGc currentDirectives impls =
+        Map.filterWithKey (\qual@(Qualified mbName ident) (Tuple _ impl) -> 
+          case impl of
+            ExternDict _ _ -> true
+            ExternCtor _ _ _ _ _ -> true
+            ExternExpr _ _ ->
+              Map.member (EvalExtern qual) currentDirectives ||
+              case mbName of
+                Just n -> case Map.lookup n newExports of
+                  Just exportedIdents -> Set.member ident exportedIdents
+                  Nothing -> false
+                Nothing -> true
+        ) impls
+
     case mbCachedMod of
       Just cachedMod -> do
         let
+          newDirectives = foldrWithIndex Map.insert directives cachedMod.directives
           newImplementations = foldrWithIndex Map.insert implementations cachedMod.implementations
-        pure
-          { directives: foldrWithIndex Map.insert directives cachedMod.directives
-          , implementations: newImplementations
+          gcImplementations = doGc newDirectives newImplementations
+        go 
+          { directives: newDirectives
+          , implementations: gcImplementations
           , moduleIndex: moduleIndex + 1
+          , exports: newExports
           }
+          remainingModules
       Nothing -> do
         let
           Tuple optimizationSteps backendMod = toBackendModule coreFnModule'
@@ -80,9 +106,16 @@ buildModules options coreFnModules =
             }
           newImplementations =
             foldrWithIndex Map.insert implementations backendMod.implementations
+          newDirectives = 
+            foldrWithIndex Map.insert directives backendMod.directives
+            
         options.onCodegenModule (buildEnv { implementations = newImplementations }) coreFnModule' backendMod optimizationSteps
-        pure
-          { directives: foldrWithIndex Map.insert directives backendMod.directives
-          , implementations: newImplementations
+        
+        let gcImplementations = doGc newDirectives newImplementations
+        go
+          { directives: newDirectives
+          , implementations: gcImplementations
           , moduleIndex: moduleIndex + 1
+          , exports: newExports
           }
+          remainingModules
