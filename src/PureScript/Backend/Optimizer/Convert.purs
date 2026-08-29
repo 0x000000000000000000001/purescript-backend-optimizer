@@ -84,6 +84,8 @@ import PureScript.Backend.Optimizer.Semantics (BackendExpr(..), BackendSemantics
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
 import PureScript.Backend.Optimizer.Syntax (BackendAccessor(..), BackendOperator(..), BackendOperator1(..), BackendOperator2(..), BackendOperatorOrd(..), BackendSyntax(..), Level(..), Pair(..))
 import PureScript.Backend.Optimizer.Utils (foldl1Array)
+import PureScript.Backend.Optimizer.Cache (readPurmetaSync)
+import Effect.Unsafe (unsafePerformEffect)
 import Safe.Coerce (coerce)
 
 type BackendBindingGroup a b =
@@ -247,7 +249,7 @@ toBackendTopLevelBindingGroup env = case _ of
     let group = (\(Binding _ ident _) -> Qualified (Just env.currentModule) ident) <$> bindings
     mapAccumL (toTopLevelBackendBinding group) env bindings
       # overValue { recursive: true, bindings: _ }
-  NonRec binding@(Binding _ ident _) -> do
+  NonRec binding@(Binding _ _ _) -> do
     mapAccumL (toTopLevelBackendBinding []) env [ binding ]
       # overValue { recursive: false, bindings: _ }
   where
@@ -375,7 +377,7 @@ isTypeClassDictionaryWithProps expr = case expr of
     isTypeClassDictionaryWithProps body
   ExprAbs _ _ body -> isTypeClassDictionaryWithProps body
   ExprLet _ _ body -> isTypeClassDictionaryWithProps body
-  ExprTypeApp _ expr _ -> isTypeClassDictionaryWithProps expr
+  ExprTypeApp _ expr' _ -> isTypeClassDictionaryWithProps expr'
   ExprApp _ lhs (ExprLit _ (LitRecord props))
     | Just meta <- getConstructorMeta lhs
     , meta == IsTypeClassConstructor || meta == IsNewtype -> Tuple true (map propKey props)
@@ -438,14 +440,25 @@ makeExternEvalSpine conv env qual spine = do
       fn env qual spine'
   case result of
     Nothing -> do
-      impl <- Map.lookup qual conv.implementations
+      impl <- lookupImplementation conv qual
       evalExternFromImpl (topEnv env) qual impl spine'
     _ ->
       result
 
+lookupImplementation :: ConvertEnv -> Qualified Ident -> Maybe (Tuple BackendAnalysis ExternImpl)
+lookupImplementation conv qual@(Qualified mbMn _) =
+  case Map.lookup qual conv.implementations of
+    Just impl -> Just impl
+    Nothing -> case mbMn of
+      Just mn ->
+        case unsafePerformEffect (readPurmetaSync mn) of
+          Just impls -> Map.lookup qual impls
+          Nothing -> Nothing
+      Nothing -> Nothing
+
 makeExternEvalRef :: ConvertEnv -> Env -> Qualified Ident -> Maybe BackendSemantics
 makeExternEvalRef conv env qual =
-  evalExternRefFromImpl env qual <$> Map.lookup qual conv.implementations
+  evalExternRefFromImpl env qual <$> lookupImplementation conv qual
 
 buildM :: BackendSyntax BackendExpr -> ConvertM BackendExpr
 buildM a env = build (getCtx env) a
@@ -466,7 +479,7 @@ getCtx env = Ctx
   }
   where
   lookupExtern qual acc = do
-    Tuple s impl <- Map.lookup qual env.implementations
+    Tuple s impl <- lookupImplementation env qual
     case impl of
       ExternExpr _ _ ->
         case acc of
@@ -564,8 +577,8 @@ toBackendExprWithType mbTy expr = do
             <*> intro idents lvl next
         Rec _ ->
           unsafeCrashWith "CoreFn empty Rec binding group"
-    ExprTypeApp _ expr _ ->
-      go expr
+    ExprTypeApp _ expr' _ ->
+      go expr'
     ExprCase _ exprs alts ->
       let
         firstBinders = case Array.head alts of

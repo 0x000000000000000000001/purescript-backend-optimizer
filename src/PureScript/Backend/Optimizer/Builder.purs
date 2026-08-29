@@ -21,10 +21,12 @@ import Data.Set as Set
 import Data.Tuple (Tuple(..))
 import PureScript.Backend.Optimizer.Analysis (BackendAnalysis)
 import PureScript.Backend.Optimizer.Convert (BackendModule, OptimizationSteps, toBackendModule)
-import PureScript.Backend.Optimizer.CoreFn (Ann, Ident, Module(..), Qualified(..))
-import PureScript.Backend.Optimizer.Semantics (BackendExpr, Ctx, ExternImpl(..), InlineDirectiveMap, EvalRef(..))
+import PureScript.Backend.Optimizer.CoreFn (Ann, Ident, Module(..), Qualified)
+import PureScript.Backend.Optimizer.Semantics (BackendExpr, Ctx, ExternImpl, InlineDirectiveMap)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
 import PureScript.Backend.Optimizer.Syntax (BackendSyntax)
+import PureScript.Backend.Optimizer.Cache (writePurmetaSync)
+import Effect.Unsafe (unsafePerformEffect)
 
 type BuildEnv =
   { implementations :: Map (Qualified Ident) (Tuple BackendAnalysis ExternImpl)
@@ -61,29 +63,14 @@ buildModules options coreFnModules =
       modExports = Set.fromFoldable modExportsArray
       newExports = Map.insert name modExports exports
 
-      doGc currentDirectives impls =
-        Map.filterWithKey (\qual@(Qualified mbName ident) (Tuple _ impl) -> 
-          case impl of
-            ExternDict _ _ -> true
-            ExternCtor _ _ _ _ _ -> true
-            ExternExpr _ _ ->
-              Map.member (EvalExtern qual) currentDirectives ||
-              case mbName of
-                Just n -> case Map.lookup n newExports of
-                  Just exportedIdents -> Set.member ident exportedIdents
-                  Nothing -> false
-                Nothing -> true
-        ) impls
-
     case mbCachedMod of
       Just cachedMod -> do
         let
           newDirectives = foldrWithIndex Map.insert directives cachedMod.directives
-          newImplementations = foldrWithIndex Map.insert implementations cachedMod.implementations
-          gcImplementations = doGc newDirectives newImplementations
+          
         go 
           { directives: newDirectives
-          , implementations: gcImplementations
+          , implementations: Map.empty
           , moduleIndex: moduleIndex + 1
           , exports: newExports
           }
@@ -104,17 +91,17 @@ buildModules options coreFnModules =
             , traceIdents: options.traceIdents
             , optimizationSteps: []
             }
-          newImplementations =
-            foldrWithIndex Map.insert implementations backendMod.implementations
           newDirectives = 
             foldrWithIndex Map.insert directives backendMod.directives
             
-        options.onCodegenModule (buildEnv { implementations = newImplementations }) coreFnModule' backendMod optimizationSteps
+        options.onCodegenModule (buildEnv { implementations = backendMod.implementations }) coreFnModule' backendMod optimizationSteps
         
-        let gcImplementations = doGc newDirectives newImplementations
+        -- Write this module's implementations to disk
+        let _ = unsafePerformEffect (writePurmetaSync name backendMod.implementations)
+        
         go
           { directives: newDirectives
-          , implementations: gcImplementations
+          , implementations: Map.empty
           , moduleIndex: moduleIndex + 1
           , exports: newExports
           }
