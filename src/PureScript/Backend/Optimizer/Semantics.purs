@@ -1924,6 +1924,13 @@ optimize traceSteps ctx env (Qualified mn (Ident id)) initN originalExpr =
     | n == 0 = do
         let name = foldMap ((_ <> ".") <<< unwrap) mn <> id
         unsafeCrashWith $ name <> ": Possible infinite optimization loop."
+    -- Bailout heuristic: if the AST size is exceptionally large (> 2000 nodes),
+    -- we run the Nbe pass exactly ONCE (eval + quote) to properly rename all variables,
+    -- but we return `false` to abort the recursive optimization loop.
+    -- This prevents infinite rewriting loops on massive `do` blocks (e.g. Free monads).
+    | (BackendAnalysis { size }) <- analysisOf expr1, size > 2000 =
+        let expr2 = quote ctx (eval env expr1)
+        in Tuple false expr2
     | otherwise = do
         let expr2 = quote ctx (eval env expr1)
         let BackendAnalysis { rewrite } = analysisOf expr2

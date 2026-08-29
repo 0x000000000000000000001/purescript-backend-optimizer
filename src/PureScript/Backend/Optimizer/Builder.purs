@@ -16,16 +16,20 @@ import Data.List as List
 import Data.Map (Map)
 import Data.Map as Map
 import Data.Maybe (Maybe(..))
+import Data.Newtype (unwrap)
+import Effect.Aff (Aff, attempt)
+import Effect.Console as Console
+import Effect.Class (liftEffect)
 import Data.Set (Set)
 import Data.Set as Set
 import Data.Tuple (Tuple(..))
 import PureScript.Backend.Optimizer.Analysis (BackendAnalysis)
 import PureScript.Backend.Optimizer.Convert (BackendModule, OptimizationSteps, toBackendModule)
-import PureScript.Backend.Optimizer.CoreFn (Ann, Ident, Module(..), Qualified)
+import PureScript.Backend.Optimizer.CoreFn (Ann, Ident, Module(..), ModuleName, Qualified, importName)
 import PureScript.Backend.Optimizer.Semantics (BackendExpr, Ctx, ExternImpl, InlineDirectiveMap)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
 import PureScript.Backend.Optimizer.Syntax (BackendSyntax)
-import PureScript.Backend.Optimizer.Cache (writePurmetaSync, clearPurmetaCache)
+import PureScript.Backend.Optimizer.Cache (writePurmetaSync, clearPurmetaCache, logMemory)
 import Effect.Unsafe (unsafePerformEffect)
 
 type BuildEnv =
@@ -99,6 +103,7 @@ buildModules options coreFnModules =
         
         -- Write this module's implementations to disk
         let _ = unsafePerformEffect (writePurmetaSync name backendMod.implementations)
+        let _ = unsafePerformEffect (logMemory ("Builder loop optimized: " <> unwrap name))
         let _ = unsafePerformEffect clearPurmetaCache
         
         go
@@ -108,4 +113,3 @@ buildModules options coreFnModules =
           , exports: newExports
           }
           remainingModules
-

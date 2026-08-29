@@ -31,6 +31,7 @@ import Effect.Console as Console
 import Node.Encoding (Encoding(..))
 import Node.FS.Aff as FS
 import Node.FS.Stats as Stats
+import Node.Path as Path
 import PureScript.Backend.Optimizer.CoreFn (Ann, Module)
 import PureScript.Backend.Optimizer.CoreFn.Json (decodeModule)
 import PureScript.Backend.Optimizer.CoreFn.Sort (sortModules)

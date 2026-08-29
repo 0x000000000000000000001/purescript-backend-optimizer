@@ -2,6 +2,7 @@ module PureScript.Backend.Optimizer.Cache
   ( writePurmetaSync
   , readPurmetaSync
   , clearPurmetaCache
+  , logMemory
   ) where
 
 import Prelude
@@ -28,3 +29,10 @@ readPurmetaSync mn = readPurmetaSyncImpl (unwrap mn) Just Nothing
 
 clearPurmetaCache :: Effect Unit
 clearPurmetaCache = clearPurmetaCacheImpl
+
+foreign import logMemoryImpl :: String -> Effect Unit
+
+logMemory :: String -> Effect Unit
+logMemory = logMemoryImpl
+
+

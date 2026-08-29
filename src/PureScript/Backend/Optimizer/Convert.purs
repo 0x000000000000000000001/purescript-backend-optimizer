@@ -76,8 +76,10 @@ import Data.String as String
 import Data.Traversable (class Foldable, Accum, foldr, for, mapAccumL, mapAccumR, sequence, traverse)
 import Data.TraversableWithIndex (forWithIndex)
 import Data.Tuple (Tuple(..), fst, snd)
+import Effect.Console as Console
+import Effect.Unsafe (unsafePerformEffect)
 import Partial.Unsafe (unsafeCrashWith)
-import PureScript.Backend.Optimizer.Analysis (BackendAnalysis, analysisOf, analyze, analyzeEffectBlock)
+import PureScript.Backend.Optimizer.Analysis (BackendAnalysis(..), analysisOf, analyze, analyzeEffectBlock)
 import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), ClassDecl, Comment, ConstructorType(..), DataDecl, Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Meta(..), Module(..), ModuleName(..), ProperName(..), Qualified(..), ReExport, binderAnn, exprAnn, findProp, propKey, propValue, qualifiedModuleName, unQualified)
 import PureScript.Backend.Optimizer.Directives (DirectiveHeaderResult, parseDirectiveHeader)
 import PureScript.Backend.Optimizer.Semantics (BackendExpr(..), BackendSemantics, Ctx(..), DataTypeMeta, Env(..), EvalRef(..), ExternImpl(..), ExternSpine(..), InlineAccessor(..), InlineDirective(..), InlineDirectiveMap, NeutralExpr(..), build, evalExternFromImpl, evalExternRefFromImpl, freeze, optimize, unwrapSemTyped)
@@ -249,7 +251,7 @@ toBackendTopLevelBindingGroup env = case _ of
     let group = (\(Binding _ ident _) -> Qualified (Just env.currentModule) ident) <$> bindings
     mapAccumL (toTopLevelBackendBinding group) env bindings
       # overValue { recursive: true, bindings: _ }
-  NonRec binding@(Binding _ _ _) -> do
+  NonRec binding@(Binding _ ident _) -> do
     mapAccumL (toTopLevelBackendBinding []) env [ binding ]
       # overValue { recursive: false, bindings: _ }
   where
@@ -278,6 +280,7 @@ toTopLevelBackendBinding group env (Binding _ ident cfn) = do
   let evalEnv = Env { currentModule: env.currentModule, evalExternRef: makeExternEvalRef env, evalExternSpine: makeExternEvalSpine env, locals: [], directives: env.directives }
   let qualifiedIdent = Qualified (Just env.currentModule) ident
   let backendExpr = toBackendExpr cfn env
+  let BackendAnalysis { size } = analysisOf backendExpr
   let enableTracing = Set.member qualifiedIdent env.traceIdents
   let
     mbType = case backendExpr of

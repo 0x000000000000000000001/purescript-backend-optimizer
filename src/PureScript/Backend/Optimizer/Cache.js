@@ -39,22 +39,25 @@ registerModule('DataEither', DataEither);
 registerModule('DataList', DataList);
 registerModule('DataNonEmptyArray', DataNonEmptyArray);
 
+const VISITED_KEY = Symbol('visited_key');
+
 // Custom serializer that saves the constructor name
 function serialize(val) {
-  const seen = new Map();
+  const cleanup = [];
 
   function walk(obj) {
     if (obj === null || typeof obj !== 'object') {
       return obj;
     }
     
-    if (seen.has(obj)) {
-      return seen.get(obj);
+    if (obj[VISITED_KEY] !== undefined) {
+      return obj[VISITED_KEY];
     }
     
     if (Array.isArray(obj)) {
       const arr = [];
-      seen.set(obj, arr);
+      obj[VISITED_KEY] = arr;
+      cleanup.push(obj);
       for (let i = 0; i < obj.length; i++) {
         arr[i] = walk(obj[i]);
       }
@@ -65,7 +68,8 @@ function serialize(val) {
     const isPureScriptCtor = tag && registry[tag];
     
     const res = isPureScriptCtor ? { __ps: tag } : {};
-    seen.set(obj, res);
+    obj[VISITED_KEY] = res;
+    cleanup.push(obj);
     
     for (const key of Object.keys(obj)) {
       res[key] = walk(obj[key]);
@@ -74,7 +78,14 @@ function serialize(val) {
     return res;
   }
   
-  return v8.serialize(walk(val));
+  const walked = walk(val);
+  
+  // Clean up the symbol properties
+  for (let i = 0; i < cleanup.length; i++) {
+    delete cleanup[i][VISITED_KEY];
+  }
+  
+  return v8.serialize(walked);
 }
 
 // Custom deserializer that restores the prototypes
@@ -161,8 +172,26 @@ export const readPurmetaSyncImpl = function(moduleName) {
   };
 };
 
+let baselineRss = 0;
+
 export const clearPurmetaCacheImpl = function() {
+  ramCache.clear();
+  if (global.gc) {
+    const currentRss = process.memoryUsage().rss;
+    const diffRss = currentRss - baselineRss;
+    
+    // If RSS has grown by more than 1GB since the last GC, force GC to release memory to OS
+    if (diffRss > 1024 * 1024 * 1024) { 
+      global.gc();
+      baselineRss = process.memoryUsage().rss; 
+    }
+  }
+};
+
+export const logMemoryImpl = function(label) {
   return function() {
-    ramCache.clear();
+    // GC is now managed in clearPurmetaCacheImpl, no forced GC here
+    const mem = process.memoryUsage();
+    console.log(`[Memory - ${label}] HeapUsed: ${Math.round(mem.heapUsed / 1024 / 1024)} MB | RSS: ${Math.round(mem.rss / 1024 / 1024)} MB`);
   };
 };
