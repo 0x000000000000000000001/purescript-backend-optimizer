@@ -483,7 +483,7 @@ evalApp env hd spine = go Nothing env hd (List.fromFoldable spine)
               _ -> Just retTy
             _ -> Nothing
         in
-        go nextTy env' (k nextArg) args
+          go nextTy env' (k nextArg) args
     SemRef ref sp sem, List.Cons arg args ->
       let
         nextTy = case mbTy of
@@ -492,7 +492,7 @@ evalApp env hd spine = go Nothing env hd (List.fromFoldable spine)
             _ -> Just retTy
           _ -> Nothing
       in
-      go nextTy env' (evalRef env' ref sp (ExternApp [ arg ]) sem) args
+        go nextTy env' (evalRef env' ref sp (ExternApp [ arg ]) sem) args
     SemLet ident val k, args ->
       SemLet ident val \nextVal ->
         makeLet Nothing (k nextVal) \nextFn ->
@@ -513,8 +513,10 @@ evalApp env hd spine = go Nothing env hd (List.fromFoldable spine)
         app = NeutApp fn (List.toUnfoldable args)
         finalTy = case mbTy of
           Just (Func args' retTy) ->
-            let remaining = Array.drop (List.length args) args'
-            in if Array.length remaining > 0 then Just (Func remaining retTy) else Just retTy
+            let
+              remaining = Array.drop (List.length args) args'
+            in
+              if Array.length remaining > 0 then Just (Func remaining retTy) else Just retTy
           _ -> mbTy
       in
         case finalTy of
@@ -1525,15 +1527,15 @@ build ctx = case _ of
     build ctx $ EffectDefer $ build ctx $ Let ident level binding body
   EffectBind ident level binding1 body
     | ExprSyntax _ (EffectDefer binding) <- unwrapBackendExpr binding1 ->
-    build ctx $ EffectBind ident level binding body
+        build ctx $ EffectBind ident level binding body
   EffectBind ident level binding body1
     | ExprSyntax _ (EffectDefer body) <- unwrapBackendExpr body1 ->
-    build ctx $ EffectBind ident level binding body
+        build ctx $ EffectBind ident level binding body
   EffectBind _ level binding body1
     | ExprSyntax _ (EffectPure expr) <- unwrapBackendExpr body1
     , ExprSyntax _ (Local _ level2) <- unwrapBackendExpr expr
     , level == level2 ->
-    binding
+        binding
   EffectDefer expr | ExprSyntax _ (EffectDefer _) <- unwrapBackendExpr expr ->
     expr
   PrimOp (Op1 OpBooleanNot (ExprSyntax _ (PrimOp (Op1 OpBooleanNot expr)))) ->
@@ -1639,9 +1641,6 @@ rewriteInline ident level binding body = do
       Nothing ->
         s2
   ExprRewrite (withRewrite (bound level powAnalysis)) $ RewriteInline ident level binding body
-
-
-
 
 -- | Décide si une fonction peut subir une eta-réduction (ex: transformer \x -> f x en f).
 shouldEtaReduce :: Level -> BackendExpr -> BackendExpr -> Maybe BackendExpr
@@ -1924,17 +1923,95 @@ optimize traceSteps ctx env (Qualified mn (Ident id)) initN originalExpr =
     | n == 0 = do
         let name = foldMap ((_ <> ".") <<< unwrap) mn <> id
         unsafeCrashWith $ name <> ": Possible infinite optimization loop."
-    -- Bailout heuristic: if the AST size is exceptionally large (> 2000 nodes),
-    -- we run the Nbe pass exactly ONCE (eval + quote) to properly rename all variables,
-    -- but we return `false` to abort the recursive optimization loop.
-    -- This prevents infinite rewriting loops on massive `do` blocks (e.g. Free monads).
     | (BackendAnalysis { size }) <- analysisOf expr1, size > 2000 =
-        let expr2 = quote ctx (eval env expr1)
-        in Tuple false expr2
+        let
+          expr2 = optimizeChunk ctx env expr1
+        in
+          Tuple false expr2
     | otherwise = do
         let expr2 = quote ctx (eval env expr1)
         let BackendAnalysis { rewrite } = analysisOf expr2
         Tuple rewrite expr2
+
+  optimizeChunk :: Ctx -> Env -> BackendExpr -> BackendExpr
+  optimizeChunk c e expr =
+    let
+      BackendAnalysis { size } = analysisOf expr
+    in
+      if size <= 2000 then
+        quote c (eval e expr)
+      else
+        case expr of
+          ExprSyntax _ (Typed ty a) ->
+            build c (Typed ty (optimizeChunk c e a))
+          ExprSyntax _ syntax ->
+            let
+              rebuild = build c
+            in
+              case syntax of
+                Let ident level binding body ->
+                  let
+                    binding' = optimizeChunk (purely c) e binding
+                    e' = bindLocal e (One (NeutLocal ident level))
+                    body' = optimizeChunk c e' body
+                  in
+                    rebuild (Let ident level binding' body')
+
+                LetRec level bindings body ->
+                  let
+                    neutBindings = (\(Tuple ident _) -> Tuple ident $ defer \_ -> NeutLocal (Just ident) level) <$> bindings
+                    e' = bindLocal e (Group neutBindings)
+                    bindings' = map (\(Tuple ident b) -> Tuple ident (optimizeChunk (purely c) e' b)) bindings
+                    body' = optimizeChunk c e' body
+                  in
+                    rebuild (LetRec level bindings' body')
+
+                EffectBind ident level binding body ->
+                  let
+                    binding' = optimizeChunk (effectfully c) e binding
+                    e' = bindLocal e (One (NeutLocal ident level))
+                    body' = optimizeChunk (effectfully c) e' body
+                  in
+                    rebuild (EffectBind ident level binding' body')
+
+                Abs idents body ->
+                  let
+                    e' = Foldable.foldl (\acc (Tuple ident level) -> bindLocal acc (One (NeutLocal ident level))) e idents
+                    body' = optimizeChunk (purely c) e' body
+                  in
+                    rebuild (Abs idents body')
+
+                UncurriedAbs idents body ->
+                  let
+                    e' = Foldable.foldl (\acc (Tuple ident level) -> bindLocal acc (One (NeutLocal ident level))) e idents
+                    body' = optimizeChunk (purely c) e' body
+                  in
+                    rebuild (UncurriedAbs idents body')
+
+                UncurriedEffectAbs idents body ->
+                  let
+                    e' = Foldable.foldl (\acc (Tuple ident level) -> bindLocal acc (One (NeutLocal ident level))) e idents
+                    body' = optimizeChunk (purely c) e' body
+                  in
+                    rebuild (UncurriedEffectAbs idents body')
+
+                Branch branches def ->
+                  let
+                    branches' = map (\(Pair cond b) -> Pair (optimizeChunk (purely c) e cond) (optimizeChunk c e b)) branches
+                    def' = optimizeChunk c e def
+                  in
+                    rebuild (Branch branches' def')
+
+                EffectDefer b ->
+                  rebuild (EffectDefer (optimizeChunk (effectfully c) e b))
+
+                EffectPure b ->
+                  rebuild (EffectPure (optimizeChunk (purely c) e b))
+
+                _ -> rebuild (map (optimizeChunk c e) syntax)
+
+          ExprRewrite _ _ ->
+            quote c (eval e expr)
 
 -- | Gèle (freeze) une expression optimisée pour la transformer en sémantique neutre, prête à être utilisée ou inlinée par d'autres modules.
 freeze :: BackendExpr -> Tuple BackendAnalysis NeutralExpr
