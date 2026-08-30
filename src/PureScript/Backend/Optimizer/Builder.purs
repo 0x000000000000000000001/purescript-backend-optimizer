@@ -102,7 +102,7 @@ buildModules options coreFnModules =
         
         -- Write this module's implementations to disk
         let _ = unsafePerformEffect (writePurmetaSync name backendMod.implementations)
-        let _ = unsafePerformEffect (logMemory ("Builder loop optimized: " <> unwrap name))
+        -- let _ = unsafePerformEffect (logMemory ("Builder loop optimized: " <> unwrap name))
         let _ = unsafePerformEffect clearPurmetaCache
         
         go
