@@ -250,9 +250,10 @@ type InlineDirectiveMap = Map EvalRef (Map InlineAccessor InlineDirective)
 -- | L'environnement d'évaluation, transportant les variables locales et la configuration d'inlining.
 newtype Env = Env
   { currentModule :: ModuleName
+  , locals :: Map Int (LocalBinding BackendSemantics)
+  , localsSize :: Int
   , evalExternRef :: Env -> Qualified Ident -> Maybe BackendSemantics
   , evalExternSpine :: Env -> Qualified Ident -> Array ExternSpine -> Maybe BackendSemantics
-  , locals :: Array (LocalBinding BackendSemantics)
   , directives :: InlineDirectiveMap
   }
 
@@ -260,11 +261,11 @@ derive instance Newtype Env _
 
 -- | Recherche une variable locale dans l'environnement d'évaluation courant à l'aide de son niveau (De Bruijn level).
 lookupLocal :: Env -> Level -> Maybe (LocalBinding BackendSemantics)
-lookupLocal (Env { locals }) (Level lvl) = Array.index locals lvl
+lookupLocal (Env { locals }) (Level lvl) = Map.lookup lvl locals
 
 -- | Lie une nouvelle variable locale dans l'environnement d'évaluation.
 bindLocal :: Env -> LocalBinding BackendSemantics -> Env
-bindLocal (Env env) sem = Env env { locals = Array.snoc env.locals sem }
+bindLocal (Env env) sem = Env env { locals = Map.insert env.localsSize sem env.locals, localsSize = env.localsSize + 1 }
 
 -- | Insère une directive d'inlining (ex: @inline) pour une référence spécifique dans la map des directives.
 insertDirective :: EvalRef -> InlineAccessor -> InlineDirective -> InlineDirectiveMap -> InlineDirectiveMap
@@ -1933,6 +1934,9 @@ optimize traceSteps ctx env (Qualified mn (Ident id)) initN originalExpr =
         let BackendAnalysis { rewrite } = analysisOf expr2
         Tuple rewrite expr2
 
+  withLevel :: Ctx -> Level -> Ctx
+  withLevel (Ctx c) (Level lvl) = Ctx c { currentLevel = max c.currentLevel (lvl + 1) }
+
   optimizeChunk :: Ctx -> Env -> BackendExpr -> BackendExpr
   optimizeChunk c e expr =
     let
@@ -1951,47 +1955,53 @@ optimize traceSteps ctx env (Qualified mn (Ident id)) initN originalExpr =
               case syntax of
                 Let ident level binding body ->
                   let
+                    c' = withLevel c level
                     binding' = optimizeChunk (purely c) e binding
                     e' = bindLocal e (One (NeutLocal ident level))
-                    body' = optimizeChunk c e' body
+                    body' = optimizeChunk c' e' body
                   in
                     rebuild (Let ident level binding' body')
 
                 LetRec level bindings body ->
                   let
+                    c' = withLevel c level
                     neutBindings = (\(Tuple ident _) -> Tuple ident $ defer \_ -> NeutLocal (Just ident) level) <$> bindings
                     e' = bindLocal e (Group neutBindings)
-                    bindings' = map (\(Tuple ident b) -> Tuple ident (optimizeChunk (purely c) e' b)) bindings
-                    body' = optimizeChunk c e' body
+                    bindings' = map (\(Tuple ident b) -> Tuple ident (optimizeChunk (purely c') e' b)) bindings
+                    body' = optimizeChunk c' e' body
                   in
                     rebuild (LetRec level bindings' body')
 
                 EffectBind ident level binding body ->
                   let
+                    c' = withLevel c level
                     binding' = optimizeChunk (effectfully c) e binding
                     e' = bindLocal e (One (NeutLocal ident level))
-                    body' = optimizeChunk (effectfully c) e' body
+                    body' = optimizeChunk (effectfully c') e' body
                   in
                     rebuild (EffectBind ident level binding' body')
 
                 Abs idents body ->
                   let
+                    c' = Foldable.foldl (\acc (Tuple _ level) -> withLevel acc level) c idents
                     e' = Foldable.foldl (\acc (Tuple ident level) -> bindLocal acc (One (NeutLocal ident level))) e idents
-                    body' = optimizeChunk (purely c) e' body
+                    body' = optimizeChunk (purely c') e' body
                   in
                     rebuild (Abs idents body')
 
                 UncurriedAbs idents body ->
                   let
+                    c' = Foldable.foldl (\acc (Tuple _ level) -> withLevel acc level) c idents
                     e' = Foldable.foldl (\acc (Tuple ident level) -> bindLocal acc (One (NeutLocal ident level))) e idents
-                    body' = optimizeChunk (purely c) e' body
+                    body' = optimizeChunk (purely c') e' body
                   in
                     rebuild (UncurriedAbs idents body')
 
                 UncurriedEffectAbs idents body ->
                   let
+                    c' = Foldable.foldl (\acc (Tuple _ level) -> withLevel acc level) c idents
                     e' = Foldable.foldl (\acc (Tuple ident level) -> bindLocal acc (One (NeutLocal ident level))) e idents
-                    body' = optimizeChunk (purely c) e' body
+                    body' = optimizeChunk (purely c') e' body
                   in
                     rebuild (UncurriedEffectAbs idents body')
 

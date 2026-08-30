@@ -277,7 +277,7 @@ printExpr (ExprSyntax _ syn) = case syn of
 
 toTopLevelBackendBinding :: Array (Qualified Ident) -> ConvertEnv -> Binding Ann -> Accum ConvertEnv (Tuple Ident (WithDeps NeutralExpr))
 toTopLevelBackendBinding group env (Binding _ ident cfn) = do
-  let evalEnv = Env { currentModule: env.currentModule, evalExternRef: makeExternEvalRef env, evalExternSpine: makeExternEvalSpine env, locals: [], directives: env.directives }
+  let evalEnv = Env { currentModule: env.currentModule, evalExternRef: makeExternEvalRef env, evalExternSpine: makeExternEvalSpine env, locals: Map.empty, localsSize: 0, directives: env.directives }
   let qualifiedIdent = Qualified (Just env.currentModule) ident
   let backendExpr = toBackendExpr cfn env
   let BackendAnalysis { size } = analysisOf backendExpr
@@ -425,7 +425,7 @@ toExternImpl env group isDict expr = case unwrapTyped expr of
     other -> other
 
 topEnv :: Env -> Env
-topEnv (Env env) = Env env { locals = [] }
+topEnv (Env env) = Env env { locals = Map.empty, localsSize = 0 }
 
 unwrapExternSpine :: ExternSpine -> ExternSpine
 unwrapExternSpine = case _ of
