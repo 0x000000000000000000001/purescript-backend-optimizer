@@ -84,7 +84,8 @@ import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Bindi
 import PureScript.Backend.Optimizer.Directives (DirectiveHeaderResult, parseDirectiveHeader)
 import PureScript.Backend.Optimizer.Semantics (BackendExpr(..), BackendSemantics, Ctx(..), DataTypeMeta, Env(..), EvalRef(..), ExternImpl(..), ExternSpine(..), InlineAccessor(..), InlineDirective(..), InlineDirectiveMap, NeutralExpr(..), build, evalExternFromImpl, evalExternRefFromImpl, freeze, optimize, unwrapSemTyped)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
-import PureScript.Backend.Optimizer.Syntax (BackendAccessor(..), BackendOperator(..), BackendOperator1(..), BackendOperator2(..), BackendOperatorOrd(..), BackendSyntax(..), Level(..), Pair(..))
+import PureScript.Backend.Optimizer.Syntax (BackendAccessor(..), BackendOperator(..), BackendOperator1(..), BackendOperator2(..), BackendOperatorOrd(..), BackendSyntax(Var, Local, Lit, App, Abs, UncurriedApp, UncurriedAbs, UncurriedEffectApp, UncurriedEffectAbs, Accessor, Update, CtorSaturated, CtorDef, LetRec, Let, EffectBind, EffectPure, EffectDefer, Branch, PrimOp, PrimEffect, PrimUndefined, Fail, Typed), Level(..), Pair(..))
+import PureScript.Backend.Optimizer.Syntax as Syn
 import PureScript.Backend.Optimizer.Utils (foldl1Array)
 import PureScript.Backend.Optimizer.Cache (readPurmetaSync)
 import Effect.Unsafe (unsafePerformEffect)
@@ -580,8 +581,9 @@ toBackendExprWithType mbTy expr = do
             <*> intro idents lvl next
         Rec _ ->
           unsafeCrashWith "CoreFn empty Rec binding group"
-    ExprTypeApp _ expr' _ ->
-      go expr'
+    ExprTypeApp _ expr' ty -> do
+      expr'' <- go expr'
+      buildM $ Syn.TypeApp expr'' ty
     ExprCase _ exprs alts ->
       let
         firstBinders = case Array.head alts of

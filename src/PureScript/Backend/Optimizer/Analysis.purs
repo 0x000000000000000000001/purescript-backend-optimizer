@@ -317,6 +317,8 @@ analyze externAnalysis expr = case expr of
           complex NonTrivial $ analyzeDefault expr
       | otherwise =
           analyzeDefault expr
+  TypeApp hd _ ->
+    analysisOf hd
   Update hd _ ->
     case syntaxOf hd of
       Just (Local _ lvl) ->

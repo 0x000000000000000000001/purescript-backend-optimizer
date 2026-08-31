@@ -59,6 +59,8 @@ freeVars (TcoExpr _ syntax) = case syntax of
     _ -> Set.empty
   App fn args ->
     foldl (\acc e -> Set.union acc (freeVars e)) (freeVars fn) (toArray args)
+  TypeApp fn _ ->
+    freeVars fn
   Abs args body ->
     let
       argsSet = foldl (\acc (Tuple mbIdent lvl) -> Set.insert (localId mbIdent lvl) acc) Set.empty (toArray args)
@@ -126,6 +128,7 @@ paramTypes (TcoExpr _ expr) = case expr of
     LitRecord obj -> foldl (\acc prop -> Map.union acc (paramTypes (propValue prop))) Map.empty obj
     _ -> Map.empty
   App f args -> foldl (\acc e -> Map.union acc (paramTypes e)) (paramTypes f) (toArray args)
+  TypeApp f _ -> paramTypes f
   Abs _ a -> paramTypes a
   UncurriedApp f args -> foldl (\acc e -> Map.union acc (paramTypes e)) (paramTypes f) args
   UncurriedAbs _ a -> paramTypes a

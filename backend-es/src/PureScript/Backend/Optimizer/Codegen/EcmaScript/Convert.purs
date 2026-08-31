@@ -253,6 +253,8 @@ codegenExpr env@(CodegenEnv { currentModule, inlineApp }) tcoExpr@(TcoExpr _ exp
           )
           (codegenExpr env a)
           bs
+  TypeApp a _ ->
+    codegenExpr env a
   Abs idents body -> do
     let result = freshNames RefStrict env idents
     esCurriedFunction (toEsIdent <$> NonEmptyArray.toArray result.value) (codegenBlockStatements pureMode result.accum body)
@@ -847,6 +849,8 @@ isLazyBinding currentModule group (Tuple _ tcoExpr) = go tcoExpr
     Let _ _ _ _ ->
       false
     Branch _ _ ->
+      false
+    TypeApp _ _ ->
       false
     App _ _ ->
       false

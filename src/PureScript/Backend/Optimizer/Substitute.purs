@@ -15,7 +15,8 @@ import Data.Newtype (unwrap)
 import Data.Tuple (Tuple(..))
 import PureScript.Backend.Optimizer.Codegen.Tco (TcoExpr(..))
 import PureScript.Backend.Optimizer.CoreFn (ExprType(..), Ident(..), Literal(..), Prop(..), Qualified(..))
-import PureScript.Backend.Optimizer.Syntax (BackendEffect(..), BackendOperator(..), BackendSyntax(..), Pair(..))
+import PureScript.Backend.Optimizer.Syntax (BackendEffect(..), BackendOperator(..), BackendSyntax(Var, Local, Lit, App, Abs, UncurriedApp, UncurriedAbs, UncurriedEffectApp, UncurriedEffectAbs, Accessor, Update, CtorSaturated, CtorDef, LetRec, Let, EffectBind, EffectPure, EffectDefer, Branch, PrimOp, PrimEffect, PrimUndefined, Fail, Typed), Pair(..))
+import PureScript.Backend.Optimizer.Syntax as Syn
 
 unify :: ExprType -> ExprType -> Map String ExprType -> Map String ExprType
 unify (ForAll _ t1) t2 subst = unify t1 t2 subst
@@ -107,6 +108,7 @@ substituteAst insts mangle = go Nothing
               else TcoExpr a (Var (Qualified mbMn (Ident name)))
           Nothing -> TcoExpr a (Var (Qualified mbMn (Ident name)))
     App fn args -> TcoExpr a (App (go Nothing fn) (map (go Nothing) args))
+    Syn.TypeApp fn ty -> TcoExpr a (Syn.TypeApp (go Nothing fn) ty)
     Abs args body -> TcoExpr a (Abs args (go Nothing body))
     UncurriedApp fn args -> TcoExpr a (UncurriedApp (go Nothing fn) (map (go Nothing) args))
     UncurriedAbs args body -> TcoExpr a (UncurriedAbs args (go Nothing body))
@@ -156,6 +158,7 @@ mapTcoExprTypes f = go
     Typed ty inner -> TcoExpr a (Typed (f ty) (go inner))
     Var v -> TcoExpr a (Var v)
     App fn args -> TcoExpr a (App (go fn) (map go args))
+    Syn.TypeApp fn ty -> TcoExpr a (Syn.TypeApp (go fn) (f ty))
     Abs args body -> TcoExpr a (Abs args (go body))
     UncurriedApp fn args -> TcoExpr a (UncurriedApp (go fn) (map go args))
     UncurriedAbs args body -> TcoExpr a (UncurriedAbs args (go body))

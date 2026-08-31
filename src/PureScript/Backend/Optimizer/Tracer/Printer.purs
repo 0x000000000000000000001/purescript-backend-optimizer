@@ -220,6 +220,8 @@ printBackendSyntax = case _ of
     printLiteral lit
   App fn args ->
     printCurriedApp fn args
+  TypeApp fn _ ->
+    fn
   Abs args body ->
     printCurriedAbs (map (uncurry printLocal) args) body
   UncurriedApp fn args ->

@@ -43,6 +43,7 @@ data BackendSyntax a
   -- | 
   -- | Ex: `App (Var "f") [x, y]` represents calling `f(x)(y)` in a curried model.
   | App a (NonEmptyArray a)
+  | TypeApp a ExprType
 
   -- | Definition of a standard curried function (closure or lambda).
   -- | Binds one or more arguments (each with their own `Level`) and evaluates the body.
@@ -321,6 +322,7 @@ instance Foldable BackendSyntax where
         LitRecord as -> foldMap (foldMap f) as
         _ -> mempty
     App a bs -> f a <> foldMap f bs
+    TypeApp a _ -> f a
     Abs _ b -> f b
     UncurriedApp a bs -> f a <> foldMap f bs
     UncurriedAbs _ b -> f b
@@ -360,6 +362,8 @@ instance Traversable BackendSyntax where
         LitRecord as -> Lit <<< LitRecord <$> traverse (traverse f) as
     App a bs ->
       App <$> f a <*> traverse f bs
+    TypeApp a ty ->
+      TypeApp <$> f a <*> pure ty
     Abs as b ->
       Abs as <$> f b
     UncurriedApp a bs ->
