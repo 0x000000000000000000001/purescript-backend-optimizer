@@ -115,12 +115,14 @@ freeVars (TcoExpr _ syntax) = case syntax of
   PrimUndefined -> Set.empty
   Fail _ -> Set.empty
   Typed _ a -> freeVars a
+  TypeApp a _ -> freeVars a
 
 paramTypes :: TcoExpr -> Map String ExprType
 paramTypes (TcoExpr _ expr) = case expr of
   Typed type_ (TcoExpr _ (Local (Just (Ident ident)) (Level lvl))) ->
     Map.singleton (ident <> "_" <> show lvl) type_
   Typed _ a -> paramTypes a
+  TypeApp a _ -> paramTypes a
   Var _ -> Map.empty
   Local _ _ -> Map.empty
   Lit lit -> case lit of

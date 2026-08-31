@@ -202,6 +202,7 @@ tcoRefBinding ref (TcoExpr _ expr) = case expr of
       Just child -> Just { ref, analysis: child.analysis, arity: Array.length args + child.arity }
       Nothing -> Just { ref, analysis: tcoAnalysisOf inner, arity: Array.length args }
   Typed _ inner -> tcoRefBinding ref inner
+  TypeApp inner _ -> tcoRefBinding ref inner
   _ ->
     Nothing
 
@@ -325,6 +326,7 @@ appArgsAnalysis (TcoExpr _ expr) = case expr of
   UncurriedApp fn args -> appArgsAnalysis fn <> foldMap (tcoAnalysisOf) args
   UncurriedEffectApp fn args -> appArgsAnalysis fn <> foldMap (tcoAnalysisOf) args
   Typed _ inner -> appArgsAnalysis inner
+  TypeApp inner _ -> appArgsAnalysis inner
   _ -> mempty
 
 unwrapAppHead :: NeutralExpr -> Int -> Maybe (Tuple TcoRef Int)
@@ -332,6 +334,7 @@ unwrapAppHead (NeutralExpr expr) arity = case expr of
   Local ident level -> Just (Tuple (TcoLocal ident level) arity)
   Var ident -> Just (Tuple (TcoTopLevel ident) arity)
   Typed _ inner -> unwrapAppHead inner arity
+  TypeApp inner _ -> unwrapAppHead inner arity
   App fn args -> unwrapAppHead fn (arity + NonEmptyArray.length args)
   UncurriedApp fn args -> unwrapAppHead fn (arity + Array.length args)
   UncurriedEffectApp fn args -> unwrapAppHead fn (arity + Array.length args)
@@ -341,5 +344,6 @@ unwrapRefHead :: NeutralExpr -> Maybe TcoRef
 unwrapRefHead (NeutralExpr expr) = case expr of
   Local ident level -> Just (TcoLocal ident level)
   Typed _ inner -> unwrapRefHead inner
+  TypeApp inner _ -> unwrapRefHead inner
   _ -> Nothing
 

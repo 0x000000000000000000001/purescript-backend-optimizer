@@ -423,6 +423,7 @@ toExternImpl env group isDict expr = case unwrapTyped expr of
 
   unwrapTyped = case _ of
     ExprSyntax _ (Typed _ inner) -> unwrapTyped inner
+    ExprSyntax _ (Syn.TypeApp inner _) -> unwrapTyped inner
     other -> other
 
 topEnv :: Env -> Env
@@ -431,6 +432,7 @@ topEnv (Env env) = Env env { locals = Map.empty, localsSize = 0 }
 unwrapExternSpine :: ExternSpine -> ExternSpine
 unwrapExternSpine = case _ of
   ExternApp sems -> ExternApp (unwrapSemTyped <$> sems)
+  ExternTypeApp ty -> ExternTypeApp ty
   ExternUncurriedApp sems -> ExternUncurriedApp (unwrapSemTyped <$> sems)
   ExternAccessor acc -> ExternAccessor acc
   ExternPrimOp op -> ExternPrimOp op
