@@ -11,7 +11,8 @@ module PureScript.Backend.Optimizer.Monomorphize
   , collectAllTypes
   , mangleType
   , defaultToAny
-  , collectAppSpine
+  , collectSpine
+  , SpineArg(..)
   , getExprAnn
   , inferExprType
   , monomorphize
@@ -30,8 +31,6 @@ import Data.Maybe (Maybe(..), fromMaybe, maybe, isJust)
 import Data.Newtype (unwrap)
 import Data.Set (Set)
 import Data.Set as Set
-import Effect.Class.Console as Effect.Class.Console
-import Effect.Unsafe (unsafePerformEffect)
 import Data.String as String
 import Data.String.Pattern (Pattern(..))
 import Debug (trace)
@@ -121,17 +120,24 @@ extractFuncType = case _ of
   ConstrainedType _ body -> extractFuncType body
   _ -> Nothing
 
-collectAppSpine :: Expr Ann -> { f :: Expr Ann, args :: Array (Expr Ann) }
-collectAppSpine = go []
-  where
-  go args (ExprApp _ f x) = go (Array.cons x args) f
-  go args f = { f, args }
+data SpineArg = SpineApp (Expr Ann) | SpineTypeApp ExprType
 
-collectTypeAppSpine :: Expr Ann -> { f :: Expr Ann, typeArgs :: Array ExprType }
-collectTypeAppSpine = go []
+collectSpine :: Expr Ann -> { f_var :: Expr Ann, spine :: Array SpineArg }
+collectSpine = go []
   where
-  go args (ExprTypeApp _ f t) = go (Array.cons t args) f
-  go args f = { f, typeArgs: args }
+  go acc (ExprApp _ f x) = go (Array.cons (SpineApp x) acc) f
+  go acc (ExprTypeApp _ f t) = go (Array.cons (SpineTypeApp t) acc) f
+  go acc f = { f_var: f, spine: acc }
+
+getSpineArgs :: Array SpineArg -> Array (Expr Ann)
+getSpineArgs = Array.mapMaybe (case _ of
+  SpineApp e -> Just e
+  _ -> Nothing)
+
+getSpineTypeArgs :: Array SpineArg -> Array ExprType
+getSpineTypeArgs = Array.mapMaybe (case _ of
+  SpineTypeApp t -> Just t
+  _ -> Nothing)
 
 buildSubst :: ExprType -> Array ExprType -> Map String ExprType
 buildSubst (ForAll vars body) typeArgs =
@@ -179,22 +185,22 @@ collectExpr modName acc expr = case expr of
       Nothing -> acc
   ExprApp _ _ _ ->
     let
-      { f: f_spine, args } = collectAppSpine expr
-      { f: f_var, typeArgs } = collectTypeAppSpine f_spine
-      acc1 = collectExpr modName acc f_spine
+      { f_var, spine } = collectSpine expr
+      args = getSpineArgs spine
+      typeArgs = getSpineTypeArgs spine
+      acc1 = collectExpr modName acc f_var
       acc2 = foldl (collectExpr modName) acc1 args
     in
       case f_var of
         ExprVar (Ann varAnn) (Qualified mbMod (Ident name)) ->
           let
              genericType = fromMaybe Any varAnn.type
-             instType = let (Ann fSpineAnn) = getExprAnn f_spine in fromMaybe Any fSpineAnn.type
+             subst = buildSubst genericType typeArgs
+             instType = substituteExprType subst (stripTypeVariables genericType)
              { dictArgs } = partitionArgs genericType args
              qualName = case mbMod of
                Just mod -> unwrap mod <> "." <> name
                Nothing -> modName <> "." <> name
-             
-             subst = buildSubst genericType typeArgs
           in
              if not (hasTypeVariables genericType) then acc2
              else if hasTypeVariables instType then acc2
@@ -399,7 +405,6 @@ monomorphize globalAstMap instMap (Module m) =
                       in
                         if modNameStr == definerMod then
                           let
-                            _ = unsafePerformEffect (Effect.Class.Console.log ("monomorphize binding " <> name <> " dictArgs length: " <> show (Array.length info.dictArgs)))
                             substFn t = stripStaticConstraints info.dictArgs (substituteExprType info.subst t)
 
                             exprWithDicts = applyDicts info.dictArgs expr
@@ -513,17 +518,22 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
       _ -> ExprVar ann ident
   ExprApp (Ann ann) _ _ ->
     let
-      { f: f_spine, args: args_spine } = collectAppSpine expr
-      f' = monomorphizeExpr modName instMap localDicts f_spine
-      args' = map (monomorphizeExpr modName instMap localDicts) args_spine
+      { f_var, spine } = collectSpine expr
+
+      typeArgs = getSpineTypeArgs spine
       
-      { f: f_var_eval } = collectTypeAppSpine f'
+      f_var' = monomorphizeExpr modName instMap localDicts f_var
+      spine' = map (case _ of
+                       SpineApp e -> SpineApp (monomorphizeExpr modName instMap localDicts e)
+                       SpineTypeApp t -> SpineTypeApp t) spine
+      args' = getSpineArgs spine'
     in
-      case f_var_eval of
+      case f_var' of
         ExprVar (Ann varAnn) (Qualified mbMod (Ident name)) ->
           let
-             instType = let (Ann fSpineAnn) = getExprAnn f_spine in fromMaybe Any fSpineAnn.type
              genericType = fromMaybe Any varAnn.type
+             subst = buildSubst genericType typeArgs
+             instType = substituteExprType subst (stripTypeVariables genericType)
              { dictArgs, normalArgs } = partitionArgs genericType args'
              qualName = case mbMod of
                Just mod -> unwrap mod <> "." <> name
@@ -532,7 +542,7 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
              filteredArgs = Array.filter (\d -> not (isStatic d)) dictArgs <> normalArgs
           in
              if not (hasTypeVariables genericType) || hasTypeVariables instType then
-               rebuildApp (Ann ann) f' args'
+               rebuildSpine (Ann ann) f_var' spine'
              else
                let specializedName = Ident (name <> "__" <> hashString (mangleType (defaultToAny instType)))
                in case Map.lookup qualName instMap of
@@ -547,10 +557,10 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
                              resolvedMod = Just (ModuleName definerMod)
                              specializedVar = ExprVar (Ann newAnn) (Qualified resolvedMod specializedName)
                           in
-                             rebuildApp (Ann ann) specializedVar filteredArgs
-                        Nothing -> rebuildApp (Ann ann) f' args'
-                    Nothing -> rebuildApp (Ann ann) f' args'
-        _ -> rebuildApp (Ann ann) f' args'
+                             rebuildSpine (Ann ann) specializedVar (map SpineApp filteredArgs)
+                        Nothing -> rebuildSpine (Ann ann) f_var' spine'
+                    Nothing -> rebuildSpine (Ann ann) f_var' spine'
+        _ -> rebuildSpine (Ann ann) f_var' spine'
 
   ExprLit ann lit -> ExprLit ann (map (monomorphizeExpr modName instMap localDicts) lit)
   ExprAbs ann id e -> ExprAbs ann id (monomorphizeExpr modName instMap localDicts e)
@@ -591,15 +601,11 @@ monomorphizeGuard modName instMap localDicts (Guard e1 e2) = Guard (monomorphize
 monomorphizeProp :: String -> InstantiationMap -> Map Ident (Expr Ann) -> Prop (Expr Ann) -> Prop (Expr Ann)
 monomorphizeProp modName instMap localDicts (Prop p e) = Prop p (monomorphizeExpr modName instMap localDicts e)
 
-rebuildApp :: Ann -> Expr Ann -> Array (Expr Ann) -> Expr Ann
-rebuildApp finalAnn f args =
-  case Array.uncons args of
-    Nothing -> f
-    Just { head, tail } ->
-      let
-        firstApp = ExprApp finalAnn f head
-      in
-        Array.foldl (\acc arg -> ExprApp finalAnn acc arg) firstApp tail
+rebuildSpine :: Ann -> Expr Ann -> Array SpineArg -> Expr Ann
+rebuildSpine finalAnn f spine = Array.foldl applySpine f spine
+  where
+  applySpine acc (SpineApp arg) = ExprApp finalAnn acc arg
+  applySpine acc (SpineTypeApp t) = ExprTypeApp finalAnn acc t
 
 hasTypeVariables :: ExprType -> Boolean
 hasTypeVariables (TypeVar v) = String.take 1 v == String.toLower (String.take 1 v) && v /= "gopurs_runtime.Value"
@@ -624,7 +630,7 @@ hasTypeVariables Boolean = false
 hasTypeVariables Unit = false
 hasTypeVariables (TypeLevelString _) = false
 hasTypeVariables (ADT _ _ args) = Array.any hasTypeVariables args
-hasTypeVariables Any = false
+hasTypeVariables Any = true
 
 stripTypeVariables :: ExprType -> ExprType
 stripTypeVariables (ForAll _ t) = stripTypeVariables t

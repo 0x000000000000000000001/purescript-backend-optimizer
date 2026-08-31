@@ -1,12 +1,9 @@
-@@ -403,6 +403,11 @@
-                             exprWithDicts = applyDicts info.dictArgs expr
-                             resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
-                             specializedExpr = rewriteExpr globalAstMap Map.empty substFn (monomorphizeExpr modNameStr instMap Map.empty resolvedExpr)
-+                            _ = if modNameStr == "Data.Monoid" && unwrap id == "mempty" && String.contains (Pattern "193435443") (hashString (mangleType (defaultToAny info.instType))) then
-+                                  unsafePerformEffect $ do
-+                                    log ("MEMPTY ETA EXPANDED 193435443 BEFORE REWRITE: " <> show exprWithDicts)
-+                                    log ("MEMPTY ETA EXPANDED 193435443 AFTER REWRITE: " <> show specializedExpr)
-+                                else unit
-                             etaExpandedExpr = case specializedExpr of
-                               ExprAbs _ _ _ -> specializedExpr
-                               _ ->
+@@ -547,7 +547,7 @@
+              filteredArgs = Array.filter (\d -> not (isStatic d)) dictArgs <> normalArgs
+           in
+              if not (hasTypeVariables genericType) || hasTypeVariables instType then
+-               rebuildSpine (Ann ann) f_var' spine'
++               let _rebuild = rebuildSpine (Ann ann) f_var' spine' in if name == "map" then Debug.trace ("REBUILD map! spine=" <> show (Array.length spine) <> " spine'=" <> show (Array.length spine') <> " dictArgs=" <> show (Array.length dictArgs) <> " isPoly=" <> show (hasTypeVariables instType)) (\_ -> _rebuild) else _rebuild
+              else
+                let specializedName = Ident (name <> "__" <> hashString (mangleType (defaultToAny instType)))
+                in case Map.lookup qualName instMap of

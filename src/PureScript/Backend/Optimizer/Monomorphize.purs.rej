@@ -1,9 +1,17 @@
-@@ -75,7 +75,7 @@
- 
- isStatic :: Expr Ann -> Boolean
- isStatic = case _ of
--  ExprVar _ _ -> false
-+  ExprVar _ _ -> true
-   ExprApp _ (ExprVar _ (Qualified _ (Ident "dict"))) _ -> true
-   _ -> false
- 
+@@ -28,6 +28,7 @@
+ import Data.Map as Map
+ import Data.Map.Internal (Map)
+ import Data.Maybe (Maybe(..), fromMaybe, maybe, isJust)
++import Partial.Unsafe (unsafeCrashWith)
+ import Data.Ord (abs)
+ import Data.Set (Set)
+ import Data.Set as Set
+@@ -407,7 +408,7 @@
+                       -> String.joinWith "." (fromMaybe [] (Array.init parts))
+                     resolvedMod = Just (ModuleName definerMod)
+                     resolvedExpr = fromMaybe (ExprVar (Ann ann) (Qualified resolvedMod (Ident name))) (Map.lookup qualName globalAstMap)
+-                    exprWithDicts = applyDicts info.dictArgs resolvedExpr
++                    exprWithDicts = let _ = if name == "void" then unsafeCrashWith "CRASH_VOID" else unit in applyDicts info.dictArgs resolvedExpr
+                     substFn t = stripStaticConstraints info.dictArgs (substituteExprType info.subst t)
+                     specializedExpr = rewriteExpr globalAstMap Map.empty substFn (monomorphizeExpr modNameStr instMap info.subst Map.empty resolvedExpr)
+                  in
