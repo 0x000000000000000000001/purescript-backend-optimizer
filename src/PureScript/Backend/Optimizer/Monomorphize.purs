@@ -27,7 +27,9 @@ import Data.Array as Array
 import Data.Foldable (foldl)
 import Data.Map (Map)
 import Data.Map as Map
+import Data.String as String
 import Data.Maybe (Maybe(..), fromMaybe, maybe, isJust)
+import Debug (trace)
 import Data.Newtype (unwrap)
 import Data.Set (Set)
 import Data.Set as Set
@@ -38,6 +40,9 @@ import Data.Tuple (Tuple(..))
 import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Module(..), ModuleName(..), Prop(..), Qualified(..))
 import PureScript.Backend.Optimizer.FfiSupport (hashString)
 import PureScript.Backend.Optimizer.Substitute (substituteExprType)
+import Node.Encoding (Encoding(..))
+import Effect.Unsafe (unsafePerformEffect)
+import Effect.Console as Console
 
 type InstantiationMap = Map String (Map ExprType { dictArgs :: Array (Expr Ann), callers :: Set String, subst :: Map String ExprType })
 
@@ -159,6 +164,28 @@ partitionArgs (ConstrainedType constraints _) args =
 partitionArgs (ForAll _ body) args = partitionArgs body args
 partitionArgs _ args = { dictArgs: [], normalArgs: args }
 
+collectExprVars :: Expr Ann -> Set String
+collectExprVars = go Set.empty
+  where
+  go acc (ExprVar _ (Qualified mbMod (Ident name))) = Set.insert (maybe "" (\(ModuleName mn) -> mn <> ".") mbMod <> name) acc
+  go acc (ExprApp _ e1 e2) = go (go acc e1) e2
+  go acc (ExprAbs _ _ e) = go acc e
+  go acc (ExprLet _ binds e) = go (foldl goBind acc binds) e
+  go acc (ExprTypeApp _ e _) = go acc e
+  go acc (ExprCase _ exprs alts) = foldl goAlt (foldl go acc exprs) alts
+  go acc (ExprAccessor _ e _) = go acc e
+  go acc (ExprUpdate _ e props) = foldl goProp (go acc e) props
+  go acc (ExprLit _ lit) = foldl go acc lit
+  go acc _ = acc
+
+  goBind acc (NonRec (Binding _ _ e)) = go acc e
+  goBind acc (Rec binds) = foldl (\a (Binding _ _ e) -> go a e) acc binds
+
+  goAlt acc (CaseAlternative _ (Unconditional e)) = go acc e
+  goAlt acc (CaseAlternative _ (Guarded guards)) = foldl (\a (Guard e1 e2) -> go (go a e1) e2) acc guards
+
+  goProp acc (Prop _ e) = go acc e
+
 stripStaticConstraints :: Array (Expr Ann) -> ExprType -> ExprType
 stripStaticConstraints dictArgs = case _ of
   ConstrainedType constraints body ->
@@ -257,16 +284,24 @@ collectTypesFromAlt (CaseAlternative _ (Guarded guards)) acc = foldl (\a (Guard 
 mapAnn :: (ExprType -> ExprType) -> Ann -> Ann
 mapAnn f (Ann ann) = Ann (ann { type = map f ann.type })
 
-rewriteExpr :: Map String (Binding Ann) -> Map Ident (Expr Ann) -> (ExprType -> ExprType) -> Expr Ann -> Expr Ann
+rewriteExpr :: Map String (Binding Ann) -> Map Ident (Expr Ann) -> Map String (Expr Ann) -> (ExprType -> ExprType) -> Expr Ann -> Expr Ann
 rewriteExpr globalAstMap = goLocals
   where
-  goLocals locals f = go
+  goLocals locals globalSubst f = go
     where
     go expr = case expr of
-      ExprVar ann q -> ExprVar (mapAnn f ann) q
+      ExprVar ann q@(Qualified mbMod (Ident name)) ->
+        let
+          qualName = case mbMod of
+            Just mod -> unwrap mod <> "." <> name
+            Nothing -> name
+          isFoldl = String.contains (String.Pattern "foldl") name
+        in case Map.lookup qualName globalSubst of
+          Just newExpr -> newExpr
+          Nothing -> ExprVar (mapAnn f ann) q
       ExprLit ann lit -> ExprLit (mapAnn f ann) (map go lit)
       ExprApp ann e1 e2 -> ExprApp (mapAnn f ann) (go e1) (go e2)
-      ExprAbs ann id e -> ExprAbs (mapAnn f ann) id (goLocals (Map.delete id locals) f e)
+      ExprAbs ann id e -> ExprAbs (mapAnn f ann) id (goLocals (Map.delete id locals) globalSubst f e)
       ExprLet ann binds e ->
         let
           binds' = map goBind binds
@@ -277,7 +312,7 @@ rewriteExpr globalAstMap = goLocals
             )
             locals
             binds'
-          e' = goLocals newLocals f e
+          e' = goLocals newLocals globalSubst f e
 
           foldFn b acc = case b of
             NonRec (Binding _ ident val) ->
@@ -311,7 +346,7 @@ rewriteExpr globalAstMap = goLocals
           case exprs', alts of
             [ e1 ], [ CaseAlternative [ BinderConstructor _ _ _ [ BinderVar _ ident ] ] (Unconditional e2) ] ->
               case resolveDict e1 of
-                Just lit -> goLocals (Map.insert ident (ExprLit (getExprAnn e1) lit) locals) f e2
+                Just lit -> goLocals (Map.insert ident (ExprLit (getExprAnn e1) lit) locals) globalSubst f e2
                 Nothing -> ExprCase (mapAnn f ann) exprs' (map goAlt alts)
             _, _ -> ExprCase (mapAnn f ann) exprs' (map goAlt alts)
       ExprConstructor ann t c ids -> ExprConstructor (mapAnn f ann) t c ids
@@ -417,14 +452,17 @@ monomorphize globalAstMap instMap (Module m) =
                             exprWithDicts = applyDicts info.dictArgs expr
                             resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
 
-                            specializedExpr = rewriteExpr globalAstMap Map.empty astSubstFn (monomorphizeExpr modNameStr instMap Map.empty resolvedExpr)
+                            specializedVar = ExprVar ann (Qualified (Just (ModuleName definerMod)) (Ident (name <> "__" <> hashString (mangleType (defaultToAny finalTy)))))
+                            globalSubst = Map.fromFoldable [ Tuple qualName specializedVar, Tuple name specializedVar ]
+                            finalTy = stripTypeVariables (substFn ty)
+
+                            specializedExpr = rewriteExpr globalAstMap Map.empty globalSubst astSubstFn (monomorphizeExpr modNameStr instMap Map.empty resolvedExpr)
 
                             etaExpandedExpr = case specializedExpr of
                               ExprAbs _ _ _ -> specializedExpr
                               _ | Array.length info.dictArgs == 0 -> specializedExpr
                               _ ->
                                 let
-                                  finalTy = stripTypeVariables (substFn ty)
                                   monomorphizedAnn = mapAnn (\_ -> finalTy) ann
                                 in
                                   case extractFuncType finalTy of
@@ -438,7 +476,7 @@ monomorphize globalAstMap instMap (Module m) =
                                     Nothing -> specializedExpr
 
                             newName = Ident (name <> "__" <> hashString (mangleType ty))
-                            newBinding = NonRec (Binding (mapAnn (\t -> stripTypeVariables (substFn t)) ann) newName etaExpandedExpr)
+                            newBinding = Rec [ Binding (mapAnn (\t -> stripTypeVariables (substFn t)) ann) newName etaExpandedExpr ]
                           in
                             Just newBinding
                         else Nothing
@@ -761,7 +799,7 @@ transitiveCollect globalAstMap initialMap = loop initialMap
                             foldl
                               ( \acc3 caller ->
                                   let
-                                    substitutedExpr = rewriteExpr globalAstMap Map.empty astSubstFn resolvedExpr
+                                    substitutedExpr = rewriteExpr globalAstMap Map.empty Map.empty astSubstFn resolvedExpr
                                     specializedExpr = monomorphizeExpr caller currentMap Map.empty substitutedExpr
                                   in
                                     collectExpr caller acc3 specializedExpr
