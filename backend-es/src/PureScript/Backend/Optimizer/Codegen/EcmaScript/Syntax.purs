@@ -170,6 +170,7 @@ data EsBinaryOp
   | EsSubtract
   | EsDivide
   | EsMultiply
+  | EsRemainder
   | EsBitAnd
   | EsBitOr
   | EsBitShiftLeft
@@ -603,6 +604,7 @@ esBinaryFixity = case _ of
   EsSubtract -> fixity false 9 "-"
   EsDivide -> fixity false 10 "/"
   EsMultiply -> fixity true 10 "*"
+  EsRemainder -> fixity false 10 "%"
   where
   fixity associative precedence symbol =
     { associative, precedence, symbol }

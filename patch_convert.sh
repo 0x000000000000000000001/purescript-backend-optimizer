@@ -1,0 +1,1 @@
+sed -i '' -e 's/let (Ann ann) = getExprAnn expr/let (Ann ann) = getExprAnn expr\n    _ = unsafePerformEffect (if (case expr of { ExprVar _ (Qualified _ (Ident name)) -> name == "v"; _ -> false }) then Console.log ("ExprVar v ann.type: " <> show ann.type) else pure unit)/' /Users/0x1/Documents/htdocs/purescript-backend-optimizer/src/PureScript/Backend/Optimizer/Convert.purs

@@ -287,6 +287,7 @@ data BackendOperatorNum
   | OpDivide
   | OpMultiply
   | OpSubtract
+  | OpMod
 
 derive instance Eq BackendOperatorNum
 derive instance Ord BackendOperatorNum

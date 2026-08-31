@@ -737,6 +737,7 @@ codegenPrimOp env@(CodegenEnv { options }) = case _ of
     OpDivide -> EsDivide
     OpMultiply -> EsMultiply
     OpSubtract -> EsSubtract
+    OpMod -> EsRemainder
 
 codegenCtorForType :: CodegenOptions -> ProperName -> DataTypeMeta -> EsExpr
 codegenCtorForType opts name meta = do

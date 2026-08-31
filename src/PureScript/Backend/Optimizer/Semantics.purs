@@ -973,6 +973,7 @@ evalPrimOpNumNumber op x y
         OpMultiply -> a * b
         OpSubtract -> a - b
         OpDivide -> a / b
+        OpMod -> 0.0
   | otherwise =
       Nothing
 
@@ -996,6 +997,8 @@ evalPrimOpNumInt op x y
           else Just $ liftInt res
         OpDivide ->
           Just $ liftInt (a / b)
+        OpMod ->
+          Just $ liftInt (a `mod` b)
   | otherwise =
       Nothing
 

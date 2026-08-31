@@ -196,7 +196,10 @@ collectExpr modName acc expr = case expr of
           let
              genericType = fromMaybe Any varAnn.type
              subst = buildSubst genericType typeArgs
-             instType = substituteExprType subst (stripTypeVariables genericType)
+             stripForAlls = case _ of
+               ForAll _ b -> stripForAlls b
+               x -> x
+             instType = stripTypeVariables (substituteExprType subst (stripForAlls genericType))
              { dictArgs } = partitionArgs genericType args
              qualName = case mbMod of
                Just mod -> unwrap mod <> "." <> name
@@ -405,12 +408,16 @@ monomorphize globalAstMap instMap (Module m) =
                       in
                         if modNameStr == definerMod then
                           let
-                            substFn t = stripStaticConstraints info.dictArgs (substituteExprType info.subst t)
+                            stripForAlls = case _ of
+                              ForAll _ b -> stripForAlls b
+                              x -> x
+                            substFn t = stripStaticConstraints info.dictArgs (substituteExprType info.subst (stripForAlls t))
+                            astSubstFn t = substituteExprType info.subst (stripForAlls t)
 
                             exprWithDicts = applyDicts info.dictArgs expr
                             resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
 
-                            specializedExpr = rewriteExpr globalAstMap Map.empty substFn (monomorphizeExpr modNameStr instMap Map.empty resolvedExpr)
+                            specializedExpr = rewriteExpr globalAstMap Map.empty astSubstFn (monomorphizeExpr modNameStr instMap Map.empty resolvedExpr)
 
                             etaExpandedExpr = case specializedExpr of
                               ExprAbs _ _ _ -> specializedExpr
@@ -533,7 +540,10 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
           let
              genericType = fromMaybe Any varAnn.type
              subst = buildSubst genericType typeArgs
-             instType = substituteExprType subst (stripTypeVariables genericType)
+             stripForAlls = case _ of
+               ForAll _ b -> stripForAlls b
+               x -> x
+             instType = stripTypeVariables (substituteExprType subst (stripForAlls genericType))
              { dictArgs, normalArgs } = partitionArgs genericType args'
              qualName = case mbMod of
                Just mod -> unwrap mod <> "." <> name
@@ -550,7 +560,10 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
                       case Map.lookup (defaultToAny instType) typeMap of
                         Just info -> 
                           let
-                             substFn t = stripStaticConstraints dictArgs (substituteExprType info.subst t)
+                             stripForAlls2 = case _ of
+                               ForAll _ b -> stripForAlls2 b
+                               x -> x
+                             substFn t = stripStaticConstraints dictArgs (substituteExprType info.subst (stripForAlls2 t))
                              newAnn = varAnn { type = map (\t -> stripTypeVariables (substFn t)) varAnn.type }
                              definerMod = case String.split (Pattern ".") qualName of
                                parts -> String.joinWith "." (fromMaybe [] (Array.init parts))
@@ -737,14 +750,18 @@ transitiveCollect globalAstMap initialMap = loop initialMap
                         if hasTypeVariables ty then acc2
                         else
                           let
-                            substFn t = stripStaticConstraints info.dictArgs (substituteExprType info.subst t)
+                            stripForAlls = case _ of
+                              ForAll _ b -> stripForAlls b
+                              x -> x
+                            substFn t = stripStaticConstraints info.dictArgs (substituteExprType info.subst (stripForAlls t))
+                            astSubstFn t = substituteExprType info.subst (stripForAlls t)
                             exprWithDicts = applyDicts info.dictArgs expr
                             resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
                           in
                             foldl
                               ( \acc3 caller ->
                                   let
-                                    substitutedExpr = rewriteExpr globalAstMap Map.empty substFn resolvedExpr
+                                    substitutedExpr = rewriteExpr globalAstMap Map.empty astSubstFn resolvedExpr
                                     specializedExpr = monomorphizeExpr caller currentMap Map.empty substitutedExpr
                                   in
                                     collectExpr caller acc3 specializedExpr

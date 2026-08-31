@@ -52,6 +52,7 @@ coreForeignSemantics = Map.fromFoldable semantics
     , data_eq_eqNumberImpl
     , data_eq_eqStringImpl
     , data_euclideanRing_intDiv
+    , data_euclideanRing_intMod
     , data_euclideanRing_numDiv
     , data_heytingAlgebra_boolConj
     , data_heytingAlgebra_boolDisj
@@ -210,6 +211,9 @@ data_ring_numSub = Tuple (qualified "Data.Ring" "numSub") $ primBinaryOperator (
 
 data_euclideanRing_intDiv :: ForeignSemantics
 data_euclideanRing_intDiv = Tuple (qualified "Data.EuclideanRing" "intDiv") $ primBinaryOperator (OpIntNum OpDivide)
+
+data_euclideanRing_intMod :: ForeignSemantics
+data_euclideanRing_intMod = Tuple (qualified "Data.EuclideanRing" "intMod") $ primBinaryOperator (OpIntNum OpMod)
 
 data_euclideanRing_numDiv :: ForeignSemantics
 data_euclideanRing_numDiv = Tuple (qualified "Data.EuclideanRing" "numDiv") $ primBinaryOperator (OpNumberNum OpDivide)

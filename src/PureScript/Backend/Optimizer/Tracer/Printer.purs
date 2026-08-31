@@ -395,6 +395,7 @@ printBackendOperatorNum ns = primOp ns <<< case _ of
   OpDivide -> "div"
   OpMultiply -> "mul"
   OpSubtract -> "sub"
+  OpMod -> "mod"
 
 printBackendOperatorOrd :: String -> BackendOperatorOrd -> PrecDoc
 printBackendOperatorOrd ns = primOp ns <<< case _ of
