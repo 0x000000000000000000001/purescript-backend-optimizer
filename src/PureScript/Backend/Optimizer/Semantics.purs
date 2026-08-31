@@ -90,6 +90,7 @@ data MkFn a
 -- | Le type central de l'évaluateur. Représente les valeurs du programme pendant l'évaluation sémantique (réduites, neutres, primitives).
 data BackendSemantics
   = SemTyped ExprType BackendSemantics
+  | SemTypeApp ExprType BackendSemantics
   | SemRef EvalRef (Array ExternSpine) (Lazy BackendSemantics)
   | SemLam (Maybe Ident) (BackendSemantics -> BackendSemantics)
   | SemMkFn (MkFn BackendSemantics)
@@ -220,6 +221,7 @@ data ExternSpine
   | ExternUncurriedApp (Spine BackendSemantics)
   | ExternAccessor BackendAccessor
   | ExternPrimOp BackendOperator1
+  | ExternTypeApp ExprType
 
 -- | Une référence permettant d'identifier de manière unique une variable locale ou externe.
 data EvalRef
@@ -318,8 +320,8 @@ instance Eval f => Eval (BackendSyntax f) where
           unsafeCrashWith $ "Unbound local at level " <> show (unwrap lvl)
     App hd tl ->
       evalApp env (eval env hd) (NonEmptyArray.toArray (eval env <$> tl))
-    Syn.TypeApp hd _ ->
-      eval env hd
+    Syn.TypeApp hd ty ->
+      SemTypeApp ty (eval env hd)
     UncurriedApp hd tl ->
       evalUncurriedApp env (eval env hd) (eval env <$> tl)
     UncurriedAbs idents body -> do
@@ -472,8 +474,12 @@ evalApp :: Env -> BackendSemantics -> Spine BackendSemantics -> BackendSemantics
 evalApp env hd spine = go Nothing env hd (List.fromFoldable spine)
   where
   go mbTy env' = case _, _ of
+    SemTypeApp _ fn, args ->
+      go mbTy env' fn args
     SemTyped ty fn, args ->
       go (Just ty) env' fn args
+    SemTypeApp _ fn, args ->
+      go mbTy env' fn args
     _, List.Cons (NeutFail err) _ ->
       NeutFail err
     NeutFail err, _ ->
@@ -533,6 +539,8 @@ evalUncurriedApp :: Env -> BackendSemantics -> Spine BackendSemantics -> Backend
 evalUncurriedApp env hd spine = go Nothing hd
   where
   go mbTy = case _ of
+    SemTypeApp ty a ->
+      go mbTy a
     SemTyped ty a ->
       go (Just ty) a
     SemMkFn mk ->
@@ -559,6 +567,8 @@ evalUncurriedEffectApp :: Env -> BackendSemantics -> Spine BackendSemantics -> B
 evalUncurriedEffectApp env hd spine = go Nothing hd
   where
   go mbTy = case _ of
+    SemTypeApp ty a ->
+      go mbTy a
     SemTyped ty a ->
       go (Just ty) a
     SemMkEffectFn mk ->
@@ -607,6 +617,8 @@ evalSpine env = foldl go
       evalAccessor env hd accessor
     ExternPrimOp op1 ->
       evalPrimOp env (Op1 op1 hd)
+    ExternTypeApp ty ->
+      SemTypeApp ty hd
 
 -- | Reconstruit une expression neutre (non réductible) à partir d'une épine d'arguments.
 neutralSpine :: BackendSemantics -> Array ExternSpine -> BackendSemantics
@@ -621,11 +633,15 @@ neutralSpine = foldl go
       NeutAccessor hd acc
     ExternPrimOp op1 ->
       NeutPrimOp (Op1 op1 hd)
+    ExternTypeApp ty ->
+      SemTypeApp ty hd
 
 -- | Évalue l'accès à une propriété d'un enregistrement (record). Si l'enregistrement est statique, extrait directement la valeur.
 evalAccessor :: Env -> BackendSemantics -> BackendAccessor -> BackendSemantics
 evalAccessor env lhs accessor = floatLet lhs case _ of
   SemTyped _ a ->
+    evalAccessor env a accessor
+  SemTypeApp _ a ->
     evalAccessor env a accessor
   SemRef ref spine sem ->
     evalRef env ref spine (ExternAccessor accessor) sem
@@ -657,6 +673,8 @@ evalAccessor env lhs accessor = floatLet lhs case _ of
 evalUpdate :: BackendSemantics -> Array (Prop BackendSemantics) -> BackendSemantics
 evalUpdate lhs props = floatLet lhs case _ of
   SemTyped _ a ->
+    evalUpdate a props
+  SemTypeApp _ a ->
     evalUpdate a props
   NeutLit (LitRecord props') ->
     NeutLit (LitRecord (NonEmptyArray.head <$> Array.groupAllBy (comparing propKey) (props <> props')))
@@ -1094,6 +1112,8 @@ evalRefSpine env ref spine sem = case _ of
     evalAccessor env (force sem) acc
   ExternPrimOp op ->
     evalPrimOp env (Op1 op (force sem))
+  ExternTypeApp ty ->
+    SemTypeApp ty (force sem)
 
 -- | Convertit une référence d'évaluation (EvalRef) en sémantique de backend.
 evalEvalRef :: EvalRef -> BackendSemantics
@@ -1119,7 +1139,7 @@ envForGroup env ref acc group
 
 -- | Tente d'évaluer une fonction externe (FFI) si une implémentation sémantique (ForeignEval) est fournie pour elle.
 evalExternFromImpl :: Env -> Qualified Ident -> Tuple BackendAnalysis ExternImpl -> Array ExternSpine -> Maybe BackendSemantics
-evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case spine of
+evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case Array.filter isNotTypeApp spine of
   [] ->
     case impl of
       ExternExpr group expr -> do
@@ -1253,7 +1273,7 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case spine of
             Nothing
       _ ->
         Nothing
-  _ | Just { head: ExternAccessor acc@(GetProp prop), tail } <- Array.uncons spine ->
+  _ | Just { head: ExternAccessor acc@(GetProp prop), tail } <- Array.uncons (Array.filter isNotTypeApp spine) ->
     case impl of
       ExternExpr group expr -> do
         let ref = EvalExtern qual
@@ -1269,7 +1289,7 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case spine of
           _ -> Nothing
       _ -> Nothing
   _
-    | Just { head: ExternApp _, tail: tail1 } <- Array.uncons spine
+    | Just { head: ExternApp _, tail: tail1 } <- Array.uncons (Array.filter isNotTypeApp spine)
     , Just { head: ExternAccessor (GetProp prop), tail: tail2 } <- Array.uncons tail1 ->
         case impl of
           ExternExpr group fn -> do
@@ -1279,7 +1299,7 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case spine of
                 Just $ evalSpine env (eval (envForGroup env ref (InlineSpineProp prop) group) fn) spine
               _ -> Nothing
           _ -> Nothing
-  _ | Just { head: ExternApp args, tail } <- Array.uncons spine ->
+  _ | Just { head: ExternApp args, tail } <- Array.uncons (Array.filter isNotTypeApp spine) ->
     case impl of
       ExternExpr group expr -> do
         let ref = EvalExtern qual
@@ -1372,6 +1392,8 @@ quote = go
   go ctx = case _ of
     SemTyped ty a ->
       build ctx $ Typed ty (go ctx a)
+    SemTypeApp ty a ->
+      build ctx $ Syn.TypeApp (go ctx a) ty
     -- Block constructors
     SemLet ident binding k -> do
       let Tuple level ctx' = nextLevel ctx
@@ -2140,3 +2162,7 @@ untypedExpr = case _ of
   ExprSyntax _ (Typed _ a) -> untypedExpr a
   a -> a
 
+
+isNotTypeApp :: ExternSpine -> Boolean
+isNotTypeApp (ExternTypeApp _) = false
+isNotTypeApp _ = true
