@@ -39,7 +39,7 @@ import Debug (trace)
 import Data.Tuple (Tuple(..))
 import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Module(..), ModuleName(..), Prop(..), Qualified(..))
 import PureScript.Backend.Optimizer.FfiSupport (hashString)
-import PureScript.Backend.Optimizer.Substitute (substituteExprType)
+import PureScript.Backend.Optimizer.Substitute (substituteExprType, unify)
 import Node.Encoding (Encoding(..))
 import Effect.Unsafe (unsafePerformEffect)
 import Effect.Console as Console
@@ -262,7 +262,7 @@ collectGuard modName acc (Guard e1 e2) = collectExpr modName (collectExpr modNam
 collectAllTypes :: Module Ann -> Set ExprType
 collectAllTypes (Module m) = foldl (\a b -> collectTypesFromBind b a) Set.empty m.decls
 
-type LocalInstMap = Map Ident (Array (Array ExprType))
+type LocalInstMap = Map Ident (Array (Map String ExprType))
 
 collectLocalExpr :: Set Ident -> LocalInstMap -> Expr Ann -> LocalInstMap
 collectLocalExpr targets acc expr = case expr of
@@ -275,8 +275,42 @@ collectLocalExpr targets acc expr = case expr of
       args = getSpineArgs spine
       
       acc1 = case f_var of
-        ExprVar _ (Qualified Nothing id) | Set.member id targets && Array.length typeArgs > 0 ->
-          Map.insertWith (<>) id [typeArgs] acc
+        ExprVar _ (Qualified Nothing id) | Set.member id targets ->
+          let
+            genericType = case getExprAnn f_var of Ann a -> fromMaybe Any a.type
+            substFromTypeArgs = buildSubst genericType typeArgs
+            
+            unifySpine :: ExprType -> Array (Expr Ann) -> Map String ExprType -> Map String ExprType
+            unifySpine _ [] s = s
+            unifySpine (ForAll _ t) args' s = unifySpine t args' s
+            unifySpine (ConstrainedType _ t) args' s = unifySpine t args' s
+            unifySpine (Func paramTypes ret) args' s =
+              let
+                numParams = Array.length paramTypes
+                appliedArgs = Array.take numParams args'
+                remainingArgs = Array.drop numParams args'
+                s1 = foldl (\acc (Tuple paramType arg) ->
+                       let actualType = case getExprAnn arg of Ann a -> fromMaybe Any a.type
+                       in unify paramType actualType acc
+                     ) s (Array.zip paramTypes appliedArgs)
+              in
+                unifySpine ret remainingArgs s1
+            unifySpine _ _ s = s
+            
+            finalSubst = unifySpine genericType args substFromTypeArgs
+          in
+            if not (Map.isEmpty finalSubst) then
+              let
+                stripForAlls = case _ of
+                  ForAll _ b -> stripForAlls b
+                  x -> x
+                instType = stripTypeVariables (substituteExprType finalSubst (stripForAlls genericType))
+              in
+                if not (hasTypeVariables genericType) || hasTypeVariables instType then
+                  acc
+                else
+                  Map.insertWith (<>) id [finalSubst] acc
+            else acc
         _ -> collectLocalExpr targets acc f_var
       
       acc2 = foldl (collectLocalExpr targets) acc1 args
@@ -738,8 +772,159 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
         )
         localDicts
         binds
+
+      boundIds = foldl (\acc -> case _ of
+          NonRec (Binding _ id _) -> Set.insert id acc
+          Rec bs -> foldl (\a (Binding _ id _) -> Set.insert id a) acc bs
+        ) Set.empty binds
+        
+      localInstMap = collectLocalExpr boundIds Map.empty (ExprLet ann binds e)
+      
+      fastPath = ExprLet ann (map (monomorphizeBindLocal modName instMap newLocalDicts) binds) (monomorphizeExpr modName instMap newLocalDicts e)
     in
-      ExprLet ann (map (monomorphizeBindLocal modName instMap newLocalDicts) binds) (monomorphizeExpr modName instMap newLocalDicts e)
+      if Map.isEmpty localInstMap then fastPath
+      else
+        let
+          processBinds = foldl (\acc bind -> 
+            case bind of
+              NonRec b@(Binding bAnn id bExpr) ->
+                case Map.lookup id localInstMap of
+                  Just substList ->
+                     let
+                       genericType = case getExprAnn bExpr of Ann a -> fromMaybe Any a.type
+                       specs = Array.mapMaybe (\substType ->
+                           let
+                             instType = stripTypeVariables (substituteExprType substType genericType)
+                             specKey = mangleType (defaultToAny instType)
+                             mangledId = Ident (unwrap id <> "__" <> hashString specKey)
+                             specExpr = rewriteExpr Map.empty Map.empty Map.empty (\t -> substituteExprType substType (stripTypeVariables t)) bExpr
+                             newBind = Binding (mapAnn (\t -> substituteExprType substType (stripTypeVariables t)) bAnn) mangledId specExpr
+                           in
+                             Just { specKey, mangledId, newBind }
+                       ) substList
+                       
+                       newBinds = [NonRec b] <> map (\s -> NonRec s.newBind) specs
+                       polyMapEntry = Map.fromFoldable (map (\s -> Tuple s.specKey s.mangledId) specs)
+                     in
+                       { binds: acc.binds <> newBinds, polyMap: Map.insert id polyMapEntry acc.polyMap }
+                  Nothing -> { binds: Array.snoc acc.binds bind, polyMap: acc.polyMap }
+              
+              Rec bs ->
+                let
+                  specs = foldl (\accRec (Binding bAnn id bExpr) ->
+                    case Map.lookup id localInstMap of
+                      Just substList ->
+                         let
+                           genericType = case getExprAnn bExpr of Ann a -> fromMaybe Any a.type
+                           s = Array.mapMaybe (\substType ->
+                               let
+                                 instType = stripTypeVariables (substituteExprType substType genericType)
+                                 specKey = mangleType (defaultToAny instType)
+                                 mangledId = Ident (unwrap id <> "__" <> hashString specKey)
+                                 specExpr = rewriteExpr Map.empty Map.empty Map.empty (\t -> substituteExprType substType (stripTypeVariables t)) bExpr
+                                 newBind = Binding (mapAnn (\t -> substituteExprType substType (stripTypeVariables t)) bAnn) mangledId specExpr
+                               in
+                                 Just { specKey, mangledId, newBind }
+                           ) substList
+                         in
+                           { newBinds: accRec.newBinds <> map _.newBind s
+                           , polyMap: Map.insert id (Map.fromFoldable (map (\x -> Tuple x.specKey x.mangledId) s)) accRec.polyMap 
+                           }
+                      Nothing -> accRec
+                  ) { newBinds: [], polyMap: acc.polyMap } bs
+                in
+                  if Array.length specs.newBinds > 0 then
+                    { binds: acc.binds <> [Rec bs] <> map (\b -> Rec [b]) specs.newBinds, polyMap: specs.polyMap }
+                  else
+                    { binds: Array.snoc acc.binds (Rec bs), polyMap: acc.polyMap }
+          ) { binds: [], polyMap: Map.empty } binds
+
+          polys = processBinds.polyMap
+          
+          go expr = case expr of
+            ExprApp annApp f arg ->
+              let
+                spineRec = collectSpine expr
+                f_var = spineRec.f_var
+                spine = spineRec.spine
+              in
+                case f_var of
+                  ExprVar varAnn (Qualified Nothing id) | Just insts <- Map.lookup id polys ->
+                    let
+                      typeArgs = getSpineTypeArgs spine
+                      args = getSpineArgs spine
+                      
+                      genericType = case getExprAnn f_var of Ann a -> fromMaybe Any a.type
+                      substFromTypeArgs = buildSubst genericType typeArgs
+                      
+                      unifySpine :: ExprType -> Array (Expr Ann) -> Map String ExprType -> Map String ExprType
+                      unifySpine _ [] s = s
+                      unifySpine (ForAll _ t) args' s = unifySpine t args' s
+                      unifySpine (ConstrainedType _ t) args' s = unifySpine t args' s
+                      unifySpine (Func paramTypes ret) args' s =
+                        let
+                          numParams = Array.length paramTypes
+                          appliedArgs = Array.take numParams args'
+                          remainingArgs = Array.drop numParams args'
+                          s1 = foldl (\acc (Tuple paramType arg) ->
+                                 let actualType = case getExprAnn arg of Ann a -> fromMaybe Any a.type
+                                 in unify paramType actualType acc
+                               ) s (Array.zip paramTypes appliedArgs)
+                        in
+                          unifySpine ret remainingArgs s1
+                      unifySpine _ _ s = s
+                      
+                      substType = unifySpine genericType args substFromTypeArgs
+                    in
+                      if not (Map.isEmpty substType) then
+                        let
+                          instType = stripTypeVariables (substituteExprType substType genericType)
+                          specKey = mangleType (defaultToAny instType)
+                        in
+                          case Map.lookup specKey insts of
+                            Just mangledId ->
+                              let
+                                newVar = ExprVar (mapAnn (\_ -> defaultToAny instType) varAnn) (Qualified Nothing mangledId)
+                              in
+                                foldl (\acc a -> ExprApp annApp acc (go a)) newVar args
+                            Nothing ->
+                              let
+                                app1 = foldl (\acc t -> ExprTypeApp annApp acc t) (go f_var) typeArgs
+                              in
+                                foldl (\acc a -> ExprApp annApp acc (go a)) app1 args
+                      else
+                        let
+                          app1 = foldl (\acc t -> ExprTypeApp annApp acc t) (go f_var) typeArgs
+                        in
+                          foldl (\acc a -> ExprApp annApp acc (go a)) app1 args
+                  _ -> 
+                     let
+                       typeArgs = getSpineTypeArgs spine
+                       args = getSpineArgs spine
+                       app1 = foldl (\acc t -> ExprTypeApp annApp acc t) (go f_var) typeArgs
+                     in
+                       foldl (\acc a -> ExprApp annApp acc (go a)) app1 args
+            ExprLit annLit lit -> ExprLit annLit (map go lit)
+            ExprAbs annAbs id e' -> ExprAbs annAbs id (go e')
+            ExprLet annLet binds' e' -> ExprLet annLet (map goBind binds') (go e')
+            ExprTypeApp annTy e' t -> ExprTypeApp annTy (go e') t
+            ExprCase annCase exprs alts -> ExprCase annCase (map go exprs) (map goAlt alts)
+            ExprConstructor annCtor t c ids -> ExprConstructor annCtor t c ids
+            ExprAccessor annAcc e' prop -> ExprAccessor annAcc (go e') prop
+            ExprUpdate annUp e' props -> ExprUpdate annUp (go e') (map goProp props)
+            ExprVar _ _ -> expr
+
+          goBind (NonRec (Binding bAnn id e')) = NonRec (Binding bAnn id (go e'))
+          goBind (Rec binds') = Rec (map (\(Binding bAnn id e') -> Binding bAnn id (go e')) binds')
+          goAlt (CaseAlternative binders cg) = CaseAlternative binders (goCaseGuard cg)
+          goCaseGuard (Unconditional e') = Unconditional (go e')
+          goCaseGuard (Guarded guards) = Guarded (map (\(Guard e1 e2) -> Guard (go e1) (go e2)) guards)
+          goProp (Prop p e') = Prop p (go e')
+
+          rewrittenBinds = map goBind processBinds.binds
+          rewrittenE = go e
+        in
+          ExprLet ann (map (monomorphizeBindLocal modName instMap newLocalDicts) rewrittenBinds) (monomorphizeExpr modName instMap newLocalDicts rewrittenE)
   ExprTypeApp ann e t -> ExprTypeApp ann (monomorphizeExpr modName instMap localDicts e) t
   ExprCase ann exprs alts -> ExprCase ann (map (monomorphizeExpr modName instMap localDicts) exprs) (map (monomorphizeAlt modName instMap localDicts) alts)
   ExprConstructor ann t c ids -> ExprConstructor ann t c ids
