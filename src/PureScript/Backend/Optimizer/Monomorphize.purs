@@ -412,7 +412,7 @@ rewriteExpr globalAstMap = goLocals
         in
           if Array.length filtered.binds == 0 then e' else ExprLet (mapAnn f ann) filtered.binds e'
       ExprTypeApp ann e t ->
-        ExprTypeApp (mapAnn f ann) (go e) t
+        ExprTypeApp (mapAnn f ann) (go e) (f t)
       ExprCase ann exprs alts ->
         let
           exprs' = map go exprs
