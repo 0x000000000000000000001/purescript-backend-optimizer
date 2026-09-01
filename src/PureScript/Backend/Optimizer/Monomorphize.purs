@@ -262,6 +262,45 @@ collectGuard modName acc (Guard e1 e2) = collectExpr modName (collectExpr modNam
 collectAllTypes :: Module Ann -> Set ExprType
 collectAllTypes (Module m) = foldl (\a b -> collectTypesFromBind b a) Set.empty m.decls
 
+type LocalInstMap = Map Ident (Array (Array ExprType))
+
+collectLocalExpr :: Set Ident -> LocalInstMap -> Expr Ann -> LocalInstMap
+collectLocalExpr targets acc expr = case expr of
+  ExprApp ann f arg ->
+    let
+      spineRec = collectSpine (ExprApp ann f arg)
+      f_var = spineRec.f_var
+      spine = spineRec.spine
+      typeArgs = getSpineTypeArgs spine
+      args = getSpineArgs spine
+      
+      acc1 = case f_var of
+        ExprVar _ (Qualified Nothing id) | Set.member id targets && Array.length typeArgs > 0 ->
+          Map.insertWith (<>) id [typeArgs] acc
+        _ -> collectLocalExpr targets acc f_var
+      
+      acc2 = foldl (collectLocalExpr targets) acc1 args
+    in
+      acc2
+  ExprLit _ lit -> foldl (collectLocalExpr targets) acc lit
+  ExprConstructor _ _ _ _ -> acc
+  ExprAccessor _ e _ -> collectLocalExpr targets acc e
+  ExprUpdate _ e props -> foldl (\a (Prop _ v) -> collectLocalExpr targets a v) (collectLocalExpr targets acc e) props
+  ExprAbs _ _ e -> collectLocalExpr targets acc e
+  ExprTypeApp _ e _ -> collectLocalExpr targets acc e
+  ExprCase _ exprs alts ->
+    foldl (\a (CaseAlternative _ cg) -> case cg of
+      Unconditional e' -> collectLocalExpr targets a e'
+      Guarded guards -> foldl (\a2 (Guard e1 e2) -> collectLocalExpr targets (collectLocalExpr targets a2 e1) e2) a guards
+    ) (foldl (collectLocalExpr targets) acc exprs) alts
+  ExprLet _ binds e -> foldl (\a b -> collectLocalBind targets a b) (collectLocalExpr targets acc e) binds
+  ExprVar _ _ -> acc
+
+collectLocalBind :: Set Ident -> LocalInstMap -> Bind Ann -> LocalInstMap
+collectLocalBind targets acc = case _ of
+  NonRec (Binding _ _ e) -> collectLocalExpr targets acc e
+  Rec binds -> foldl (\a (Binding _ _ e) -> collectLocalExpr targets a e) acc binds
+
 collectTypesFromExpr :: Expr Ann -> Set ExprType -> Set ExprType
 collectTypesFromExpr expr acc = case expr of
   ExprVar (Ann ann) _ -> maybe acc (\t -> Set.insert t acc) ann.type
