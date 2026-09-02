@@ -1,9 +1,0 @@
---- src/PureScript/Backend/Optimizer/Monomorphize.purs
-+++ src/PureScript/Backend/Optimizer/Monomorphize.purs
-@@ -238,6 +238,7 @@
-                x -> x
-              instType = stripTypeVariables (substituteExprType subst (stripForAlls genericType))
-              _ = if String.contains (Pattern "filter") qualName then trace ("\n\n[TRACE 1.6.3.3] collectExpr ExprApp for " <> qualName <> "\n  hasTypeVars instType: " <> show (hasTypeVariables instType) <> "\n  subst size: " <> show (Map.size subst)) \_ -> unit else unit
-+             _ = if String.contains (Pattern "filter") qualName then trace ("  genericType is ForAll? " <> (case genericType of ForAll _ _ -> "Yes"; _ -> "No")) \_ -> unit else unit
-              { dictArgs, normalArgs } = partitionArgs genericType args
-              staticNormalArgs = Array.filter isStatic normalArgs
