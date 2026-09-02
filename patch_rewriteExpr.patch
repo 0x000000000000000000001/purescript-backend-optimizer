@@ -1,0 +1,22 @@
+--- src/PureScript/Backend/Optimizer/Monomorphize.purs
++++ src/PureScript/Backend/Optimizer/Monomorphize.purs
+@@ -533,7 +533,10 @@
+ 
+     goBinding (Binding ann id e) =
+       let
+-        ann' = mapAnn f ann
++        rewrittenE = go e
++        eAnn = case getExprAnn rewrittenE of Ann a -> a.type
++        inferredType = case ann of Ann a -> eAnn <|> a.type
++        ann' = mapAnn f (Ann (case ann of Ann a -> a { type = inferredType }))
+         name = case id of Ident n -> n
+         isGo = name == "go" || name == "$go"
+         showHasVars = case _ of
+@@ -541,7 +544,7 @@
+           Nothing -> "Nothing"
+         _ = if isGo then trace ("\n\n[TRACE 1.6.3.1] rewriteExpr goBinding for " <> name <> "\n  orig vars: " <> showHasVars (case ann of Ann a -> a).type <> "\n  new vars:  " <> showHasVars (case ann' of Ann a -> a).type) \_ -> unit else unit
+       in
+-        Binding ann' id (go e)
++        Binding ann' id rewrittenE
+ 
+     goAlt (CaseAlternative binders cg) = CaseAlternative (map goBinder binders) (goCaseGuard cg)

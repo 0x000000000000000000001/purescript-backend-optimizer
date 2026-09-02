@@ -67,9 +67,11 @@ substituteExprType subst t = case t of
   ADT name path args -> ADT name path (map (substituteExprType subst) args)
   ForAll vars body ->
     let
-      subst' = foldl (\acc v -> Map.delete v acc) subst vars
+      subst' = subst
+      newVars = Array.filter (\v -> not (Map.member v subst')) vars
+      body' = substituteExprType subst' body
     in
-      ForAll vars (substituteExprType subst' body)
+      if Array.length newVars == 0 then body' else ForAll newVars body'
   ConstrainedType constraints body -> ConstrainedType (map (\(Tuple c a) -> Tuple c (map (substituteExprType subst) a)) constraints) (substituteExprType subst body)
   _ -> t
 
