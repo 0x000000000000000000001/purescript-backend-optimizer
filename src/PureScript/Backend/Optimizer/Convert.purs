@@ -73,6 +73,7 @@ import Data.Semigroup.Foldable (maximum)
 import Data.Set (Set)
 import Data.Set as Set
 import Data.String as String
+import Data.String.Pattern as Data.String.Pattern
 import Data.Traversable (class Foldable, Accum, foldr, for, mapAccumL, mapAccumR, sequence, traverse)
 import Data.TraversableWithIndex (forWithIndex)
 import Data.Tuple (Tuple(..), fst, snd)
@@ -175,6 +176,7 @@ toBackendModule (Module mod) env = do
     isBindingUsed deps (Tuple ident _) =
       let
         res = Set.member ident localExports || Set.member (Qualified (Just mod.name) ident) deps
+
       in
         if unwrap mod.name == "Data.Set" then res
         else res

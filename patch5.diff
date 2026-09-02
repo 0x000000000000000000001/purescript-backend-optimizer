@@ -1,3 +1,5 @@
+--- src/PureScript/Backend/Optimizer/Monomorphize.purs
++++ src/PureScript/Backend/Optimizer/Monomorphize.purs
 @@ -586,7 +586,7 @@
                  ( \(Tuple specKey info) ->
                      let 

@@ -306,7 +306,7 @@ collectLocalExpr targets acc expr = case expr of
                   x -> x
                 instType = stripTypeVariables (substituteExprType finalSubst (stripForAlls genericType))
               in
-                if not (hasTypeVariables genericType) || hasTypeVariables instType then
+                if not (hasTypeVariables genericType) || (hasTypeVariables instType && instType == stripForAlls genericType) then
                   acc
                 else
                   Map.insertWith (<>) id [finalSubst] acc
@@ -834,7 +834,7 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
                   ) { newBinds: [], polyMap: acc.polyMap } bs
                 in
                   if Array.length specs.newBinds > 0 then
-                    { binds: acc.binds <> [Rec bs] <> map (\b -> Rec [b]) specs.newBinds, polyMap: specs.polyMap }
+                    { binds: Array.snoc acc.binds (Rec (bs <> specs.newBinds)), polyMap: specs.polyMap }
                   else
                     { binds: Array.snoc acc.binds (Rec bs), polyMap: acc.polyMap }
           ) { binds: [], polyMap: Map.empty } binds
@@ -875,8 +875,8 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
                       unifySpine _ _ s = s
                       
                       substType = unifySpine genericType args substFromTypeArgs
+
                     in
-                      if not (Map.isEmpty substType) then
                         let
                           instType = stripTypeVariables (substituteExprType substType genericType)
                           specKey = mangleType (defaultToAny instType)
@@ -892,11 +892,6 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
                                 app1 = foldl (\acc t -> ExprTypeApp annApp acc t) (go f_var) typeArgs
                               in
                                 foldl (\acc a -> ExprApp annApp acc (go a)) app1 args
-                      else
-                        let
-                          app1 = foldl (\acc t -> ExprTypeApp annApp acc t) (go f_var) typeArgs
-                        in
-                          foldl (\acc a -> ExprApp annApp acc (go a)) app1 args
                   _ -> 
                      let
                        typeArgs = getSpineTypeArgs spine

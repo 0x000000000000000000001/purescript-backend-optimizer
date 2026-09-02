@@ -1,0 +1,12 @@
+--- src/PureScript/Backend/Optimizer/Monomorphize.purs
++++ src/PureScript/Backend/Optimizer/Monomorphize.purs
+@@ -293,7 +293,8 @@
+                           remainingArgs = Array.drop numParams args'
+                           s1 = foldl (\acc (Tuple paramType arg) ->
+                                  let actualType = case getExprAnn arg of Ann a -> fromMaybe Any a.type
+-                                 in unify paramType actualType acc
++                                     acc' = unify paramType actualType acc
++                                 in acc'
+                                ) s (Array.zip paramTypes appliedArgs)
+                         in
+                           unifySpine ret remainingArgs s1

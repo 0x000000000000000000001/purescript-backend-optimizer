@@ -1,0 +1,1 @@
+sed -i '' 's/subst = buildSubst genericType typeArgs/subst = if Array.length typeArgs == 0 \&\& isNothing mbMod then inferSubst genericType args'\'' else buildSubst genericType typeArgs/g' src/PureScript/Backend/Optimizer/Monomorphize.purs
