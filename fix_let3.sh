@@ -1,1 +1,0 @@
-sed -i '' 's/(monomorphizeExpr modNameStr instMap Map.empty resolvedExpr)/(monomorphizeExpr globalAstMap modNameStr instMap Map.empty resolvedExpr)/g' src/PureScript/Backend/Optimizer/Monomorphize.purs
