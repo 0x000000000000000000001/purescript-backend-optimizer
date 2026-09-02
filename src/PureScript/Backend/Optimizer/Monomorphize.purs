@@ -262,7 +262,7 @@ collectGuard modName acc (Guard e1 e2) = collectExpr modName (collectExpr modNam
 collectAllTypes :: Module Ann -> Set ExprType
 collectAllTypes (Module m) = foldl (\a b -> collectTypesFromBind b a) Set.empty m.decls
 
-type LocalInstMap = Map Ident (Array (Map String ExprType))
+type LocalInstMap = Map Ident { genericType :: ExprType, insts :: Array (Map String ExprType) }
 
 collectLocalExpr :: Set Ident -> LocalInstMap -> Expr Ann -> LocalInstMap
 collectLocalExpr targets acc expr = case expr of
@@ -306,11 +306,13 @@ collectLocalExpr targets acc expr = case expr of
                   x -> x
                 instType = stripTypeVariables (substituteExprType finalSubst (stripForAlls genericType))
               in
-                if not (hasTypeVariables genericType) || (hasTypeVariables instType && instType == stripForAlls genericType) then
+                if (hasTypeVariables genericType) && (hasTypeVariables instType && instType == stripForAlls genericType) then
                   acc
                 else
-                  Map.insertWith (<>) id [finalSubst] acc
-            else acc
+                  Map.insertWith (\old new -> { genericType: new.genericType, insts: old.insts <> new.insts }) id { genericType, insts: [finalSubst] } acc
+            else
+              -- Even if finalSubst is empty, we must record the genericType so it can be restored!
+              Map.insertWith (\old new -> { genericType: new.genericType, insts: old.insts <> new.insts }) id { genericType, insts: [Map.empty] } acc
         _ -> collectLocalExpr targets acc f_var
       
       acc2 = foldl (collectLocalExpr targets) acc1 args
@@ -785,20 +787,40 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
       if Map.isEmpty localInstMap then fastPath
       else
         let
+          injectType ty expr =
+            let
+              stripForAlls = case _ of
+                ForAll _ b -> stripForAlls b
+                x -> x
+            in
+              case stripForAlls ty, expr of
+                Func paramTypes ret, ExprAbs (Ann a) argId bodyExpr ->
+                  if Array.length paramTypes > 1 then
+                    let nextTy = Func (Array.drop 1 paramTypes) ret
+                    in ExprAbs (Ann (a { type = Just ty })) argId (injectType nextTy bodyExpr)
+                  else if Array.length paramTypes == 1 then
+                    ExprAbs (Ann (a { type = Just ty })) argId (injectType ret bodyExpr)
+                  else
+                    ExprAbs (Ann (a { type = Just ty })) argId bodyExpr
+                _, ExprAbs (Ann a) argId bodyExpr ->
+                  ExprAbs (Ann (a { type = Just ty })) argId bodyExpr
+                _, _ -> expr
+
           processBinds = foldl (\acc bind -> 
             case bind of
               NonRec b@(Binding bAnn id bExpr) ->
                 case Map.lookup id localInstMap of
-                  Just substList ->
+                  Just { genericType, insts: substList } ->
                      let
-                       genericType = case getExprAnn bExpr of Ann a -> fromMaybe Any a.type
+                       fixedAnn = case bAnn of Ann a -> Ann (a { type = Just genericType })
+                       fixedExpr = injectType genericType bExpr
                        specs = Array.mapMaybe (\substType ->
                            let
                              instType = stripTypeVariables (substituteExprType substType genericType)
                              specKey = mangleType (defaultToAny instType)
                              mangledId = Ident (unwrap id <> "__" <> hashString specKey)
-                             specExpr = rewriteExpr Map.empty Map.empty Map.empty (\t -> substituteExprType substType (stripTypeVariables t)) bExpr
-                             newBind = Binding (mapAnn (\t -> substituteExprType substType (stripTypeVariables t)) bAnn) mangledId specExpr
+                             specExpr = rewriteExpr Map.empty Map.empty Map.empty (\t -> substituteExprType substType (stripTypeVariables t)) fixedExpr
+                             newBind = Binding (mapAnn (\t -> substituteExprType substType (stripTypeVariables t)) fixedAnn) mangledId specExpr
                            in
                              Just { specKey, mangledId, newBind }
                        ) substList
@@ -813,16 +835,17 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
                 let
                   specs = foldl (\accRec (Binding bAnn id bExpr) ->
                     case Map.lookup id localInstMap of
-                      Just substList ->
+                      Just { genericType, insts: substList } ->
                          let
-                           genericType = case getExprAnn bExpr of Ann a -> fromMaybe Any a.type
+                           fixedAnn = case bAnn of Ann a -> Ann (a { type = Just genericType })
+                           fixedExpr = injectType genericType bExpr
                            s = Array.mapMaybe (\substType ->
                                let
                                  instType = stripTypeVariables (substituteExprType substType genericType)
                                  specKey = mangleType (defaultToAny instType)
                                  mangledId = Ident (unwrap id <> "__" <> hashString specKey)
-                                 specExpr = rewriteExpr Map.empty Map.empty Map.empty (\t -> substituteExprType substType (stripTypeVariables t)) bExpr
-                                 newBind = Binding (mapAnn (\t -> substituteExprType substType (stripTypeVariables t)) bAnn) mangledId specExpr
+                                 specExpr = rewriteExpr Map.empty Map.empty Map.empty (\t -> substituteExprType substType (stripTypeVariables t)) fixedExpr
+                                 newBind = Binding (mapAnn (\t -> substituteExprType substType (stripTypeVariables t)) fixedAnn) mangledId specExpr
                                in
                                  Just { specKey, mangledId, newBind }
                            ) substList
@@ -833,8 +856,10 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
                       Nothing -> accRec
                   ) { newBinds: [], polyMap: acc.polyMap } bs
                 in
-                  if Array.length specs.newBinds > 0 then
-                    { binds: Array.snoc acc.binds (Rec (bs <> specs.newBinds)), polyMap: specs.polyMap }
+                  if Array.length bs == 1 then
+                    { binds: acc.binds <> map (\b -> Rec [b]) specs.newBinds <> [Rec bs], polyMap: specs.polyMap }
+                  else if Array.length specs.newBinds > 0 then
+                    { binds: Array.snoc acc.binds (Rec (specs.newBinds <> bs)), polyMap: specs.polyMap }
                   else
                     { binds: Array.snoc acc.binds (Rec bs), polyMap: acc.polyMap }
           ) { binds: [], polyMap: Map.empty } binds
