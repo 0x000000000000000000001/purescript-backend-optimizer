@@ -257,7 +257,6 @@ collectExpr globalAstMap modName acc expr = case expr of
                  remainingArgs = Array.drop numParams args'
                  s1 = foldl (\acc (Tuple paramType arg) ->
                         let actualType = case getExprAnn arg of Ann a -> fromMaybe Any a.type
-                            _ = if String.contains (Pattern "filter") qualName then trace ("  unify paramType: " <> printTy paramType <> " with actualType: " <> printTy actualType) \_ -> unit else unit
                         in unify paramType actualType acc
                       ) s (Array.zip paramTypes appliedArgs)
                in
