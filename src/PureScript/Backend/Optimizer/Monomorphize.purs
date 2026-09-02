@@ -604,7 +604,7 @@ monomorphize globalAstMap instMap (Module m) =
                             globalSubst = Map.fromFoldable [ Tuple qualName specializedVar, Tuple name specializedVar ]
                             finalTy = stripTypeVariables (substFn info.instType)
 
-                            specializedExpr = rewriteExpr globalAstMap Map.empty globalSubst astSubstFn (monomorphizeExpr modNameStr instMap Map.empty resolvedExpr)
+                            specializedExpr = monomorphizeExpr modNameStr instMap Map.empty (rewriteExpr globalAstMap Map.empty globalSubst astSubstFn resolvedExpr)
 
                             etaExpandedExpr = case specializedExpr of
                               ExprAbs _ _ _ -> specializedExpr
@@ -709,8 +709,9 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
         Just d -> d
         Nothing -> ExprVar ann ident
       _ -> ExprVar ann ident
-  ExprApp (Ann ann) _ _ ->
+  expr | isAppOrTypeApp expr ->
     let
+      Ann ann = getExprAnn expr
       { f_var, spine } = collectSpine expr
 
       typeArgs = getSpineTypeArgs spine
@@ -734,9 +735,13 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
              qualName = case mbMod of
                Just mod -> unwrap mod <> "." <> name
                Nothing -> modName <> "." <> name
-
              filteredArgs = Array.filter (\d -> not (isStatic d)) dictArgs <> normalArgs
+             
           in
+             let 
+               isReverse = name == "reverse" || name == "reverse__Int64"
+               _ = if isReverse then trace ("\n\n[TRACE 1.6.1] ExprTypeApp for " <> name <> "\n  genericType=" <> show (hasTypeVariables genericType) <> "\n  instType=" <> show (hasTypeVariables instType) <> "\n  varAnn.type=" <> if isJust varAnn.type then "Just" else "Nothing") \_ -> unit else unit
+             in
              if not (hasTypeVariables genericType) || hasTypeVariables instType then
                rebuildSpine (Ann ann) f_var' spine'
              else
@@ -945,11 +950,15 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
           rewrittenE = go e
         in
           ExprLet ann (map (monomorphizeBindLocal modName instMap newLocalDicts) rewrittenBinds) (monomorphizeExpr modName instMap newLocalDicts rewrittenE)
-  ExprTypeApp ann e t -> ExprTypeApp ann (monomorphizeExpr modName instMap localDicts e) t
   ExprCase ann exprs alts -> ExprCase ann (map (monomorphizeExpr modName instMap localDicts) exprs) (map (monomorphizeAlt modName instMap localDicts) alts)
   ExprConstructor ann t c ids -> ExprConstructor ann t c ids
   ExprAccessor ann e prop -> ExprAccessor ann (monomorphizeExpr modName instMap localDicts e) prop
   ExprUpdate ann e props -> ExprUpdate ann (monomorphizeExpr modName instMap localDicts e) (map (monomorphizeProp modName instMap localDicts) props)
+  _ -> expr
+  where
+  isAppOrTypeApp (ExprApp _ _ _) = true
+  isAppOrTypeApp (ExprTypeApp _ _ _) = true
+  isAppOrTypeApp _ = false
 
 monomorphizeBindLocal :: String -> InstantiationMap -> Map Ident (Expr Ann) -> Bind Ann -> Bind Ann
 monomorphizeBindLocal modName instMap localDicts (NonRec b) = NonRec (monomorphizeBindingLocal modName instMap localDicts b)
