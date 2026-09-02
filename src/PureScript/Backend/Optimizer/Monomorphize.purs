@@ -108,19 +108,19 @@ mangleExpr = case _ of
   ExprConstructor _ _ (Ident c) _ -> "Ctor_" <> c
   _ -> "Unk"
 
-collectInstantiations :: InstantiationMap -> Module Ann -> InstantiationMap
-collectInstantiations acc (Module m) =
+collectInstantiations :: Map String (Binding Ann) -> InstantiationMap -> Module Ann -> InstantiationMap
+collectInstantiations globalAstMap acc (Module m) =
   let
     modNameStr = unwrap m.name
   in
-    foldl (collectBind modNameStr) acc m.decls
+    foldl (collectBind globalAstMap modNameStr) acc m.decls
 
-collectBind :: String -> InstantiationMap -> Bind Ann -> InstantiationMap
-collectBind modName acc (NonRec binding) = collectBinding modName acc binding
-collectBind modName acc (Rec bindings) = foldl (collectBinding modName) acc bindings
+collectBind :: Map String (Binding Ann) -> String -> InstantiationMap -> Bind Ann -> InstantiationMap
+collectBind globalAstMap modName acc (NonRec binding) = collectBinding globalAstMap modName acc binding
+collectBind globalAstMap modName acc (Rec bindings) = foldl (collectBinding globalAstMap modName) acc bindings
 
-collectBinding :: String -> InstantiationMap -> Binding Ann -> InstantiationMap
-collectBinding modName acc (Binding _ _ expr) = collectExpr modName acc expr
+collectBinding :: Map String (Binding Ann) -> String -> InstantiationMap -> Binding Ann -> InstantiationMap
+collectBinding globalAstMap modName acc (Binding _ _ expr) = collectExpr globalAstMap modName acc expr
 
 getExprAnn :: Expr Ann -> Ann
 getExprAnn = case _ of
@@ -198,39 +198,79 @@ stripStaticConstraints dictArgs = case _ of
   ForAll vars body -> ForAll vars (stripStaticConstraints dictArgs body)
   t -> t
 
-collectExpr :: String -> InstantiationMap -> Expr Ann -> InstantiationMap
-collectExpr modName acc expr = case expr of
+collectExpr :: Map String (Binding Ann) -> String -> InstantiationMap -> Expr Ann -> InstantiationMap
+collectExpr globalAstMap modName acc expr = case expr of
   ExprVar (Ann ann) (Qualified mbMod (Ident name)) ->
-    case ann.type of
-      Just t ->
-        let
-          qualName = case mbMod of
-            Just mod -> unwrap mod <> "." <> name
-            Nothing -> modName <> "." <> name
-        in
+    let
+      qualName = case mbMod of
+        Just mod -> unwrap mod <> "." <> name
+        Nothing -> modName <> "." <> name
+      trueGenericType = case Map.lookup qualName globalAstMap of
+        Just (Binding (Ann bAnn) _ _) -> bAnn.type
+        Nothing -> ann.type
+    in
+      case trueGenericType of
+        Just t ->
           Map.insertWith (\new old -> Map.unionWith (\a b -> { instType: a.instType, dictArgs: a.dictArgs, normalArgs: a.normalArgs, callers: Set.union a.callers b.callers, subst: a.subst }) new old) qualName (Map.singleton (mangleType (defaultToAny t)) { instType: defaultToAny t, dictArgs: [], normalArgs: [], callers: Set.singleton modName, subst: Map.empty }) acc
-      Nothing -> acc
+        Nothing -> acc
   ExprApp _ _ _ ->
     let
       { f_var, spine } = collectSpine expr
       args = getSpineArgs spine
       typeArgs = getSpineTypeArgs spine
-      acc1 = collectExpr modName acc f_var
-      acc2 = foldl (collectExpr modName) acc1 args
+      acc1 = collectExpr globalAstMap modName acc f_var
+      acc2 = foldl (collectExpr globalAstMap modName) acc1 args
     in
       case f_var of
         ExprVar (Ann varAnn) (Qualified mbMod (Ident name)) ->
           let
-             genericType = fromMaybe Any varAnn.type
-             subst = buildSubst genericType typeArgs
+             qualName = case mbMod of
+               Just mod -> unwrap mod <> "." <> name
+               Nothing -> modName <> "." <> name
+             trueGenericType = case Map.lookup qualName globalAstMap of
+               Just (Binding (Ann bAnn) _ _) -> case bAnn.type of
+                 Just t -> t
+                 Nothing -> fromMaybe Any varAnn.type
+               Nothing -> fromMaybe Any varAnn.type
+             genericType = trueGenericType
+             substFromTypeArgs = buildSubst genericType typeArgs
+             
+             printTy :: ExprType -> String
+             printTy Any = "Any"
+             printTy Int = "Int"
+             printTy (TypeVar v) = "TypeVar " <> v
+             printTy (ForAll v t) = "ForAll [" <> String.joinWith ", " v <> "] (" <> printTy t <> ")"
+             printTy (Func args' ret') = "Func [" <> String.joinWith ", " (map printTy args') <> "] (" <> printTy ret' <> ")"
+             printTy (ADT name _ args') = "ADT " <> name <> " [" <> String.joinWith ", " (map printTy args') <> "]"
+             printTy _ = "Other"
+
+             unifySpine :: ExprType -> Array (Expr Ann) -> Map String ExprType -> Map String ExprType
+             unifySpine _ [] s = s
+             unifySpine (ForAll _ t) args' s = unifySpine t args' s
+             unifySpine (ConstrainedType constraints t) args' s =
+               let numConstraints = Array.length constraints
+               in unifySpine t (Array.drop numConstraints args') s
+             unifySpine (Func paramTypes ret) args' s =
+               let
+                 numParams = Array.length paramTypes
+                 appliedArgs = Array.take numParams args'
+                 remainingArgs = Array.drop numParams args'
+                 s1 = foldl (\acc (Tuple paramType arg) ->
+                        let actualType = case getExprAnn arg of Ann a -> fromMaybe Any a.type
+                            _ = if String.contains (Pattern "filter") qualName then trace ("  unify paramType: " <> printTy paramType <> " with actualType: " <> printTy actualType) \_ -> unit else unit
+                        in unify paramType actualType acc
+                      ) s (Array.zip paramTypes appliedArgs)
+               in
+                 unifySpine ret remainingArgs s1
+             unifySpine _ _ s = s
+             
+             subst = unifySpine genericType args substFromTypeArgs
              stripForAlls = case _ of
                ForAll _ b -> stripForAlls b
                x -> x
              instType = stripTypeVariables (substituteExprType subst (stripForAlls genericType))
+             _ = if String.contains (Pattern "filter") qualName then trace ("\n\n[TRACE 1.6.3.3] collectExpr ExprApp for " <> qualName <> "\n  is in globalAstMap? " <> show (Map.member qualName globalAstMap) <> "\n  hasTypeVars instType: " <> show (hasTypeVariables instType) <> "\n  subst size: " <> show (Map.size subst) <> "\n  genericType: " <> printTy genericType <> "\n  args len: " <> show (Array.length args)) \_ -> unit else unit
              { dictArgs, normalArgs } = partitionArgs genericType args
-             qualName = case mbMod of
-               Just mod -> unwrap mod <> "." <> name
-               Nothing -> modName <> "." <> name
              staticNormalArgs = Array.filter isStatic normalArgs
              specKey = mangleType (defaultToAny instType) <> "_" <> String.joinWith "_" (map mangleExpr staticNormalArgs)
           in
@@ -239,25 +279,25 @@ collectExpr modName acc expr = case expr of
              else Map.insertWith (\new old -> Map.unionWith (\a b -> { instType: a.instType, dictArgs: a.dictArgs, normalArgs: a.normalArgs, callers: Set.union a.callers b.callers, subst: a.subst }) new old) qualName (Map.singleton specKey { instType: defaultToAny instType, dictArgs, normalArgs, callers: Set.singleton modName, subst }) acc2
         _ -> acc2
 
-  ExprLit _ lit -> foldl (collectExpr modName) acc lit
+  ExprLit _ lit -> foldl (collectExpr globalAstMap modName) acc lit
   ExprConstructor _ _ _ _ -> acc
-  ExprAccessor _ e _ -> collectExpr modName acc e
-  ExprUpdate _ e props -> foldl (collectProp modName) (collectExpr modName acc e) props
-  ExprAbs _ _ e -> collectExpr modName acc e
-  ExprTypeApp _ e _ -> collectExpr modName acc e
-  ExprCase _ exprs alts -> foldl (collectAlt modName) (foldl (collectExpr modName) acc exprs) alts
-  ExprLet _ binds e -> foldl (collectBind modName) (collectExpr modName acc e) binds
+  ExprAccessor _ e _ -> collectExpr globalAstMap modName acc e
+  ExprUpdate _ e props -> foldl (collectProp globalAstMap modName) (collectExpr globalAstMap modName acc e) props
+  ExprAbs _ _ e -> collectExpr globalAstMap modName acc e
+  ExprTypeApp _ e _ -> collectExpr globalAstMap modName acc e
+  ExprCase _ exprs alts -> foldl (collectAlt globalAstMap modName) (foldl (collectExpr globalAstMap modName) acc exprs) alts
+  ExprLet _ binds e -> foldl (collectBind globalAstMap modName) (collectExpr globalAstMap modName acc e) binds
 
-collectProp :: String -> InstantiationMap -> Prop (Expr Ann) -> InstantiationMap
-collectProp modName acc (Prop _ e) = collectExpr modName acc e
+collectProp :: Map String (Binding Ann) -> String -> InstantiationMap -> Prop (Expr Ann) -> InstantiationMap
+collectProp globalAstMap modName acc (Prop _ e) = collectExpr globalAstMap modName acc e
 
-collectAlt :: String -> InstantiationMap -> CaseAlternative Ann -> InstantiationMap
-collectAlt modName acc (CaseAlternative _ cg) = case cg of
-  Unconditional e -> collectExpr modName acc e
-  Guarded guards -> foldl (collectGuard modName) acc guards
+collectAlt :: Map String (Binding Ann) -> String -> InstantiationMap -> CaseAlternative Ann -> InstantiationMap
+collectAlt globalAstMap modName acc (CaseAlternative _ cg) = case cg of
+  Unconditional e -> collectExpr globalAstMap modName acc e
+  Guarded guards -> foldl (collectGuard globalAstMap modName) acc guards
 
-collectGuard :: String -> InstantiationMap -> Guard Ann -> InstantiationMap
-collectGuard modName acc (Guard e1 e2) = collectExpr modName (collectExpr modName acc e1) e2
+collectGuard :: Map String (Binding Ann) -> String -> InstantiationMap -> Guard Ann -> InstantiationMap
+collectGuard globalAstMap modName acc (Guard e1 e2) = collectExpr globalAstMap modName (collectExpr globalAstMap modName acc e1) e2
 
 collectAllTypes :: Module Ann -> Set ExprType
 collectAllTypes (Module m) = foldl (\a b -> collectTypesFromBind b a) Set.empty m.decls
@@ -278,12 +318,15 @@ collectLocalExpr targets acc expr = case expr of
         ExprVar _ (Qualified Nothing id) | Set.member id targets ->
           let
             genericType = case getExprAnn f_var of Ann a -> fromMaybe Any a.type
+            _ = if id == Ident "go" || id == Ident "$go" then trace ("\n\n[TRACE 1.6.3.1] collectLocalExpr found go call!\n  genericType: " <> show (hasTypeVariables genericType)) \_ -> unit else unit
             substFromTypeArgs = buildSubst genericType typeArgs
             
             unifySpine :: ExprType -> Array (Expr Ann) -> Map String ExprType -> Map String ExprType
             unifySpine _ [] s = s
             unifySpine (ForAll _ t) args' s = unifySpine t args' s
-            unifySpine (ConstrainedType _ t) args' s = unifySpine t args' s
+            unifySpine (ConstrainedType constraints t) args' s =
+              let numConstraints = Array.length constraints
+              in unifySpine t (Array.drop numConstraints args') s
             unifySpine (Func paramTypes ret) args' s =
               let
                 numParams = Array.length paramTypes
@@ -291,6 +334,23 @@ collectLocalExpr targets acc expr = case expr of
                 remainingArgs = Array.drop numParams args'
                 s1 = foldl (\acc (Tuple paramType arg) ->
                        let actualType = case getExprAnn arg of Ann a -> fromMaybe Any a.type
+                           
+                           printTy :: ExprType -> String
+                           printTy Int = "Int"
+                           printTy Number = "Number"
+                           printTy String = "String"
+                           printTy Char = "Char"
+                           printTy Boolean = "Boolean"
+                           printTy Unit = "Unit"
+                           printTy Any = "Any"
+                           printTy (TypeVar v) = "TypeVar " <> v
+                           printTy (TypeApp c args') = "TypeApp (" <> printTy c <> ") [" <> String.joinWith ", " (map printTy args') <> "]"
+                           printTy (ForAll v t) = "ForAll [" <> String.joinWith ", " v <> "] (" <> printTy t <> ")"
+                           printTy (Func args' ret') = "Func [" <> String.joinWith ", " (map printTy args') <> "] (" <> printTy ret' <> ")"
+                           printTy (ADT name _ args') = "ADT " <> name <> " [" <> String.joinWith ", " (map printTy args') <> "]"
+                           printTy _ = "Other"
+
+                           _ = if id == Ident "go" || id == Ident "$go" then trace ("\n\n[TRACE 1.6.3.2] unifySpine go arg" <> "\n  paramType:  " <> printTy paramType <> "\n  actualType: " <> printTy actualType) \_ -> unit else unit
                        in unify paramType actualType acc
                      ) s (Array.zip paramTypes appliedArgs)
               in
@@ -366,6 +426,15 @@ rewriteExpr globalAstMap = goLocals
   where
   goLocals locals globalSubst f = go
     where
+    printTy :: ExprType -> String
+    printTy Any = "Any"
+    printTy Int = "Int"
+    printTy (TypeVar v) = "TypeVar " <> v
+    printTy (ForAll v t) = "ForAll [" <> String.joinWith ", " v <> "] (" <> printTy t <> ")"
+    printTy (Func args' ret') = "Func [" <> String.joinWith ", " (map printTy args') <> "] (" <> printTy ret' <> ")"
+    printTy (ADT name _ args') = "ADT " <> name <> " [" <> String.joinWith ", " (map printTy args') <> "]"
+    printTy _ = "Other"
+
     go expr = case expr of
       ExprVar ann q@(Qualified mbMod (Ident name)) ->
         let
@@ -374,7 +443,13 @@ rewriteExpr globalAstMap = goLocals
             Nothing -> name
         in case Map.lookup qualName globalSubst of
           Just newExpr -> newExpr
-          Nothing -> ExprVar (mapAnn f ann) q
+          Nothing -> 
+            let 
+              oldType = case ann of Ann a -> fromMaybe Any a.type
+              newAnn = mapAnn f ann
+              newType = case newAnn of Ann a -> fromMaybe Any a.type
+              _ = if name == "go" || name == "$go" then trace ("\n\n[TRACE 1.6.3.3] rewriteExpr ExprVar for " <> name <> "\n  oldType: " <> printTy oldType <> "\n  newType: " <> printTy newType) \_ -> unit else unit
+            in ExprVar newAnn q
       ExprLit ann lit -> ExprLit (mapAnn f ann) (map go lit)
       ExprApp ann e1 e2 -> ExprApp (mapAnn f ann) (go e1) (go e2)
       ExprAbs ann id e -> ExprAbs (mapAnn f ann) id (goLocals (Map.delete id locals) globalSubst f e)
@@ -462,7 +537,17 @@ rewriteExpr globalAstMap = goLocals
     goBind (NonRec b) = NonRec (goBinding b)
     goBind (Rec bs) = Rec (map goBinding bs)
 
-    goBinding (Binding ann id e) = Binding (mapAnn f ann) id (go e)
+    goBinding (Binding ann id e) =
+      let
+        ann' = mapAnn f ann
+        name = case id of Ident n -> n
+        isGo = name == "go" || name == "$go"
+        showHasVars = case _ of
+          Just t -> show (hasTypeVariables t)
+          Nothing -> "Nothing"
+        _ = if isGo then trace ("\n\n[TRACE 1.6.3.1] rewriteExpr goBinding for " <> name <> "\n  orig vars: " <> showHasVars (case ann of Ann a -> a).type <> "\n  new vars:  " <> showHasVars (case ann' of Ann a -> a).type) \_ -> unit else unit
+      in
+        Binding ann' id (go e)
 
     goAlt (CaseAlternative binders cg) = CaseAlternative (map goBinder binders) (goCaseGuard cg)
 
@@ -742,7 +827,7 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
                isReverse = name == "reverse" || name == "reverse__Int64"
                _ = if isReverse then trace ("\n\n[TRACE 1.6.1] ExprTypeApp for " <> name <> "\n  genericType=" <> show (hasTypeVariables genericType) <> "\n  instType=" <> show (hasTypeVariables instType) <> "\n  varAnn.type=" <> if isJust varAnn.type then "Just" else "Nothing") \_ -> unit else unit
              in
-             if not (hasTypeVariables genericType) || hasTypeVariables instType then
+             if hasTypeVariables instType then
                rebuildSpine (Ann ann) f_var' spine'
              else
                let staticNormalArgs = Array.filter isStatic normalArgs
@@ -890,7 +975,9 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
                       unifySpine :: ExprType -> Array (Expr Ann) -> Map String ExprType -> Map String ExprType
                       unifySpine _ [] s = s
                       unifySpine (ForAll _ t) args' s = unifySpine t args' s
-                      unifySpine (ConstrainedType _ t) args' s = unifySpine t args' s
+                      unifySpine (ConstrainedType constraints t) args' s =
+                        let numConstraints = Array.length constraints
+                        in unifySpine t (Array.drop numConstraints args') s
                       unifySpine (Func paramTypes ret) args' s =
                         let
                           numParams = Array.length paramTypes
@@ -905,7 +992,6 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
                       unifySpine _ _ s = s
                       
                       substType = unifySpine genericType args substFromTypeArgs
-
                     in
                         let
                           instType = stripTypeVariables (substituteExprType substType genericType)
@@ -965,7 +1051,16 @@ monomorphizeBindLocal modName instMap localDicts (NonRec b) = NonRec (monomorphi
 monomorphizeBindLocal modName instMap localDicts (Rec bs) = Rec (map (monomorphizeBindingLocal modName instMap localDicts) bs)
 
 monomorphizeBindingLocal :: String -> InstantiationMap -> Map Ident (Expr Ann) -> Binding Ann -> Binding Ann
-monomorphizeBindingLocal modName instMap localDicts (Binding ann id e) = Binding ann id (monomorphizeExpr modName instMap localDicts e)
+monomorphizeBindingLocal modName instMap localDicts (Binding ann id e) = 
+  let
+    name = case id of Ident n -> n
+    isGo = name == "go" || name == "$go"
+    showHasVars = case _ of
+      Just t -> show (hasTypeVariables t)
+      Nothing -> "Nothing"
+    _ = if isGo then trace ("\n\n[TRACE 1.6.3.1] monomorphizeBindingLocal for " <> name <> "\n  vars: " <> showHasVars (case ann of Ann a -> a).type) \_ -> unit else unit
+  in
+  Binding ann id (monomorphizeExpr modName instMap localDicts e)
 
 monomorphizeAlt :: String -> InstantiationMap -> Map Ident (Expr Ann) -> CaseAlternative Ann -> CaseAlternative Ann
 monomorphizeAlt modName instMap localDicts (CaseAlternative binders cg) = CaseAlternative binders (monomorphizeCaseGuard modName instMap localDicts cg)
@@ -1119,7 +1214,12 @@ transitiveCollect globalAstMap initialMap = loop initialMap
                             stripForAlls = case _ of
                               ForAll _ b -> stripForAlls b
                               x -> x
-                            astSubstFn t = substituteExprType info.subst (stripForAlls t)
+                            astSubstFn t = 
+                              let
+                                printMap :: Map String ExprType -> String
+                                printMap m = "{" <> String.joinWith ", " (map (\(Tuple k v) -> k <> ": " <> show (hasTypeVariables v)) (Map.toUnfoldable m :: Array (Tuple String ExprType))) <> "}"
+                                _ = if String.contains (Pattern "filter") qualName || String.contains (Pattern "reverse") qualName then trace ("\n\n[TRACE 1.6.3.2] buildSpecializedBindings for " <> qualName <> "\n  info.subst: " <> printMap info.subst) \_ -> unit else unit
+                              in substituteExprType info.subst (stripForAlls t)
                             exprWithDicts = applyStaticArgs info.dictArgs info.normalArgs expr
                             resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
                           in
@@ -1129,7 +1229,7 @@ transitiveCollect globalAstMap initialMap = loop initialMap
                                     substitutedExpr = rewriteExpr globalAstMap Map.empty Map.empty astSubstFn resolvedExpr
                                     specializedExpr = monomorphizeExpr caller currentMap Map.empty substitutedExpr
                                   in
-                                    collectExpr caller acc3 specializedExpr
+                                    collectExpr globalAstMap caller acc3 specializedExpr
                               )
                               acc2
                               (Set.toUnfoldable info.callers :: Array String)

@@ -1,0 +1,10 @@
+--- src/PureScript/Backend/Optimizer/Monomorphize.purs
++++ src/PureScript/Backend/Optimizer/Monomorphize.purs
+@@ -231,6 +231,7 @@
+                Just (Binding (Ann bAnn) _ _) -> fromMaybe Any bAnn.type
+                Nothing -> fromMaybe Any varAnn.type
+              genericType = trueGenericType
++             _ = if String.contains (Pattern "filter") qualName then trace ("  is in globalAstMap? " <> show (Map.member qualName globalAstMap)) \_ -> unit else unit
+              substFromTypeArgs = buildSubst genericType typeArgs
+              
+              printTy :: ExprType -> String

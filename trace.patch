@@ -1,0 +1,10 @@
+--- src/PureScript/Backend/Optimizer/Monomorphize.purs
++++ src/PureScript/Backend/Optimizer/Monomorphize.purs
+@@ -218,6 +218,12 @@
+              qualName = case mbMod of
+                Just mod -> unwrap mod <> "." <> name
+                Nothing -> modName <> "." <> name
++             _ = if String.contains (Pattern "filter") qualName then trace ("\n\n[TRACE 1.6.3.3] collectExpr ExprApp for " <> qualName <> "\n  typeArgs length: " <> show (Array.length typeArgs)) \_ -> unit else unit
+              trueGenericType = case Map.lookup qualName globalAstMap of
+                Just (Binding (Ann bAnn) _ _) -> fromMaybe Any bAnn.type
+                Nothing -> fromMaybe Any varAnn.type

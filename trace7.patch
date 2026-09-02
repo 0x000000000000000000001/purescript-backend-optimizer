@@ -1,0 +1,11 @@
+--- src/PureScript/Backend/Optimizer/Monomorphize.purs
++++ src/PureScript/Backend/Optimizer/Monomorphize.purs
+@@ -232,7 +232,8 @@
+                Nothing -> fromMaybe Any varAnn.type
+              genericType = trueGenericType
+              _ = if String.contains (Pattern "filter") qualName then trace ("  is in globalAstMap? " <> show (Map.member qualName globalAstMap)) \_ -> unit else unit
+-             _ = if String.contains (Pattern "filter") qualName && not (Map.member qualName globalAstMap) then trace ("  Keys matching filter: " <> show (Array.filter (\k -> String.contains (Pattern "filter") k) (Array.fromFoldable (Map.keys globalAstMap)))) \_ -> unit else unit
++             _ = if String.contains (Pattern "filter") qualName && not (Map.member qualName globalAstMap) then trace ("  Keys matching filter: " <> show (Array.filter (\k -> String.contains (Pattern "filter") k) (Array.fromFoldable (Map.keys globalAstMap))) <> "\n  Is equal? " <> show (Array.filter (\k -> k == qualName) (Array.fromFoldable (Map.keys globalAstMap))) <> "\n  Lengths: qualName=" <> show (String.length qualName)) \_ -> unit else unit
+              substFromTypeArgs = buildSubst genericType typeArgs
+              
+              printTy :: ExprType -> String

@@ -1,0 +1,39 @@
+--- src/PureScript/Backend/Optimizer/Monomorphize.purs
++++ src/PureScript/Backend/Optimizer/Monomorphize.purs
+@@ -232,6 +232,15 @@
+                Nothing -> fromMaybe Any varAnn.type
+              genericType = trueGenericType
+              substFromTypeArgs = buildSubst genericType typeArgs
++
++             printTy :: ExprType -> String
++             printTy Any = "Any"
++             printTy Int = "Int"
++             printTy (TypeVar v) = "TypeVar " <> v
++             printTy (ForAll v t) = "ForAll [" <> String.joinWith ", " v <> "] (" <> printTy t <> ")"
++             printTy (Func args' ret') = "Func [" <> String.joinWith ", " (map printTy args') <> "] (" <> printTy ret' <> ")"
++             printTy (ADT name _ args') = "ADT " <> name <> " [" <> String.joinWith ", " (map printTy args') <> "]"
++             printTy _ = "Other"
++
+              unifySpine :: ExprType -> Array (Expr Ann) -> Map String ExprType -> Map String ExprType
+              unifySpine _ [] s = s
+              unifySpine (ForAll _ t) args' s = unifySpine t args' s
+@@ -242,7 +251,8 @@
+                  remainingArgs = Array.drop numParams args'
+                  s1 = foldl (\acc (Tuple paramType arg) ->
+                         let actualType = case getExprAnn arg of Ann a -> fromMaybe Any a.type
+-                        in unify paramType actualType acc
++                            _ = if String.contains (Pattern "filter") qualName then trace ("  unify paramType: " <> printTy paramType <> " with actualType: " <> printTy actualType) \_ -> unit else unit
++                        in unify paramType actualType acc
+                       ) s (Array.zip paramTypes appliedArgs)
+                in
+                  unifySpine ret remainingArgs s1
+@@ -253,7 +263,7 @@
+              stripForAlls = case _ of
+                ForAll _ b -> stripForAlls b
+                x -> x
+              instType = stripTypeVariables (substituteExprType subst (stripForAlls genericType))
+-             _ = if String.contains (Pattern "filter") qualName then trace ("\n\n[TRACE 1.6.3.3] collectExpr ExprApp for " <> qualName <> "\n  hasTypeVars instType: " <> show (hasTypeVariables instType) <> "\n  subst size: " <> show (Map.size subst)) \_ -> unit else unit
++             _ = if String.contains (Pattern "filter") qualName then trace ("\n\n[TRACE 1.6.3.3] collectExpr ExprApp for " <> qualName <> "\n  hasTypeVars instType: " <> show (hasTypeVariables instType) <> "\n  subst size: " <> show (Map.size subst) <> "\n  genericType: " <> printTy genericType <> "\n  args len: " <> show (Array.length args)) \_ -> unit else unit
+              { dictArgs, normalArgs } = partitionArgs genericType args
+              staticNormalArgs = Array.filter isStatic normalArgs
+              specKey = mangleType (defaultToAny instType) <> "_" <> String.joinWith "_" (map mangleExpr staticNormalArgs)
