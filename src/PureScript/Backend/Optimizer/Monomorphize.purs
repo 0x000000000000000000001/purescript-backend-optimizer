@@ -269,7 +269,6 @@ collectExpr globalAstMap modName acc expr = case expr of
                ForAll _ b -> stripForAlls b
                x -> x
              instType = stripTypeVariables (substituteExprType subst (stripForAlls genericType))
-             _ = if String.contains (Pattern "filter") qualName then trace ("\n\n[TRACE 1.6.3.3] collectExpr ExprApp for " <> qualName <> "\n  is in globalAstMap? " <> show (Map.member qualName globalAstMap) <> "\n  hasTypeVars instType: " <> show (hasTypeVariables instType) <> "\n  subst size: " <> show (Map.size subst) <> "\n  genericType: " <> printTy genericType <> "\n  args len: " <> show (Array.length args)) \_ -> unit else unit
              { dictArgs, normalArgs } = partitionArgs genericType args
              staticNormalArgs = Array.filter isStatic normalArgs
              specKey = mangleType (defaultToAny instType) <> "_" <> String.joinWith "_" (map mangleExpr staticNormalArgs)
@@ -318,7 +317,6 @@ collectLocalExpr targets acc expr = case expr of
         ExprVar _ (Qualified Nothing id) | Set.member id targets ->
           let
             genericType = case getExprAnn f_var of Ann a -> fromMaybe Any a.type
-            _ = if id == Ident "go" || id == Ident "$go" then trace ("\n\n[TRACE 1.6.3.1] collectLocalExpr found go call!\n  genericType: " <> show (hasTypeVariables genericType)) \_ -> unit else unit
             substFromTypeArgs = buildSubst genericType typeArgs
             
             unifySpine :: ExprType -> Array (Expr Ann) -> Map String ExprType -> Map String ExprType
@@ -350,7 +348,6 @@ collectLocalExpr targets acc expr = case expr of
                            printTy (ADT name _ args') = "ADT " <> name <> " [" <> String.joinWith ", " (map printTy args') <> "]"
                            printTy _ = "Other"
 
-                           _ = if id == Ident "go" || id == Ident "$go" then trace ("\n\n[TRACE 1.6.3.2] unifySpine go arg" <> "\n  paramType:  " <> printTy paramType <> "\n  actualType: " <> printTy actualType) \_ -> unit else unit
                        in unify paramType actualType acc
                      ) s (Array.zip paramTypes appliedArgs)
               in
@@ -448,7 +445,6 @@ rewriteExpr globalAstMap = goLocals
               oldType = case ann of Ann a -> fromMaybe Any a.type
               newAnn = mapAnn f ann
               newType = case newAnn of Ann a -> fromMaybe Any a.type
-              _ = if name == "go" || name == "$go" then trace ("\n\n[TRACE 1.6.3.3] rewriteExpr ExprVar for " <> name <> "\n  oldType: " <> printTy oldType <> "\n  newType: " <> printTy newType) \_ -> unit else unit
             in ExprVar newAnn q
       ExprLit ann lit -> ExprLit (mapAnn f ann) (map go lit)
       ExprApp ann e1 e2 -> ExprApp (mapAnn f ann) (go e1) (go e2)
@@ -545,7 +541,6 @@ rewriteExpr globalAstMap = goLocals
         showHasVars = case _ of
           Just t -> show (hasTypeVariables t)
           Nothing -> "Nothing"
-        _ = if isGo then trace ("\n\n[TRACE 1.6.3.1] rewriteExpr goBinding for " <> name <> "\n  orig vars: " <> showHasVars (case ann of Ann a -> a).type <> "\n  new vars:  " <> showHasVars (case ann' of Ann a -> a).type) \_ -> unit else unit
       in
         Binding ann' id (go e)
 
@@ -823,10 +818,6 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
              filteredArgs = Array.filter (\d -> not (isStatic d)) dictArgs <> normalArgs
              
           in
-             let 
-               isReverse = name == "reverse" || name == "reverse__Int64"
-               _ = if isReverse then trace ("\n\n[TRACE 1.6.1] ExprTypeApp for " <> name <> "\n  genericType=" <> show (hasTypeVariables genericType) <> "\n  instType=" <> show (hasTypeVariables instType) <> "\n  varAnn.type=" <> if isJust varAnn.type then "Just" else "Nothing") \_ -> unit else unit
-             in
              if hasTypeVariables instType then
                rebuildSpine (Ann ann) f_var' spine'
              else
@@ -1058,7 +1049,6 @@ monomorphizeBindingLocal modName instMap localDicts (Binding ann id e) =
     showHasVars = case _ of
       Just t -> show (hasTypeVariables t)
       Nothing -> "Nothing"
-    _ = if isGo then trace ("\n\n[TRACE 1.6.3.1] monomorphizeBindingLocal for " <> name <> "\n  vars: " <> showHasVars (case ann of Ann a -> a).type) \_ -> unit else unit
   in
   Binding ann id (monomorphizeExpr modName instMap localDicts e)
 
@@ -1218,7 +1208,6 @@ transitiveCollect globalAstMap initialMap = loop initialMap
                               let
                                 printMap :: Map String ExprType -> String
                                 printMap m = "{" <> String.joinWith ", " (map (\(Tuple k v) -> k <> ": " <> show (hasTypeVariables v)) (Map.toUnfoldable m :: Array (Tuple String ExprType))) <> "}"
-                                _ = if String.contains (Pattern "filter") qualName || String.contains (Pattern "reverse") qualName then trace ("\n\n[TRACE 1.6.3.2] buildSpecializedBindings for " <> qualName <> "\n  info.subst: " <> printMap info.subst) \_ -> unit else unit
                               in substituteExprType info.subst (stripForAlls t)
                             exprWithDicts = applyStaticArgs info.dictArgs info.normalArgs expr
                             resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
