@@ -302,8 +302,8 @@ collectAllTypes (Module m) = foldl (\a b -> collectTypesFromBind b a) Set.empty 
 
 type LocalInstMap = Map Ident { genericType :: ExprType, insts :: Array (Map String ExprType) }
 
-collectLocalExpr :: Set Ident -> LocalInstMap -> Expr Ann -> LocalInstMap
-collectLocalExpr targets acc expr = case expr of
+collectLocalExpr :: Set Ident -> Set Ident -> LocalInstMap -> Expr Ann -> LocalInstMap
+collectLocalExpr targets recs acc expr = case expr of
   ExprApp ann f arg ->
     let
       spineRec = collectSpine (ExprApp ann f arg)
@@ -313,7 +313,7 @@ collectLocalExpr targets acc expr = case expr of
       args = getSpineArgs spine
       
       acc1 = case f_var of
-        ExprVar _ (Qualified Nothing id) | Set.member id targets ->
+        ExprVar _ (Qualified Nothing id) | Set.member id targets && not (Set.member id recs) ->
           let
             genericType = case getExprAnn f_var of Ann a -> fromMaybe Any a.type
             substFromTypeArgs = buildSubst genericType typeArgs
@@ -369,29 +369,32 @@ collectLocalExpr targets acc expr = case expr of
             else
               -- Even if finalSubst is empty, we must record the genericType so it can be restored!
               Map.insertWith (\old new -> { genericType: new.genericType, insts: old.insts <> new.insts }) id { genericType, insts: [Map.empty] } acc
-        _ -> collectLocalExpr targets acc f_var
+        _ -> collectLocalExpr targets recs acc f_var
       
-      acc2 = foldl (collectLocalExpr targets) acc1 args
+      acc2 = foldl (collectLocalExpr targets recs) acc1 args
     in
       acc2
-  ExprLit _ lit -> foldl (collectLocalExpr targets) acc lit
+  ExprLit _ lit -> foldl (collectLocalExpr targets recs) acc lit
   ExprConstructor _ _ _ _ -> acc
-  ExprAccessor _ e _ -> collectLocalExpr targets acc e
-  ExprUpdate _ e props -> foldl (\a (Prop _ v) -> collectLocalExpr targets a v) (collectLocalExpr targets acc e) props
-  ExprAbs _ _ e -> collectLocalExpr targets acc e
-  ExprTypeApp _ e _ -> collectLocalExpr targets acc e
+  ExprAccessor _ e _ -> collectLocalExpr targets recs acc e
+  ExprUpdate _ e props -> foldl (\a (Prop _ v) -> collectLocalExpr targets recs a v) (collectLocalExpr targets recs acc e) props
+  ExprAbs _ _ e -> collectLocalExpr targets recs acc e
+  ExprTypeApp _ e _ -> collectLocalExpr targets recs acc e
   ExprCase _ exprs alts ->
     foldl (\a (CaseAlternative _ cg) -> case cg of
-      Unconditional e' -> collectLocalExpr targets a e'
-      Guarded guards -> foldl (\a2 (Guard e1 e2) -> collectLocalExpr targets (collectLocalExpr targets a2 e1) e2) a guards
-    ) (foldl (collectLocalExpr targets) acc exprs) alts
-  ExprLet _ binds e -> foldl (\a b -> collectLocalBind targets a b) (collectLocalExpr targets acc e) binds
+      Unconditional e' -> collectLocalExpr targets recs a e'
+      Guarded guards -> foldl (\a2 (Guard e1 e2) -> collectLocalExpr targets recs (collectLocalExpr targets recs a2 e1) e2) a guards
+    ) (foldl (collectLocalExpr targets recs) acc exprs) alts
+  ExprLet _ binds e -> foldl (\a b -> collectLocalBind targets recs a b) (collectLocalExpr targets recs acc e) binds
   ExprVar _ _ -> acc
 
-collectLocalBind :: Set Ident -> LocalInstMap -> Bind Ann -> LocalInstMap
-collectLocalBind targets acc = case _ of
-  NonRec (Binding _ _ e) -> collectLocalExpr targets acc e
-  Rec binds -> foldl (\a (Binding _ _ e) -> collectLocalExpr targets a e) acc binds
+collectLocalBind :: Set Ident -> Set Ident -> LocalInstMap -> Bind Ann -> LocalInstMap
+collectLocalBind targets recs acc = case _ of
+  NonRec (Binding _ _ e) -> collectLocalExpr targets recs acc e
+  Rec binds -> 
+    let newRecs = Set.fromFoldable (map (\(Binding _ id _) -> id) binds)
+        combinedRecs = Set.union recs newRecs
+    in foldl (\a (Binding _ _ e) -> collectLocalExpr targets combinedRecs a e) acc binds
 
 collectTypesFromExpr :: Expr Ann -> Set ExprType -> Set ExprType
 collectTypesFromExpr expr acc = case expr of
@@ -860,7 +863,7 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
           Rec bs -> foldl (\a (Binding _ id _) -> Set.insert id a) acc bs
         ) Set.empty binds
         
-      localInstMap = collectLocalExpr boundIds Map.empty (ExprLet ann binds e)
+      localInstMap = collectLocalExpr boundIds Set.empty Map.empty (ExprLet ann binds e)
       
       fastPath = ExprLet ann (map (monomorphizeBindLocal modName instMap newLocalDicts) binds) (monomorphizeExpr modName instMap newLocalDicts e)
     in

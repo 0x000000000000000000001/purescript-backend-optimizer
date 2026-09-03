@@ -575,8 +575,8 @@ toBackendExprWithType mbTy expr = do
       foldr goBind (toBackendExpr body) binds
       where
       goBind bind' next = case bind' of
-        NonRec (Binding _ ident exprBody) ->
-          makeLet (Just ident) (toBackendExpr exprBody) \_ -> next
+        NonRec (Binding (Ann ann) ident exprBody) ->
+          makeLet (Just ident) (toBackendExprWithType ann.type exprBody) \_ -> next
         Rec bindings | Just bindings' <- NonEmptyArray.fromArray bindings -> do
           lvl <- currentLevel
           let idents = (\(Binding _ ident _) -> ident) <$> bindings'
@@ -1122,7 +1122,7 @@ make :: BackendSyntax (ConvertM BackendExpr) -> ConvertM BackendExpr
 make a = buildM =<< sequence a
 
 toBackendBinding :: Binding Ann -> ConvertM (Tuple Ident BackendExpr)
-toBackendBinding (Binding _ ident expr) = Tuple ident <$> toBackendExpr expr
+toBackendBinding (Binding (Ann ann) ident expr) = Tuple ident <$> toBackendExprWithType ann.type expr
 
 inferExprType :: Expr Ann -> Maybe ExprType
 inferExprType (ExprApp _ fn _) = case exprAnn fn of
