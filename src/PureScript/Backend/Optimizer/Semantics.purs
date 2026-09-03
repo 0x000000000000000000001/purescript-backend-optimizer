@@ -511,9 +511,9 @@ evalApp env hd spine = go Nothing env hd (List.fromFoldable spine)
       SemLetRec vals \nextVals ->
         makeLet Nothing (k nextVals) \nextFn ->
           go mbTy (bindLocal (bindLocal env' (Group nextVals)) (One nextFn)) nextFn args
-    NeutCtorDef _ _ _ _ fields, args
+    NeutCtorDef qual ct ty tag fields, args
       | Array.length fields == List.length args ->
-          unsafeCrashWith "CRASH CtorDef"
+          NeutData qual ct ty tag (Array.zip fields (Array.fromFoldable args))
     fn, List.Nil ->
       case mbTy of
         Just ty -> SemTyped ty fn
