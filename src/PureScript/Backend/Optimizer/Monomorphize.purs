@@ -1045,9 +1045,22 @@ monomorphizeBindingLocal modName instMap localDicts (Binding ann id e) =
   let
     name = case id of Ident n -> n
     isGo = name == "go" || name == "$go"
-    showHasVars = case _ of
-      Just t -> show (hasTypeVariables t)
-      Nothing -> "Nothing"
+    
+    printTy :: ExprType -> String
+    printTy Any = "Any"
+    printTy Int = "Int"
+    printTy (TypeVar v) = "TypeVar " <> v
+    printTy (ForAll v t) = "ForAll [" <> String.joinWith ", " v <> "] (" <> printTy t <> ")"
+    printTy (Func args' ret') = "Func [" <> String.joinWith ", " (map printTy args') <> "] (" <> printTy ret' <> ")"
+    printTy (ADT n _ args') = "ADT " <> n <> " [" <> String.joinWith ", " (map printTy args') <> "]"
+    printTy _ = "Other"
+
+    typeStr = case ann of
+      Ann a -> case a.type of
+        Just t -> printTy t
+        Nothing -> "Nothing"
+      
+    _ = if isGo then trace ("\n[TRACE] monomorphizeBindingLocal (LetRec go): " <> name <> " in " <> modName <> "\n  Type: " <> typeStr) \_ -> unit else unit
   in
   Binding ann id (monomorphizeExpr modName instMap localDicts e)
 
