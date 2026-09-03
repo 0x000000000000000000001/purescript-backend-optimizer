@@ -17,3 +17,5 @@ output.bak/
 /**/.DS_Store
 .psc-ide-port
 .purmeta
+/run/
+/target/

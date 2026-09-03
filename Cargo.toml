@@ -1,0 +1,15 @@
+[package]
+name = "purbo"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/PureScript/Backend/Optimizer/lib.rs"
+
+[[bin]]
+name = "purbo"
+path = "src/PureScript/Backend/Optimizer/main.rs"
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
