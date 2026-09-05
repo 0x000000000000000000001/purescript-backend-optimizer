@@ -1,3 +1,5 @@
+--- src/PureScript/Backend/Optimizer/Convert.purs
++++ src/PureScript/Backend/Optimizer/Convert.purs
 @@ -362,8 +362,8 @@
        , dictSize <= 512000 ->
            Just $ Map.singleton InlineRef InlineAlways

@@ -128,127 +128,11 @@
             {
               "tuples": ">=7.0.0 <8.0.0"
             }
-          ],
-          "build_plan": [
-            "aff",
-            "ansi",
-            "argonaut",
-            "argonaut-codecs",
-            "argonaut-core",
-            "argonaut-traversals",
-            "argparse-basic",
-            "arraybuffer-types",
-            "arrays",
-            "backend-optimizer",
-            "bifunctors",
-            "catenable-lists",
-            "console",
-            "const",
-            "contravariant",
-            "control",
-            "datetime",
-            "debug",
-            "distributive",
-            "dodo-printer",
-            "effect",
-            "either",
-            "enums",
-            "exceptions",
-            "exists",
-            "filterable",
-            "foldable-traversable",
-            "foreign",
-            "foreign-object",
-            "free",
-            "functions",
-            "functors",
-            "gen",
-            "identity",
-            "integers",
-            "invariant",
-            "js-date",
-            "language-cst-parser",
-            "lazy",
-            "lists",
-            "maybe",
-            "newtype",
-            "node-buffer",
-            "node-child-process",
-            "node-event-emitter",
-            "node-fs",
-            "node-glob-basic",
-            "node-os",
-            "node-path",
-            "node-process",
-            "node-streams",
-            "nonempty",
-            "now",
-            "nullable",
-            "numbers",
-            "ordered-collections",
-            "orders",
-            "parallel",
-            "partial",
-            "posix-types",
-            "prelude",
-            "profunctor",
-            "profunctor-lenses",
-            "record",
-            "refs",
-            "safe-coerce",
-            "st",
-            "strings",
-            "tailrec",
-            "transformers",
-            "tuples",
-            "type-equality",
-            "typelevel-prelude",
-            "unfoldable",
-            "unsafe-coerce"
           ]
         },
         "test": {
           "dependencies": [
             "ansi"
-          ],
-          "build_plan": [
-            "ansi",
-            "arrays",
-            "bifunctors",
-            "const",
-            "contravariant",
-            "control",
-            "distributive",
-            "effect",
-            "either",
-            "enums",
-            "exists",
-            "foldable-traversable",
-            "functions",
-            "functors",
-            "gen",
-            "identity",
-            "integers",
-            "invariant",
-            "lazy",
-            "lists",
-            "maybe",
-            "newtype",
-            "nonempty",
-            "numbers",
-            "orders",
-            "partial",
-            "prelude",
-            "profunctor",
-            "refs",
-            "safe-coerce",
-            "st",
-            "strings",
-            "tailrec",
-            "tuples",
-            "type-equality",
-            "unfoldable",
-            "unsafe-coerce"
           ]
         }
       },
@@ -337,74 +221,6 @@
             {
               "unsafe-coerce": ">=6.0.0 <7.0.0"
             }
-          ],
-          "build_plan": [
-            "aff",
-            "ansi",
-            "argonaut",
-            "argonaut-codecs",
-            "argonaut-core",
-            "argonaut-traversals",
-            "arraybuffer-types",
-            "arrays",
-            "bifunctors",
-            "catenable-lists",
-            "const",
-            "contravariant",
-            "control",
-            "datetime",
-            "debug",
-            "distributive",
-            "dodo-printer",
-            "effect",
-            "either",
-            "enums",
-            "exceptions",
-            "exists",
-            "foldable-traversable",
-            "foreign",
-            "foreign-object",
-            "free",
-            "functions",
-            "functors",
-            "gen",
-            "identity",
-            "integers",
-            "invariant",
-            "js-date",
-            "language-cst-parser",
-            "lazy",
-            "lists",
-            "maybe",
-            "newtype",
-            "node-buffer",
-            "node-event-emitter",
-            "node-fs",
-            "node-path",
-            "node-streams",
-            "nonempty",
-            "now",
-            "nullable",
-            "numbers",
-            "ordered-collections",
-            "orders",
-            "parallel",
-            "partial",
-            "prelude",
-            "profunctor",
-            "profunctor-lenses",
-            "record",
-            "refs",
-            "safe-coerce",
-            "st",
-            "strings",
-            "tailrec",
-            "transformers",
-            "tuples",
-            "type-equality",
-            "typelevel-prelude",
-            "unfoldable",
-            "unsafe-coerce"
           ]
         },
         "test": {
@@ -421,50 +237,6 @@
             {
               "exceptions": ">=6.1.0 <7.0.0"
             }
-          ],
-          "build_plan": [
-            "aff",
-            "arrays",
-            "bifunctors",
-            "console",
-            "const",
-            "contravariant",
-            "control",
-            "datetime",
-            "distributive",
-            "effect",
-            "either",
-            "enums",
-            "exceptions",
-            "exists",
-            "foldable-traversable",
-            "functions",
-            "functors",
-            "gen",
-            "identity",
-            "integers",
-            "invariant",
-            "lazy",
-            "lists",
-            "maybe",
-            "newtype",
-            "nonempty",
-            "numbers",
-            "ordered-collections",
-            "orders",
-            "parallel",
-            "partial",
-            "prelude",
-            "profunctor",
-            "refs",
-            "safe-coerce",
-            "st",
-            "tailrec",
-            "transformers",
-            "tuples",
-            "type-equality",
-            "unfoldable",
-            "unsafe-coerce"
           ]
         }
       }
@@ -477,19 +249,17 @@
       "version": "8.0.0",
       "integrity": "sha256-9BRIrSdRoYybfiUmBqgKJ66cPqxYHb277bVWQMn/9sg=",
       "dependencies": [
-        "bifunctors",
         "control",
         "datetime",
         "effect",
         "either",
         "exceptions",
-        "foldable-traversable",
         "functions",
-        "maybe",
         "newtype",
         "parallel",
+        "partial",
         "prelude",
-        "refs",
+        "st",
         "tailrec",
         "transformers",
         "unsafe-coerce"
@@ -502,7 +272,7 @@
       "dependencies": [
         "foldable-traversable",
         "lists",
-        "strings"
+        "prelude"
       ]
     },
     "argonaut": {
@@ -522,15 +292,20 @@
       "dependencies": [
         "argonaut-core",
         "arrays",
-        "effect",
+        "bifunctors",
+        "either",
+        "foldable-traversable",
         "foreign-object",
         "identity",
         "integers",
+        "lists",
         "maybe",
         "nonempty",
         "ordered-collections",
         "prelude",
-        "record"
+        "record",
+        "strings",
+        "tuples"
       ]
     },
     "argonaut-core": {
@@ -852,13 +627,13 @@
       "dependencies": [
         "either",
         "functions",
-        "identity",
         "integers",
         "lists",
         "maybe",
         "prelude",
         "strings",
-        "transformers"
+        "transformers",
+        "unsafe-coerce"
       ]
     },
     "foreign-object": {
@@ -877,7 +652,8 @@
         "tailrec",
         "tuples",
         "typelevel-prelude",
-        "unfoldable"
+        "unfoldable",
+        "unsafe-coerce"
       ]
     },
     "free": {
@@ -983,10 +759,12 @@
       "dependencies": [
         "datetime",
         "effect",
-        "exceptions",
+        "enums",
         "foreign",
+        "functions",
         "integers",
-        "now"
+        "maybe",
+        "prelude"
       ]
     },
     "language-cst-parser": {
@@ -1079,8 +857,11 @@
       "dependencies": [
         "arraybuffer-types",
         "effect",
+        "functions",
         "maybe",
         "nullable",
+        "partial",
+        "prelude",
         "st",
         "unsafe-coerce"
       ]
@@ -1133,6 +914,7 @@
       "version": "9.2.0",
       "integrity": "sha256-fxioTSm9y47WuYs9F/7nxCh/RVDCl3Kr3Hg779J4SJA=",
       "dependencies": [
+        "aff",
         "datetime",
         "effect",
         "either",
@@ -1148,8 +930,7 @@
         "nullable",
         "partial",
         "prelude",
-        "strings",
-        "unsafe-coerce"
+        "strings"
       ]
     },
     "node-glob-basic": {
@@ -1212,14 +993,16 @@
       "integrity": "sha256-onzKeNmaeYfN3HSDPqSFTrrP2Yl9tnVsfKKhnf2plxM=",
       "dependencies": [
         "effect",
+        "exceptions",
         "foreign",
         "foreign-object",
         "maybe",
         "node-event-emitter",
         "node-streams",
+        "nullable",
         "posix-types",
         "prelude",
-        "unsafe-coerce"
+        "strings"
       ]
     },
     "node-streams": {
@@ -1262,7 +1045,8 @@
       "integrity": "sha256-mTyG4s8tps3XIf0jjV/lME2/QlwMzrQly2wqfSSUM3o=",
       "dependencies": [
         "datetime",
-        "effect"
+        "effect",
+        "prelude"
       ]
     },
     "nullable": {
@@ -1270,9 +1054,9 @@
       "version": "6.0.0",
       "integrity": "sha256-CDAZk+L9Sc0GCFTkE8n+qdp4Ys8avvnkU+m2hVALt7M=",
       "dependencies": [
-        "effect",
         "functions",
-        "maybe"
+        "maybe",
+        "prelude"
       ]
     },
     "numbers": {
@@ -1281,7 +1065,8 @@
       "integrity": "sha256-ZydYckgwRAnRaFC7pu6fADhzdwX+UqHZrfJyet64zls=",
       "dependencies": [
         "functions",
-        "maybe"
+        "maybe",
+        "prelude"
       ]
     },
     "ordered-collections": {
@@ -1290,13 +1075,16 @@
       "integrity": "sha256-NaEXc2cz/7lJfxPWEja4XlZbGxuRqJwFKQJjsJf51kQ=",
       "dependencies": [
         "arrays",
+        "control",
         "foldable-traversable",
+        "functions",
         "gen",
         "lists",
         "maybe",
+        "newtype",
         "partial",
         "prelude",
-        "st",
+        "safe-coerce",
         "tailrec",
         "tuples",
         "unfoldable"
@@ -1341,6 +1129,7 @@
       "integrity": "sha256-Je5jG439F/SFO/IvVevZnWVxDIonrehlKuJkefP2lHE=",
       "dependencies": [
         "maybe",
+        "newtype",
         "prelude"
       ]
     },
@@ -1388,6 +1177,7 @@
         "prelude",
         "profunctor",
         "record",
+        "safe-coerce",
         "transformers",
         "tuples"
       ]
@@ -1424,6 +1214,7 @@
       "version": "6.2.0",
       "integrity": "sha256-WI4MEkkwUd4pnwZQ3G8VKWgX5t1RSNJludm5e9boaRo=",
       "dependencies": [
+        "effect",
         "partial",
         "prelude",
         "tailrec",

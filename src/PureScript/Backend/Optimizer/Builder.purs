@@ -96,7 +96,7 @@ buildModules options coreFnModules =
             , traceIdents: options.traceIdents
             , optimizationSteps: []
             }
-          newDirectives = directives
+          newDirectives = backendMod.directives
             
         options.onCodegenModule (buildEnv { implementations = backendMod.implementations }) coreFnModule' backendMod optimizationSteps
         

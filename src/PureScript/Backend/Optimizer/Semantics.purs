@@ -1261,6 +1261,34 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case Array.fil
             Nothing
       _ ->
         Nothing
+  [ ExternApp _, ExternAccessor (GetCtorField _ _ _ _ _ _), ExternAccessor (GetProp prop) ] ->
+    case impl of
+      ExternExpr group fn -> do
+        let ref = EvalExtern qual
+        case Map.lookup ref e.directives >>= Map.lookup (InlineSpineProp prop) of
+          Just InlineNever ->
+            Just $ neutralSpine (NeutStop qual) spine
+          Just InlineAlways ->
+            Just $ evalSpine env (eval (envForGroup env ref (InlineSpineProp prop) group) fn) spine
+          _ ->
+            Nothing
+      _ ->
+        Nothing
+  [ ExternApp _, ExternAccessor (GetCtorField _ _ _ _ _ _), ExternAccessor (GetProp prop), ExternApp args2 ] ->
+    case impl of
+      ExternExpr group fn -> do
+        let ref = EvalExtern qual
+        case Map.lookup ref e.directives >>= Map.lookup (InlineSpineProp prop) of
+          Just InlineNever ->
+            Just $ neutralSpine (NeutStop qual) spine
+          Just InlineAlways ->
+            Just $ evalSpine env (eval (envForGroup env ref (InlineSpineProp prop) group) fn) spine
+          Just (InlineArity n) | Array.length args2 >= n ->
+            Just $ evalSpine env (eval (envForGroup env ref (InlineSpineProp prop) group) fn) spine
+          _ ->
+            Nothing
+      _ ->
+        Nothing
   [ ExternApp _, ExternAccessor (GetProp prop), ExternApp args2 ] ->
     case impl of
       ExternExpr group fn -> do
