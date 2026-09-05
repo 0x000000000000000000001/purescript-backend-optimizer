@@ -64,7 +64,9 @@ import Data.Function (on)
 import Data.FunctorWithIndex (mapWithIndex)
 import Data.Map (Map, SemigroupMap(..))
 import Data.Map as Map
-import Data.Maybe (Maybe(..), fromMaybe, maybe)
+import Data.Maybe (Maybe(..), fromMaybe, maybe, isJust)
+import Debug as Debug
+import Prelude (unit)
 import Data.Monoid as Monoid
 import Data.Monoid.Additive (Additive(..))
 import Data.Newtype (class Newtype, over, unwrap)
@@ -362,9 +364,9 @@ inferTransitiveDirective directives dictSize impl backendExpr cfn = fromImpl <|>
       , dictSize <= 512 ->
           Just $ Map.singleton InlineRef InlineAlways
     cfn' | Tuple isDict props <- isTypeClassDictionaryWithProps cfn', isDict
-         , dictSize <= 512 ->
+         , dictSize <= 512000 ->
       Just $ Map.fromFoldable $
-        [ Tuple InlineRef InlineAlways ] <> map (\p -> Tuple (InlineProp p) InlineAlways) props
+        [ Tuple InlineRef InlineAlways ] <> (props >>= \p -> [ Tuple (InlineProp p) InlineAlways, Tuple (InlineSpineProp p) InlineAlways ])
     _ -> case backendExpr of
       ExprSyntax _ (App (ExprSyntax _ (Var qual)) args) ->
         case Map.lookup (EvalExtern qual) directives >>= Map.lookup InlineRef of
@@ -378,20 +380,22 @@ inferTransitiveDirective directives dictSize impl backendExpr cfn = fromImpl <|>
         Nothing
 
 isTypeClassDictionaryWithProps :: Expr Ann -> Tuple Boolean (Array String)
-isTypeClassDictionaryWithProps expr = case expr of
+isTypeClassDictionaryWithProps = case _ of
   ExprAbs (Ann { type: Just ty }) _ body | isConstrainedType ty ->
     isTypeClassDictionaryWithProps body
   ExprAbs _ _ body -> isTypeClassDictionaryWithProps body
   ExprLet _ _ body -> isTypeClassDictionaryWithProps body
   ExprTypeApp _ expr' _ -> isTypeClassDictionaryWithProps expr'
   ExprApp _ lhs (ExprLit _ (LitRecord props))
-    | Just meta <- getConstructorMeta lhs
-    , meta == IsTypeClassConstructor || meta == IsNewtype -> Tuple true (map propKey props)
+    | Just meta <- getConstructorMeta lhs ->
+        if meta == IsTypeClassConstructor || meta == IsNewtype then Tuple true (map propKey props) else Tuple false []
   _ -> Tuple false []
   where
-  getConstructorMeta = case _ of
+  getConstructorMeta expr' = case expr' of
     ExprVar (Ann { meta: Just meta }) _ -> Just meta
-    ExprApp _ lhs _ -> getConstructorMeta lhs
+    ExprConstructor _ _ _ _ -> Just IsTypeClassConstructor
+    ExprApp _ lhs' _ -> getConstructorMeta lhs'
+    ExprTypeApp _ lhs' _ -> getConstructorMeta lhs'
     _ -> Nothing
 
 isConstrainedType :: ExprType -> Boolean
@@ -439,6 +443,7 @@ unwrapExternSpine = case _ of
   ExternAccessor acc -> ExternAccessor acc
   ExternPrimOp op -> ExternPrimOp op
 
+
 makeExternEvalSpine :: ConvertEnv -> Env -> Qualified Ident -> Array ExternSpine -> Maybe BackendSemantics
 makeExternEvalSpine conv env qual spine = do
   let
@@ -446,12 +451,13 @@ makeExternEvalSpine conv env qual spine = do
     result = do
       fn <- Map.lookup qual conv.foreignSemantics
       fn env qual spine'
-  case result of
-    Nothing -> do
-      impl <- lookupImplementation conv qual
-      evalExternFromImpl (topEnv env) qual impl spine'
-    _ ->
-      result
+    res = case result of
+      Nothing -> do
+        impl <- lookupImplementation conv qual
+        evalExternFromImpl (topEnv env) qual impl spine'
+      _ ->
+        result
+  res
 
 lookupImplementation :: ConvertEnv -> Qualified Ident -> Maybe (Tuple BackendAnalysis ExternImpl)
 lookupImplementation conv qual@(Qualified mbMn _) =
