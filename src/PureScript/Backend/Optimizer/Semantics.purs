@@ -664,6 +664,11 @@ evalAccessor env lhs accessor = floatLet lhs case _ of
     | GetCtorField _ _ _ _ _ n <- accessor
     , Just (Tuple _ sem) <- Array.index fields n ->
         sem
+  NeutData _ _ _ _ [ Tuple _ inner ]
+    | GetProp _ <- accessor ->
+        evalAccessor env inner accessor
+    | GetIndex _ <- accessor ->
+        evalAccessor env inner accessor
   NeutFail err ->
     NeutFail err
   lhs' ->
