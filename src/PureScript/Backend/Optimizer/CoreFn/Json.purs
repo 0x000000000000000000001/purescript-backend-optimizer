@@ -21,6 +21,7 @@ import Data.Array as Array
 import Data.Array.ST as STArray
 import Data.Either (Either(..), note)
 import Data.Enum (toEnum)
+import Data.Bifunctor (lmap)
 import Data.Foldable (intercalate)
 import Data.Int as Int
 import Data.Map as Map
@@ -449,7 +450,7 @@ getField decode obj prop =
     Nothing ->
       Left $ AtKey prop MissingValue
     Just json ->
-      decode json
+      lmap (AtKey prop) (decode json)
 
 getFieldOptional' :: forall a. (Json -> JsonDecode a) -> Object Json -> String -> JsonDecode (Maybe a)
 getFieldOptional' decode obj prop = do
@@ -460,7 +461,7 @@ getFieldOptional' decode obj prop = do
       | isNull json ->
           Right Nothing
       | otherwise ->
-          Just <$> decode json
+          lmap (AtKey prop) (Just <$> decode json)
 
 decodeJObject :: Json -> JsonDecode (Object Json)
 decodeJObject = caseJson fail fail fail fail fail Right
