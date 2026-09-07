@@ -291,7 +291,7 @@ toTopLevelBackendBinding group env (Binding _ ident cfn) = do
     mbType = case backendExpr of
       ExprSyntax _ (Typed ty _) -> Just ty
       _ -> Nothing
-  let Tuple mbSteps optimizedExpr = Debug.trace ("[TRACE] Optimizing " <> unwrap env.currentModule <> "." <> unwrap ident) \_ -> optimize enableTracing (getCtx env) evalEnv qualifiedIdent env.rewriteLimit backendExpr
+  let Tuple mbSteps optimizedExpr = optimize enableTracing (getCtx env) evalEnv qualifiedIdent env.rewriteLimit backendExpr
   let
     optimizedExprWithTy = case mbType of
       Just ty -> ExprSyntax (analysisOf optimizedExpr) (Typed ty optimizedExpr)
