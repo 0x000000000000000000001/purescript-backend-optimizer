@@ -282,7 +282,7 @@ printExpr (ExprSyntax _ syn) = case syn of
 
 toTopLevelBackendBinding :: Array (Qualified Ident) -> ConvertEnv -> Binding Ann -> Accum ConvertEnv (Tuple Ident (WithDeps NeutralExpr))
 toTopLevelBackendBinding group env (Binding _ ident cfn) = do
-  let evalEnv = Env { currentModule: env.currentModule, evalExternRef: makeExternEvalRef env, evalExternSpine: makeExternEvalSpine env, locals: Map.empty, localsSize: 0, directives: env.directives }
+  let evalEnv = Env { currentModule: env.currentModule, evalExternRef: makeExternEvalRef group env, evalExternSpine: makeExternEvalSpine group env, locals: Map.empty, localsSize: 0, directives: env.directives }
   let qualifiedIdent = Qualified (Just env.currentModule) ident
   let backendExpr = toBackendExpr cfn env
   let BackendAnalysis { size } = analysisOf backendExpr
@@ -291,7 +291,7 @@ toTopLevelBackendBinding group env (Binding _ ident cfn) = do
     mbType = case backendExpr of
       ExprSyntax _ (Typed ty _) -> Just ty
       _ -> Nothing
-  let Tuple mbSteps optimizedExpr = optimize enableTracing (getCtx env) evalEnv qualifiedIdent env.rewriteLimit backendExpr
+  let Tuple mbSteps optimizedExpr = Debug.trace ("[TRACE] Optimizing " <> unwrap env.currentModule <> "." <> unwrap ident) \_ -> optimize enableTracing (getCtx env) evalEnv qualifiedIdent env.rewriteLimit backendExpr
   let
     optimizedExprWithTy = case mbType of
       Just ty -> ExprSyntax (analysisOf optimizedExpr) (Typed ty optimizedExpr)
@@ -457,20 +457,23 @@ unwrapExternSpine = case _ of
   ExternPrimOp op -> ExternPrimOp op
 
 
-makeExternEvalSpine :: ConvertEnv -> Env -> Qualified Ident -> Array ExternSpine -> Maybe BackendSemantics
-makeExternEvalSpine conv env qual spine = do
-  let
-    spine' = unwrapExternSpine <$> spine
-    result = do
-      fn <- Map.lookup qual conv.foreignSemantics
-      fn env qual spine'
-    res = case result of
-      Nothing -> do
-        impl <- lookupImplementation conv qual
-        evalExternFromImpl (topEnv env) qual impl spine'
-      _ ->
-        result
-  res
+makeExternEvalSpine :: Array (Qualified Ident) -> ConvertEnv -> Env -> Qualified Ident -> Array ExternSpine -> Maybe BackendSemantics
+makeExternEvalSpine group conv env qual spine = do
+  if Array.elem qual group then
+    Nothing
+  else do
+    let
+      spine' = unwrapExternSpine <$> spine
+      result = do
+        fn <- Map.lookup qual conv.foreignSemantics
+        fn env qual spine'
+      res = case result of
+        Nothing -> do
+          impl <- lookupImplementation conv qual
+          evalExternFromImpl (topEnv env) qual impl spine'
+        _ ->
+          result
+    res
 
 lookupImplementation :: ConvertEnv -> Qualified Ident -> Maybe (Tuple BackendAnalysis ExternImpl)
 lookupImplementation conv qual@(Qualified mbMn _) =
@@ -483,9 +486,12 @@ lookupImplementation conv qual@(Qualified mbMn _) =
           Nothing -> Nothing
       Nothing -> Nothing
 
-makeExternEvalRef :: ConvertEnv -> Env -> Qualified Ident -> Maybe BackendSemantics
-makeExternEvalRef conv env qual =
-  evalExternRefFromImpl env qual <$> lookupImplementation conv qual
+makeExternEvalRef :: Array (Qualified Ident) -> ConvertEnv -> Env -> Qualified Ident -> Maybe BackendSemantics
+makeExternEvalRef group conv env qual =
+  if Array.elem qual group then
+    Nothing
+  else
+    evalExternRefFromImpl env qual <$> lookupImplementation conv qual
 
 buildM :: BackendSyntax BackendExpr -> ConvertM BackendExpr
 buildM a env = build (getCtx env) a

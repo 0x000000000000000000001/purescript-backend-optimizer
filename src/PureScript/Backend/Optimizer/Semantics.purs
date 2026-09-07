@@ -1847,22 +1847,7 @@ shouldDistributeBranchPrimOp2R analysis1 branches def lhs op2 =
 
 -- | Décide si une abstraction curryfiée imbriquée doit être transformée en une seule abstraction multi-arguments (décurryfication).
 shouldUncurryAbs :: Maybe Ident -> Level -> BackendExpr -> BackendExpr -> Maybe BackendExpr
-shouldUncurryAbs ident level a b = do
-  let BackendAnalysis s2 = analysisOf b
-  case a of
-    ExprSyntax _ (Abs args fn)
-      | Just (Usage u) <- Map.lookup level s2.usages
-      , [ n ] <- Set.toUnfoldable u.arities
-      , n == NonEmptyArray.length args -> do
-          let
-            analysis =
-              withResult (resultOf b)
-                $ bump
-                $ complex NonTrivial
-                $ analysisOf a <> bound level (analysisOf b)
-          Just $ ExprRewrite (withRewrite analysis) $ RewriteUncurry ident level args fn b
-    _ ->
-      Nothing
+shouldUncurryAbs _ _ _ _ = Nothing
 
 -- | Décide s'il est bénéfique d'inliner complètement le contenu d'un bloc 'let' à ses points d'utilisation.
 shouldInlineLet :: Level -> BackendExpr -> BackendExpr -> Boolean
