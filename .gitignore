@@ -19,3 +19,6 @@ output.bak/
 .purmeta
 /run/
 /target/
+/output-test/
+/src/**/*.orig
+/src/**/*.rej

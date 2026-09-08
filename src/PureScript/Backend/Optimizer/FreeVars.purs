@@ -115,7 +115,6 @@ freeVars (TcoExpr _ syntax) = case syntax of
   PrimUndefined -> Set.empty
   Fail _ -> Set.empty
   Typed _ a -> freeVars a
-  TypeApp a _ -> freeVars a
 
 paramTypes :: TcoExpr -> Map String ExprType
 paramTypes (TcoExpr _ expr) = case expr of
@@ -130,7 +129,6 @@ paramTypes (TcoExpr _ expr) = case expr of
     LitRecord obj -> foldl (\acc prop -> Map.union acc (paramTypes (propValue prop))) Map.empty obj
     _ -> Map.empty
   App f args -> foldl (\acc e -> Map.union acc (paramTypes e)) (paramTypes f) (toArray args)
-  TypeApp f _ -> paramTypes f
   Abs _ a -> paramTypes a
   UncurriedApp f args -> foldl (\acc e -> Map.union acc (paramTypes e)) (paramTypes f) args
   UncurriedAbs _ a -> paramTypes a

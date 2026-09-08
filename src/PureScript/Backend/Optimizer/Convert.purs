@@ -64,9 +64,7 @@ import Data.Function (on)
 import Data.FunctorWithIndex (mapWithIndex)
 import Data.Map (Map, SemigroupMap(..))
 import Data.Map as Map
-import Data.Maybe (Maybe(..), fromMaybe, maybe, isJust)
-import Debug as Debug
-import Prelude (unit)
+import Data.Maybe (Maybe(..), fromMaybe, maybe)
 import Data.Monoid as Monoid
 import Data.Monoid.Additive (Additive(..))
 import Data.Newtype (class Newtype, over, unwrap)
@@ -74,24 +72,20 @@ import Data.Semigroup.First (First(..))
 import Data.Semigroup.Foldable (maximum)
 import Data.Set (Set)
 import Data.Set as Set
-import Data.String as String
-import Data.String.Pattern as Data.String.Pattern
 import Data.Traversable (class Foldable, Accum, foldr, for, mapAccumL, mapAccumR, sequence, traverse)
 import Data.TraversableWithIndex (forWithIndex)
 import Data.Tuple (Tuple(..), fst, snd)
-import Effect.Console as Console
 import Effect.Unsafe (unsafePerformEffect)
 import Partial.Unsafe (unsafeCrashWith)
-import PureScript.Backend.Optimizer.Analysis (BackendAnalysis(..), analysisOf, analyze, analyzeEffectBlock)
+import PureScript.Backend.Optimizer.Analysis (BackendAnalysis, analysisOf, analyze, analyzeEffectBlock)
 import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), ClassDecl, Comment, ConstructorType(..), DataDecl, Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Meta(..), Module(..), ModuleName(..), ProperName(..), Qualified(..), ReExport, binderAnn, exprAnn, findProp, propKey, propValue, qualifiedModuleName, unQualified)
 import PureScript.Backend.Optimizer.Directives (DirectiveHeaderResult, parseDirectiveHeader)
 import PureScript.Backend.Optimizer.Semantics (BackendExpr(..), BackendSemantics, Ctx(..), DataTypeMeta, Env(..), EvalRef(..), ExternImpl(..), ExternSpine(..), InlineAccessor(..), InlineDirective(..), InlineDirectiveMap, NeutralExpr(..), build, evalExternFromImpl, evalExternRefFromImpl, freeze, optimize, unwrapSemTyped)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
-import PureScript.Backend.Optimizer.Syntax (BackendAccessor(..), BackendOperator(..), BackendOperator1(..), BackendOperator2(..), BackendOperatorOrd(..), BackendSyntax(Var, Local, Lit, App, Abs, UncurriedApp, UncurriedAbs, UncurriedEffectApp, UncurriedEffectAbs, Accessor, Update, CtorSaturated, CtorDef, LetRec, Let, EffectBind, EffectPure, EffectDefer, Branch, PrimOp, PrimEffect, PrimUndefined, Fail, Typed), Level(..), Pair(..))
+import PureScript.Backend.Optimizer.Syntax (BackendAccessor(..), BackendOperator(..), BackendOperator1(..), BackendOperator2(..), BackendOperatorOrd(..), BackendSyntax(Var, Local, Lit, App, Abs, UncurriedApp, UncurriedAbs, Accessor, Update, CtorDef, LetRec, Let, Branch, PrimOp, PrimUndefined, Fail, Typed), Level(..), Pair(..))
 import PureScript.Backend.Optimizer.Syntax as Syn
 import PureScript.Backend.Optimizer.Utils (foldl1Array)
 import PureScript.Backend.Optimizer.Cache (readPurmetaSync)
-import Effect.Unsafe (unsafePerformEffect)
 import Safe.Coerce (coerce)
 
 type BackendBindingGroup a b =
@@ -256,7 +250,7 @@ toBackendTopLevelBindingGroup env = case _ of
     let group = (\(Binding _ ident _) -> Qualified (Just env.currentModule) ident) <$> bindings
     mapAccumL (toTopLevelBackendBinding group) env bindings
       # overValue { recursive: true, bindings: _ }
-  NonRec binding@(Binding _ ident _) -> do
+  NonRec binding -> do
     mapAccumL (toTopLevelBackendBinding []) env [ binding ]
       # overValue { recursive: false, bindings: _ }
   where
@@ -269,23 +263,11 @@ toBackendTopLevelBindingGroup env = case _ of
 -- | - everything in-between the two are the steps that were taken from `head` to `last`
 type OptimizationSteps = Array (Tuple (Qualified Ident) (NonEmptyArray BackendExpr))
 
-printExpr :: BackendExpr -> String
-printExpr (ExprRewrite _ _) = "ExprRewrite (...)"
-printExpr (ExprSyntax _ syn) = case syn of
-  Typed _ a -> "Typed (" <> printExpr a <> ")"
-  Abs _ _ -> "Abs (...)"
-  App f a -> "App (" <> printExpr f <> ") (" <> printExpr (NonEmptyArray.head a) <> ")"
-  Let _ _ _ a -> "Let (" <> printExpr a <> ")"
-  Var _ -> "Var"
-  Local _ _ -> "Local"
-  _ -> "Other"
-
 toTopLevelBackendBinding :: Array (Qualified Ident) -> ConvertEnv -> Binding Ann -> Accum ConvertEnv (Tuple Ident (WithDeps NeutralExpr))
 toTopLevelBackendBinding group env (Binding (Ann bindingAnn) ident cfn) = do
   let evalEnv = Env { currentModule: env.currentModule, evalExternRef: makeExternEvalRef group env, evalExternSpine: makeExternEvalSpine group env, locals: Map.empty, localsSize: 0, directives: env.directives }
   let qualifiedIdent = Qualified (Just env.currentModule) ident
   let backendExpr = toBackendExpr cfn env
-  let BackendAnalysis { size } = analysisOf backendExpr
   let enableTracing = Set.member qualifiedIdent env.traceIdents
   let
     mbType = case backendExpr of

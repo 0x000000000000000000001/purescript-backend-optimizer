@@ -28,21 +28,15 @@ import Data.Foldable (foldl)
 import Data.Map (Map)
 import Data.Map as Map
 import Data.String as String
-import Data.Maybe (Maybe(..), fromMaybe, maybe, isJust)
-import Debug (trace)
+import Data.Maybe (Maybe(..), fromMaybe, maybe)
 import Data.Newtype (unwrap)
 import Data.Set (Set)
 import Data.Set as Set
-import Data.String as String
 import Data.String.Pattern (Pattern(..))
-import Debug (trace)
 import Data.Tuple (Tuple(..))
 import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Module(..), ModuleName(..), Prop(..), Qualified(..))
 import PureScript.Backend.Optimizer.FfiSupport (hashString)
 import PureScript.Backend.Optimizer.Substitute (substituteExprType, unify)
-import Node.Encoding (Encoding(..))
-import Effect.Unsafe (unsafePerformEffect)
-import Effect.Console as Console
 
 type InstantiationMap = Map String (Map String { instType :: ExprType, dictArgs :: Array (Expr Ann), normalArgs :: Array (Expr Ann), callers :: Set String, subst :: Map String ExprType })
 
@@ -235,15 +229,6 @@ collectExpr globalAstMap modName acc expr = case expr of
              genericType = trueGenericType
              substFromTypeArgs = buildSubst genericType typeArgs
              
-             printTy :: ExprType -> String
-             printTy Any = "Any"
-             printTy Int = "Int"
-             printTy (TypeVar v) = "TypeVar " <> v
-             printTy (ForAll v t) = "ForAll [" <> String.joinWith ", " v <> "] (" <> printTy t <> ")"
-             printTy (Func args' ret') = "Func [" <> String.joinWith ", " (map printTy args') <> "] (" <> printTy ret' <> ")"
-             printTy (ADT name _ args') = "ADT " <> name <> " [" <> String.joinWith ", " (map printTy args') <> "]"
-             printTy _ = "Other"
-
              unifySpine :: ExprType -> Array (Expr Ann) -> Map String ExprType -> Map String ExprType
              unifySpine _ [] s = s
              unifySpine (ForAll _ t) args' s = unifySpine t args' s
@@ -331,22 +316,6 @@ collectLocalExpr targets recs acc expr = case expr of
                 remainingArgs = Array.drop numParams args'
                 s1 = foldl (\acc (Tuple paramType arg) ->
                        let actualType = case getExprAnn arg of Ann a -> fromMaybe Any a.type
-                           
-                           printTy :: ExprType -> String
-                           printTy Int = "Int"
-                           printTy Number = "Number"
-                           printTy String = "String"
-                           printTy Char = "Char"
-                           printTy Boolean = "Boolean"
-                           printTy Unit = "Unit"
-                           printTy Any = "Any"
-                           printTy (TypeVar v) = "TypeVar " <> v
-                           printTy (TypeApp c args') = "TypeApp (" <> printTy c <> ") [" <> String.joinWith ", " (map printTy args') <> "]"
-                           printTy (ForAll v t) = "ForAll [" <> String.joinWith ", " v <> "] (" <> printTy t <> ")"
-                           printTy (Func args' ret') = "Func [" <> String.joinWith ", " (map printTy args') <> "] (" <> printTy ret' <> ")"
-                           printTy (ADT name _ args') = "ADT " <> name <> " [" <> String.joinWith ", " (map printTy args') <> "]"
-                           printTy _ = "Other"
-
                        in unify paramType actualType acc
                      ) s (Array.zip paramTypes appliedArgs)
               in
@@ -425,15 +394,6 @@ rewriteExpr globalAstMap = goLocals
   where
   goLocals locals globalSubst f = go
     where
-    printTy :: ExprType -> String
-    printTy Any = "Any"
-    printTy Int = "Int"
-    printTy (TypeVar v) = "TypeVar " <> v
-    printTy (ForAll v t) = "ForAll [" <> String.joinWith ", " v <> "] (" <> printTy t <> ")"
-    printTy (Func args' ret') = "Func [" <> String.joinWith ", " (map printTy args') <> "] (" <> printTy ret' <> ")"
-    printTy (ADT name _ args') = "ADT " <> name <> " [" <> String.joinWith ", " (map printTy args') <> "]"
-    printTy _ = "Other"
-
     go expr = case expr of
       ExprVar ann q@(Qualified mbMod (Ident name)) ->
         let
@@ -444,9 +404,7 @@ rewriteExpr globalAstMap = goLocals
           Just newExpr -> newExpr
           Nothing -> 
             let 
-              oldType = case ann of Ann a -> fromMaybe Any a.type
               newAnn = mapAnn f ann
-              newType = case newAnn of Ann a -> fromMaybe Any a.type
             in ExprVar newAnn q
       ExprLit ann lit -> ExprLit (mapAnn f ann) (map go lit)
       ExprApp ann e1 e2 -> ExprApp (mapAnn f ann) (go e1) (go e2)
@@ -538,11 +496,6 @@ rewriteExpr globalAstMap = goLocals
     goBinding (Binding ann id e) =
       let
         ann' = mapAnn f ann
-        name = case id of Ident n -> n
-        isGo = name == "go" || name == "$go"
-        showHasVars = case _ of
-          Just t -> show (hasTypeVariables t)
-          Nothing -> "Nothing"
       in
         Binding ann' id (go e)
 
@@ -950,7 +903,7 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
           polys = processBinds.polyMap
           
           go expr = case expr of
-            ExprApp annApp f arg ->
+            ExprApp annApp _ _ ->
               let
                 spineRec = collectSpine expr
                 f_var = spineRec.f_var
@@ -1199,11 +1152,7 @@ transitiveCollect globalAstMap initialMap = loop initialMap
                             stripForAlls = case _ of
                               ForAll _ b -> stripForAlls b
                               x -> x
-                            astSubstFn t = 
-                              let
-                                printMap :: Map String ExprType -> String
-                                printMap m = "{" <> String.joinWith ", " (map (\(Tuple k v) -> k <> ": " <> show (hasTypeVariables v)) (Map.toUnfoldable m :: Array (Tuple String ExprType))) <> "}"
-                              in substituteExprType info.subst (stripForAlls t)
+                            astSubstFn t = substituteExprType info.subst (stripForAlls t)
                             exprWithDicts = applyStaticArgs info.dictArgs info.normalArgs expr
                             resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
                           in

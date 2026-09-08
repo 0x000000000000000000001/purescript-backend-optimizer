@@ -3,7 +3,7 @@ module PureScript.Backend.Optimizer.CoreFn.TypeTable where
 import Prelude
 import Control.Monad.ST as ST
 import Control.Monad.ST.Ref as STRef
-import Data.Argonaut (Json, JsonDecodeError(..), caseJson, decodeJson, isNull)
+import Data.Argonaut (Json, JsonDecodeError(..), caseJson, isNull)
 import Data.Array as Array
 import Data.Either (Either(..), note)
 import Data.Int as Int

@@ -28,7 +28,7 @@ import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.String.CodePoints (CodePoint, fromCodePointArray)
 import Data.String.CodeUnits as SCU
-import Data.Traversable (traverse, sequence)
+import Data.Traversable (traverse)
 import Data.Tuple (Tuple(..))
 import Foreign.Object (Object)
 import Foreign.Object as Object
@@ -125,31 +125,6 @@ decodeTypeTable json = do
     Left err -> Left err
     Right val -> Right val
 
-
-type FieldRef = { label :: String, typeId :: Int }
-
-decodeFieldRef :: Json -> JsonDecode FieldRef
-decodeFieldRef j = do
-  o <- decodeJObject j
-  label <- getField decodeString o "label"
-  typeId <- getField decodeInt o "type"
-  pure { label, typeId }
-
-type ConstraintRef = { fqn :: Array String, args :: Array Int }
-
-decodeConstraintRef :: Json -> JsonDecode ConstraintRef
-decodeConstraintRef j = do
-  o <- decodeJObject j
-  fqn <- getField (decodeArray decodeString) o "fqn"
-  args <- getField (decodeArray decodeInt) o "args"
-  pure { fqn, args }
-decodeField :: Array ExprType -> Json -> JsonDecode (Tuple String ExprType)
-decodeField tt j = do
-  o <- decodeJObject j
-  l <- getField decodeString o "label"
-  tId <- getField decodeInt o "type"
-  t <- note (TypeMismatch "FieldType") (Array.index tt tId)
-  pure (Tuple l t)
 
 decodeMethod :: Array ExprType -> Json -> JsonDecode (Tuple String ExprType)
 decodeMethod tt j = do
