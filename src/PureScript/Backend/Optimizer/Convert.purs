@@ -550,11 +550,10 @@ toBackendExpr expr = toBackendExprWithType Nothing expr
 
 toBackendExprWithType :: Maybe ExprType -> Expr Ann -> ConvertM BackendExpr
 toBackendExprWithType mbTy expr = do
-  let Ann ann = exprAnn expr
   backendExpr <- go expr
   pure
     case
-      case ann.type of
+      case annotationType of
         Just t -> Just t
         Nothing -> case mbTy of
           Just t -> Just t
@@ -563,6 +562,19 @@ toBackendExprWithType mbTy expr = do
       Just t -> ExprSyntax (analysisOf backendExpr) (Typed t backendExpr)
       Nothing -> backendExpr
   where
+  -- Synthetic dictionary applications can retain the head's constrained
+  -- annotation in TAST. The supplied dictionary consumes exactly one
+  -- constraint; reattaching the head type would recreate a function value.
+  annotationType = case expr of
+    ExprApp (Ann { meta: Just IsSyntheticApp, type: Just ty }) head _
+      | Ann { type: Just headTy } <- exprAnn head
+      , ty == headTy
+      , ConstrainedType constraints body <- ty
+      , Just { tail } <- Array.uncons constraints ->
+          Just $ if Array.null tail then body else ConstrainedType tail body
+    _ -> case exprAnn expr of
+      Ann ann -> ann.type
+
   go = case _ of
     ExprVar _ qi -> do
       { currentModule, toLevel } <- ask
