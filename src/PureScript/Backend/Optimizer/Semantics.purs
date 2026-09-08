@@ -45,6 +45,7 @@ module PureScript.Backend.Optimizer.Semantics
   , freeze
   , optimize
   , unwrapSemTyped
+  , instantiateNeutralType
   , foldBackendExpr
   ) where
 
@@ -74,6 +75,7 @@ import PureScript.Backend.Optimizer.Analysis (class HasAnalysis, BackendAnalysis
 import PureScript.Backend.Optimizer.CoreFn (ConstructorType, ExprType(..), Ident(..), Literal(..), ModuleName, Prop(..), ProperName, Qualified(..), findProp, propKey, propValue)
 import PureScript.Backend.Optimizer.Syntax (class HasSyntax, BackendAccessor(..), BackendEffect, BackendOperator(..), BackendOperator1(..), BackendOperator2(..), BackendOperatorNum(..), BackendOperatorOrd(..), BackendSyntax(Var, Local, Lit, App, Abs, UncurriedApp, UncurriedAbs, UncurriedEffectApp, UncurriedEffectAbs, Accessor, Update, CtorSaturated, CtorDef, LetRec, Let, EffectBind, EffectPure, EffectDefer, Branch, PrimOp, PrimEffect, PrimUndefined, Fail, Typed), Level(..), Pair(..), syntaxOf)
 import PureScript.Backend.Optimizer.Syntax as Syn
+import PureScript.Backend.Optimizer.TypeSubstitution as TypeSubstitution
 import PureScript.Backend.Optimizer.Utils (foldl1Array, foldr1Array)
 
 -- | Alias pour un tableau d'arguments appliqués séquentiellement (l'épine).
@@ -321,7 +323,7 @@ instance Eval f => Eval (BackendSyntax f) where
     App hd tl ->
       evalApp env (eval env hd) (NonEmptyArray.toArray (eval env <$> tl))
     Syn.TypeApp hd ty ->
-      SemTypeApp ty (eval env hd)
+      evalTypeApp env (eval env hd) ty
     UncurriedApp hd tl ->
       evalUncurriedApp env (eval env hd) (eval env <$> tl)
     UncurriedAbs idents body -> do
@@ -474,12 +476,8 @@ evalApp :: Env -> BackendSemantics -> Spine BackendSemantics -> BackendSemantics
 evalApp env hd spine = go Nothing env hd (List.fromFoldable spine)
   where
   go mbTy env' = case _, _ of
-    SemTypeApp _ fn, args ->
-      go mbTy env' fn args
     SemTyped ty fn, args ->
       go (Just ty) env' fn args
-    SemTypeApp _ fn, args ->
-      go mbTy env' fn args
     _, List.Cons (NeutFail err) _ ->
       NeutFail err
     NeutFail err, _ ->
@@ -539,8 +537,6 @@ evalUncurriedApp :: Env -> BackendSemantics -> Spine BackendSemantics -> Backend
 evalUncurriedApp env hd spine = go Nothing hd
   where
   go mbTy = case _ of
-    SemTypeApp ty a ->
-      go mbTy a
     SemTyped ty a ->
       go (Just ty) a
     SemMkFn mk ->
@@ -567,8 +563,6 @@ evalUncurriedEffectApp :: Env -> BackendSemantics -> Spine BackendSemantics -> B
 evalUncurriedEffectApp env hd spine = go Nothing hd
   where
   go mbTy = case _ of
-    SemTypeApp ty a ->
-      go mbTy a
     SemTyped ty a ->
       go (Just ty) a
     SemMkEffectFn mk ->
@@ -618,7 +612,51 @@ evalSpine env = foldl go
     ExternPrimOp op1 ->
       evalPrimOp env (Op1 op1 hd)
     ExternTypeApp ty ->
-      SemTypeApp ty hd
+      evalTypeApp env hd ty
+
+-- | Retain type arguments on references until the implementation is available.
+-- | Its syntax is instantiated before value arguments enter the callee's scope.
+evalTypeApp :: Env -> BackendSemantics -> ExprType -> BackendSemantics
+evalTypeApp env = case _, _ of
+  SemTyped (ForAll vars bodyTy) fn, ty
+    | Just { head: name, tail: remaining } <- Array.uncons vars ->
+        let
+          rest = if Array.null remaining then bodyTy else ForAll remaining bodyTy
+          instantiated = TypeSubstitution.substitute (Map.singleton name ty) rest
+        in
+          SemTyped instantiated (evalTypeApp env fn ty)
+  SemTyped _ fn, ty -> evalTypeApp env fn ty
+  SemRef ref spine sem, ty -> evalRef env ref spine (ExternTypeApp ty) sem
+  fn, ty -> SemTypeApp ty fn
+
+-- | Consume one explicitly quantified parameter, without rewriting the shared
+-- | generic implementation or any semantic values supplied by its caller.
+instantiateNeutralType :: ExprType -> NeutralExpr -> Maybe NeutralExpr
+instantiateNeutralType arg (NeutralExpr (Typed (ForAll vars bodyTy) body)) = do
+  { head: name, tail: remaining } <- Array.uncons vars
+  let
+    rest = if Array.null remaining then bodyTy else ForAll remaining bodyTy
+    expression = NeutralExpr (Typed rest body)
+  pure $ substituteNeutralTypes (Map.singleton name arg) expression
+instantiateNeutralType _ _ = Nothing
+
+substituteNeutralTypes :: Map String ExprType -> NeutralExpr -> NeutralExpr
+substituteNeutralTypes subst expression@(NeutralExpr syntax) = case syntax of
+  Typed (ForAll vars bodyTy) body ->
+    let
+      scope = TypeSubstitution.underForAllAvoid (typeNames expression) subst vars bodyTy
+    in
+      NeutralExpr $ Typed
+        (ForAll scope.vars (TypeSubstitution.substitute scope.substitution scope.body))
+        (substituteNeutralTypes scope.substitution body)
+  Typed ty body -> NeutralExpr $ Typed (TypeSubstitution.substitute subst ty) (substituteNeutralTypes subst body)
+  Syn.TypeApp fn ty -> NeutralExpr $ Syn.TypeApp (substituteNeutralTypes subst fn) (TypeSubstitution.substitute subst ty)
+  _ -> NeutralExpr (substituteNeutralTypes subst <$> syntax)
+  where
+  typeNames (NeutralExpr node) = foldMap typeNames node <> case node of
+    Typed ty _ -> TypeSubstitution.typeVariables ty
+    Syn.TypeApp _ ty -> TypeSubstitution.typeVariables ty
+    _ -> Set.empty
 
 -- | Reconstruit une expression neutre (non réductible) à partir d'une épine d'arguments.
 neutralSpine :: BackendSemantics -> Array ExternSpine -> BackendSemantics
@@ -1147,9 +1185,21 @@ envForGroup env ref acc group
 
 -- | Tente d'évaluer une fonction externe (FFI) si une implémentation sémantique (ForeignEval) est fournie pour elle.
 evalExternFromImpl :: Env -> Qualified Ident -> Tuple BackendAnalysis ExternImpl -> Array ExternSpine -> Maybe BackendSemantics
+evalExternFromImpl (Env e) qual (Tuple _ (ExternExpr _ _)) spine
+  | Just { head: ExternTypeApp _ } <- Array.uncons spine
+  , Just InlineNever <- Map.lookup (EvalExtern qual) e.directives >>= Map.lookup InlineRef =
+      Just $ neutralSpine (NeutStop qual) spine
+evalExternFromImpl env qual (Tuple analysis (ExternExpr group expr)) spine
+  | Just { head: ExternTypeApp ty, tail } <- Array.uncons spine
+  , Just instantiated <- instantiateNeutralType ty expr =
+      evalExternFromImpl env qual (Tuple analysis (ExternExpr group instantiated)) tail
+evalExternFromImpl _ _ (Tuple _ (ExternExpr _ _)) spine
+  | Array.any (not <<< isNotTypeApp) spine = Nothing
 evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case Array.filter isNotTypeApp spine of
   [] ->
     case impl of
+      -- Keep the lexical body available until its type arguments arrive.
+      ExternExpr _ (NeutralExpr (Typed (ForAll _ _) _)) -> Nothing
       ExternExpr group expr -> do
         let ref = EvalExtern qual
         case Map.lookup ref e.directives >>= Map.lookup InlineRef of

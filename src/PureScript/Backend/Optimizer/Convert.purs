@@ -281,7 +281,7 @@ printExpr (ExprSyntax _ syn) = case syn of
   _ -> "Other"
 
 toTopLevelBackendBinding :: Array (Qualified Ident) -> ConvertEnv -> Binding Ann -> Accum ConvertEnv (Tuple Ident (WithDeps NeutralExpr))
-toTopLevelBackendBinding group env (Binding _ ident cfn) = do
+toTopLevelBackendBinding group env (Binding (Ann bindingAnn) ident cfn) = do
   let evalEnv = Env { currentModule: env.currentModule, evalExternRef: makeExternEvalRef group env, evalExternSpine: makeExternEvalSpine group env, locals: Map.empty, localsSize: 0, directives: env.directives }
   let qualifiedIdent = Qualified (Just env.currentModule) ident
   let backendExpr = toBackendExpr cfn env
@@ -293,7 +293,8 @@ toTopLevelBackendBinding group env (Binding _ ident cfn) = do
       _ -> Nothing
   let Tuple mbSteps optimizedExpr = optimize enableTracing (getCtx env) evalEnv qualifiedIdent env.rewriteLimit backendExpr
   let
-    optimizedExprWithTy = case mbType of
+    optimizedExprWithTy = case bindingAnn.type <|> mbType of
+      Just ty | ExprSyntax _ (Typed existing _) <- optimizedExpr, existing == ty -> optimizedExpr
       Just ty -> ExprSyntax (analysisOf optimizedExpr) (Typed ty optimizedExpr)
       Nothing -> optimizedExpr
   let isDict = fst (isTypeClassDictionaryWithProps cfn)
@@ -466,7 +467,7 @@ makeExternEvalSpine group conv env qual spine = do
       spine' = unwrapExternSpine <$> spine
       result = do
         fn <- Map.lookup qual conv.foreignSemantics
-        fn env qual spine'
+        fn env qual (Array.filter isRuntimeSpine spine')
       res = case result of
         Nothing -> do
           impl <- lookupImplementation conv qual
@@ -474,6 +475,9 @@ makeExternEvalSpine group conv env qual spine = do
         _ ->
           result
     res
+  where
+  isRuntimeSpine (ExternTypeApp _) = false
+  isRuntimeSpine _ = true
 
 lookupImplementation :: ConvertEnv -> Qualified Ident -> Maybe (Tuple BackendAnalysis ExternImpl)
 lookupImplementation conv qual@(Qualified mbMn _) =
@@ -611,7 +615,7 @@ toBackendExprWithType mbTy expr = do
         Rec _ ->
           unsafeCrashWith "CoreFn empty Rec binding group"
     ExprTypeApp _ expr' ty -> do
-      expr'' <- go expr'
+      expr'' <- toBackendExpr expr'
       buildM $ Syn.TypeApp expr'' ty
     ExprCase _ exprs alts ->
       let
