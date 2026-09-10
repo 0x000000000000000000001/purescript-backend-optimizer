@@ -1193,13 +1193,23 @@ evalExternFromImpl env qual (Tuple analysis (ExternExpr group expr)) spine
   | Just { head: ExternTypeApp ty, tail } <- Array.uncons spine
   , Just instantiated <- instantiateNeutralType ty expr =
       evalExternFromImpl env qual (Tuple analysis (ExternExpr group instantiated)) tail
+-- An identity only returns its caller's value. Reduce it without evaluating
+-- the annotated body, so no uninstantiated callee type enters the caller.
+evalExternFromImpl (Env e) qual (Tuple _ (ExternExpr _ expr@(NeutralExpr (Typed (ForAll _ _) _)))) spine@[ ExternApp [ arg ] ]
+  | isIdentityImplementation expr =
+      case Map.lookup (EvalExtern qual) e.directives >>= Map.lookup InlineRef of
+        Just InlineNever -> Just $ neutralSpine (NeutStop qual) spine
+        Just (InlineArity n) | n > 1 -> Nothing
+        _ -> Just arg
+-- A value application does not instantiate the implementation's quantifiers.
+-- Inlining it would attach its generic annotations to caller expressions; a
+-- later caller substitution could capture those still-unbound type names.
+evalExternFromImpl _ _ (Tuple _ (ExternExpr _ (NeutralExpr (Typed (ForAll _ _) _)))) _ = Nothing
 evalExternFromImpl _ _ (Tuple _ (ExternExpr _ _)) spine
   | Array.any (not <<< isNotTypeApp) spine = Nothing
 evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case Array.filter isNotTypeApp spine of
   [] ->
     case impl of
-      -- Keep the lexical body available until its type arguments arrive.
-      ExternExpr _ (NeutralExpr (Typed (ForAll _ _) _)) -> Nothing
       ExternExpr group expr -> do
         let ref = EvalExtern qual
         case Map.lookup ref e.directives >>= Map.lookup InlineRef of
@@ -1396,6 +1406,16 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case Array.fil
       _ -> Nothing
   _ ->
     Nothing
+
+isIdentityImplementation :: NeutralExpr -> Boolean
+isIdentityImplementation expr = case stripTyped expr of
+  Abs params body -> case NonEmptyArray.toArray params, stripTyped body of
+    [ Tuple _ parameter ], Local _ result -> parameter == result
+    _, _ -> false
+  _ -> false
+  where
+  stripTyped (NeutralExpr (Typed _ inner)) = stripTyped inner
+  stripTyped (NeutralExpr syntax) = syntax
 
 -- | Tente d'évaluer une référence externe (FFI) si une implémentation sémantique est fournie.
 evalExternRefFromImpl :: Env -> Qualified Ident -> Tuple BackendAnalysis ExternImpl -> BackendSemantics
