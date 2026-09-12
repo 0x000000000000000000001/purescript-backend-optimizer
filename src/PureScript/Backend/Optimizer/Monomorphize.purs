@@ -560,15 +560,11 @@ applyStaticArgs dictArgs normalArgs body =
     
     subst = Map.union resDicts.subst resNorms.subst
     
-    -- substitute variables
-    substBody = substituteVars subst resNorms.expr
   in
-    -- re-wrap with unused normal arguments to keep the same arity,
-    -- but DO NOT re-wrap dicts because they are removed from the caller's spine!
-    wrapUnused resNorms.unusedIds substBody
+    substituteVars subst resNorms.expr
   where
   goCollect prefix args e = case Array.uncons args of
-    Nothing -> { subst: Map.empty, unusedIds: [], expr: e }
+    Nothing -> { subst: Map.empty, expr: e }
     Just { head: a, tail: as' } ->
       if isStatic a then
         case e of
@@ -576,7 +572,7 @@ applyStaticArgs dictArgs normalArgs body =
             let
               rest = goCollect prefix as' b
             in
-              { subst: Map.insert id a rest.subst, unusedIds: Array.cons (Tuple ann (Ident (unwrap id <> "_unused"))) rest.unusedIds, expr: rest.expr }
+              { subst: Map.insert id a rest.subst, expr: keepUnused prefix ann id rest.expr }
           _ -> 
             let
               freshId = Ident ("__eta_" <> prefix <> "_" <> show (Array.length as'))
@@ -584,12 +580,12 @@ applyStaticArgs dictArgs normalArgs body =
               etaBody = ExprApp ann e (ExprVar ann (Qualified Nothing freshId))
               rest = goCollect prefix as' etaBody
             in
-              { subst: Map.insert freshId a rest.subst, unusedIds: Array.cons (Tuple ann (Ident (unwrap freshId <> "_unused"))) rest.unusedIds, expr: rest.expr }
+              { subst: Map.insert freshId a rest.subst, expr: keepUnused prefix ann freshId rest.expr }
       else
         case e of
           ExprAbs _ id b -> 
             let rest = goCollect prefix as' b
-            in { subst: rest.subst, unusedIds: rest.unusedIds, expr: ExprAbs (getExprAnn e) id rest.expr }
+            in { subst: rest.subst, expr: ExprAbs (getExprAnn e) id rest.expr }
           _ ->
             let
               freshId = Ident ("__eta_" <> prefix <> "_" <> show (Array.length as'))
@@ -597,9 +593,14 @@ applyStaticArgs dictArgs normalArgs body =
               etaBody = ExprApp ann e (ExprVar ann (Qualified Nothing freshId))
               rest = goCollect prefix as' etaBody
             in
-              { subst: rest.subst, unusedIds: rest.unusedIds, expr: ExprAbs ann freshId rest.expr }
+              { subst: rest.subst, expr: ExprAbs ann freshId rest.expr }
 
-  wrapUnused ids e = Array.foldr (\(Tuple ann id) acc -> ExprAbs ann id acc) e ids
+  -- Normal arguments remain in the caller's spine, so retain each placeholder
+  -- in its original position relative to dynamic parameters. Static dictionaries
+  -- are removed from the caller's spine and do not need a placeholder.
+  keepUnused prefix ann id e =
+    if prefix == "norm" then ExprAbs ann (Ident (unwrap id <> "_unused")) e
+    else e
 
 getBindIdents :: Array (Bind Ann) -> Array Ident
 getBindIdents = Array.concatMap case _ of
@@ -747,14 +748,15 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
   expr | isAppOrTypeApp expr ->
     let
       Ann ann = getExprAnn expr
-      { f_var, spine } = collectSpine expr
-
-      typeArgs = getSpineTypeArgs spine
-      
+      { f_var, spine } = collectAnnotatedSpine expr
       f_var' = monomorphizeExpr modName instMap localDicts f_var
-      spine' = map (case _ of
-                       SpineApp e -> SpineApp (monomorphizeExpr modName instMap localDicts e)
-                       SpineTypeApp t -> SpineTypeApp t) spine
+      annotatedSpine' = map (\(Tuple appAnn arg) -> Tuple appAnn case arg of
+        SpineApp e -> SpineApp (monomorphizeExpr modName instMap localDicts e)
+        SpineTypeApp t -> SpineTypeApp t) spine
+      spine' = map (\(Tuple _ arg) -> arg) annotatedSpine'
+      transformedExpr = foldl applyAnnotatedSpine f_var' annotatedSpine'
+
+      typeArgs = getSpineTypeArgs spine'
       args' = getSpineArgs spine'
     in
       case f_var' of
@@ -774,7 +776,7 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
              
           in
              if hasTypeVariables instType then
-               rebuildSpine (Ann ann) f_var' spine'
+               transformedExpr
              else
                let staticNormalArgs = Array.filter isStatic normalArgs
                    specKey = mangleType (defaultToAny instType) <> "_" <> String.joinWith "_" (map mangleExpr staticNormalArgs)
@@ -795,9 +797,9 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
                              specializedVar = ExprVar (Ann newAnn) (Qualified resolvedMod specializedName)
                           in
                              rebuildSpine (Ann ann) specializedVar (map SpineApp filteredArgs)
-                        Nothing -> rebuildSpine (Ann ann) f_var' spine'
-                    Nothing -> rebuildSpine (Ann ann) f_var' spine'
-        _ -> rebuildSpine (Ann ann) f_var' spine'
+                        Nothing -> transformedExpr
+                    Nothing -> transformedExpr
+        _ -> transformedExpr
 
   ExprLit ann lit -> ExprLit ann (map (monomorphizeExpr modName instMap localDicts) lit)
   ExprAbs ann id e -> ExprAbs ann id (monomorphizeExpr modName instMap localDicts e)
@@ -988,6 +990,19 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
   ExprUpdate ann e props -> ExprUpdate ann (monomorphizeExpr modName instMap localDicts e) (map (monomorphizeProp modName instMap localDicts) props)
   _ -> expr
   where
+  -- Keep the original head boundary and each application's TAST annotation.
+  collectAnnotatedSpine = go []
+    where
+    go spine = case _ of
+      ExprApp ann fn arg -> go (Array.cons (Tuple ann (SpineApp arg)) spine) fn
+      ExprTypeApp ann fn ty -> go (Array.cons (Tuple ann (SpineTypeApp ty)) spine) fn
+      head -> { f_var: head, spine }
+
+  -- Reuse transformed arguments when no specialization applies.
+  applyAnnotatedSpine fn (Tuple ann arg) = case arg of
+    SpineApp e -> ExprApp ann fn e
+    SpineTypeApp t -> ExprTypeApp ann fn t
+
   isAppOrTypeApp (ExprApp _ _ _) = true
   isAppOrTypeApp (ExprTypeApp _ _ _) = true
   isAppOrTypeApp _ = false
