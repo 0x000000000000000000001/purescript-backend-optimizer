@@ -509,27 +509,41 @@ evalApp env hd spine = go Nothing env hd (List.fromFoldable spine)
       SemLetRec vals \nextVals ->
         makeLet Nothing (k nextVals) \nextFn ->
           go mbTy (bindLocal (bindLocal env' (Group nextVals)) (One nextFn)) nextFn args
+    NeutApp fn applied, args ->
+      withApplicationType mbTy (List.length args) $
+        go Nothing env' fn (List.fromFoldable applied <> args)
     NeutCtorDef qual ct ty tag fields, args
       | Array.length fields == List.length args ->
-          NeutData qual ct ty tag (Array.zip fields (Array.fromFoldable args))
+          withApplicationType mbTy (List.length args) $
+            NeutData qual ct ty tag (Array.zip fields (Array.fromFoldable args))
     fn, List.Nil ->
       case mbTy of
         Just ty -> SemTyped ty fn
         Nothing -> fn
     fn, args ->
       let
-        app = NeutApp fn (List.toUnfoldable args)
-        finalTy = case mbTy of
-          Just (Func args' retTy) ->
-            let
-              remaining = Array.drop (List.length args) args'
-            in
-              if Array.length remaining > 0 then Just (Func remaining retTy) else Just retTy
-          _ -> mbTy
+        -- Keep the head annotation as well as the partially applied result type.
+        -- Inlined constructors still need their declaring ADT and type arguments.
+        typedFn = case mbTy of
+          Just ty -> SemTyped ty fn
+          Nothing -> fn
+        app = NeutApp typedFn (List.toUnfoldable args)
       in
-        case finalTy of
-          Just ty -> SemTyped ty app
-          Nothing -> app
+        withApplicationType mbTy (List.length args) app
+
+  withApplicationType mbTy count value =
+    let
+      finalTy = case mbTy of
+        Just (Func args' retTy) ->
+          let remaining = Array.drop count args'
+          in if Array.null remaining then Just retTy else Just (Func remaining retTy)
+        _ -> mbTy
+    in
+      case finalTy of
+        Just ty -> case value of
+          SemTyped _ inner -> SemTyped ty inner
+          _ -> SemTyped ty value
+        Nothing -> value
 
 -- | Évalue l'application d'une fonction décurryfiée. Tente de saturer la fonction avec 
 -- | les arguments fournis.

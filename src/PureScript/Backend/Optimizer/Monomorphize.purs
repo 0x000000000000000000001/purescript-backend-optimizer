@@ -102,6 +102,18 @@ mangleExpr = case _ of
   ExprConstructor _ _ (Ident c) _ -> "Ctor_" <> c
   _ -> "Unk"
 
+specializationKey :: ExprType -> Array (Expr Ann) -> Array (Expr Ann) -> String
+specializationKey instType dictArgs normalArgs =
+  mangleType (defaultToAny instType)
+    <> "_dict_" <> mangleArgs dictArgs
+    <> "_args_" <> mangleArgs normalArgs
+  where
+  -- The static values, their positions, and the supplied arity all determine
+  -- the specialized body. Dynamic arguments retain their own placeholders.
+  mangleArgs args =
+    show (Array.length args) <> ":"
+      <> show (map (\arg -> if isStatic arg then Just (mangleExpr arg) else Nothing) args)
+
 collectInstantiations :: Map String (Binding Ann) -> InstantiationMap -> Module Ann -> InstantiationMap
 collectInstantiations globalAstMap acc (Module m) =
   let
@@ -254,8 +266,7 @@ collectExpr globalAstMap modName acc expr = case expr of
                x -> x
              instType = stripTypeVariables (substituteExprType subst (stripForAlls genericType))
              { dictArgs, normalArgs } = partitionArgs genericType args
-             staticNormalArgs = Array.filter isStatic normalArgs
-             specKey = mangleType (defaultToAny instType) <> "_" <> String.joinWith "_" (map mangleExpr staticNormalArgs)
+             specKey = specializationKey instType dictArgs normalArgs
           in
              if not (hasTypeVariables genericType) then acc2
              else if hasTypeVariables instType then acc2
@@ -404,7 +415,11 @@ rewriteExpr globalAstMap = goLocals
           Just newExpr -> newExpr
           Nothing -> 
             let 
-              newAnn = mapAnn f ann
+              -- A global function's quantifiers belong to its own declaration.
+              -- Its TypeApp arguments carry instantiations from the caller.
+              newAnn = case mbMod, ann of
+                Just _, Ann { type: Just (ForAll _ _) } -> ann
+                _, _ -> mapAnn f ann
             in ExprVar newAnn q
       ExprLit ann lit -> ExprLit (mapAnn f ann) (map go lit)
       ExprApp ann e1 e2 -> ExprApp (mapAnn f ann) (go e1) (go e2)
@@ -553,47 +568,69 @@ substituteVars subst = go
 applyStaticArgs :: Array (Expr Ann) -> Array (Expr Ann) -> Expr Ann -> Expr Ann
 applyStaticArgs dictArgs normalArgs body =
   let
-    -- collect dictionary arguments
-    resDicts = goCollect "dict" dictArgs body
-    -- collect normal arguments
-    resNorms = goCollect "norm" normalArgs resDicts.expr
-    
-    subst = Map.union resDicts.subst resNorms.subst
-    
+    -- Traverse every supplied argument once so retained dynamic dictionary
+    -- binders are not consumed again as normal parameters.
+    args = map (Tuple "dict") dictArgs <> map (Tuple "norm") normalArgs
+    result = goCollect args body
   in
-    substituteVars subst resNorms.expr
+    substituteVars result.subst result.expr
   where
-  goCollect prefix args e = case Array.uncons args of
+  goCollect args e = case Array.uncons args of
     Nothing -> { subst: Map.empty, expr: e }
-    Just { head: a, tail: as' } ->
+    Just { head: Tuple prefix a, tail: as' } ->
       if isStatic a then
         case e of
           ExprAbs ann id b ->
             let
-              rest = goCollect prefix as' b
+              rest = goCollect as' b
             in
               { subst: Map.insert id a rest.subst, expr: keepUnused prefix ann id rest.expr }
           _ -> 
             let
               freshId = Ident ("__eta_" <> prefix <> "_" <> show (Array.length as'))
               ann = getExprAnn e
-              etaBody = ExprApp ann e (ExprVar ann (Qualified Nothing freshId))
-              rest = goCollect prefix as' etaBody
+              etaBody = applyEtaArgument freshId a e
+              rest = goCollect as' etaBody
             in
               { subst: Map.insert freshId a rest.subst, expr: keepUnused prefix ann freshId rest.expr }
       else
         case e of
           ExprAbs _ id b -> 
-            let rest = goCollect prefix as' b
+            let rest = goCollect as' b
             in { subst: rest.subst, expr: ExprAbs (getExprAnn e) id rest.expr }
           _ ->
             let
               freshId = Ident ("__eta_" <> prefix <> "_" <> show (Array.length as'))
               ann = getExprAnn e
-              etaBody = ExprApp ann e (ExprVar ann (Qualified Nothing freshId))
-              rest = goCollect prefix as' etaBody
+              etaBody = applyEtaArgument freshId a e
+              rest = goCollect as' etaBody
             in
               { subst: rest.subst, expr: ExprAbs ann freshId rest.expr }
+
+  applyEtaArgument ident arg fn =
+    let
+      Ann ann = getExprAnn fn
+      step = ann.type >>= consumeType
+      argAnn = Ann (ann { type = map _.argType step })
+      resultAnn = Ann (ann { type = map _.resultType step })
+    in
+      ExprApp resultAnn fn (ExprVar argAnn (Qualified Nothing ident))
+    where
+    consumeType = case _ of
+      ForAll vars body -> map (\step -> step { resultType = ForAll vars step.resultType }) (consumeType body)
+      ConstrainedType constraints body -> case Array.uncons constraints of
+        Just { tail } -> Just
+          { argType: fromMaybe Any (inferExprType arg)
+          , resultType: if Array.null tail then body else ConstrainedType tail body
+          }
+        Nothing -> consumeType body
+      Func paramTypes ret -> case Array.uncons paramTypes of
+        Just { head, tail } -> Just
+          { argType: head
+          , resultType: if Array.null tail then ret else Func tail ret
+          }
+        Nothing -> consumeType ret
+      _ -> Nothing
 
   -- Normal arguments remain in the caller's spine, so retain each placeholder
   -- in its original position relative to dynamic parameters. Static dictionaries
@@ -636,11 +673,11 @@ monomorphize globalAstMap instMap (Module m) =
                             exprWithDicts = applyStaticArgs info.dictArgs info.normalArgs expr
                             resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
 
-                            specializedVar = ExprVar ann (Qualified (Just (ModuleName definerMod)) (Ident (name <> "__" <> hashString specKey)))
-                            globalSubst = Map.fromFoldable [ Tuple qualName specializedVar, Tuple name specializedVar ]
                             finalTy = stripTypeVariables (substFn info.instType)
 
-                            specializedExpr = monomorphizeExpr modNameStr instMap Map.empty (rewriteExpr globalAstMap Map.empty globalSubst astSubstFn resolvedExpr)
+                            -- Recursive calls need the same spine rewrite as other
+                            -- calls, including removal of static dictionaries.
+                            specializedExpr = monomorphizeExpr modNameStr instMap Map.empty (rewriteExpr globalAstMap Map.empty Map.empty astSubstFn resolvedExpr)
 
                             etaExpandedExpr = case specializedExpr of
                               ExprAbs _ _ _ -> specializedExpr
@@ -778,8 +815,7 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
              if hasTypeVariables instType then
                transformedExpr
              else
-               let staticNormalArgs = Array.filter isStatic normalArgs
-                   specKey = mangleType (defaultToAny instType) <> "_" <> String.joinWith "_" (map mangleExpr staticNormalArgs)
+               let specKey = specializationKey instType dictArgs normalArgs
                    specializedName = Ident (name <> "__" <> hashString specKey)
                in case Map.lookup qualName instMap of
                     Just typeMap ->
@@ -1149,6 +1185,10 @@ transitiveCollect globalAstMap initialMap = loop initialMap
   where
   loop currentMap =
     let
+      -- Foreign declarations have no AST body from which to emit a specialization.
+      -- Keep their collected type information, but never embed nonexistent
+      -- specialized foreign names in another specialization's static arguments.
+      specializationMap = Map.filterKeys (\name -> Map.member name globalAstMap) currentMap
       newMap = Array.foldl
         ( \acc1 (Tuple qualName typeMap) ->
             Array.foldl
@@ -1175,7 +1215,7 @@ transitiveCollect globalAstMap initialMap = loop initialMap
                               ( \acc3 caller ->
                                   let
                                     substitutedExpr = rewriteExpr globalAstMap Map.empty Map.empty astSubstFn resolvedExpr
-                                    specializedExpr = monomorphizeExpr caller currentMap Map.empty substitutedExpr
+                                    specializedExpr = monomorphizeExpr caller specializationMap Map.empty substitutedExpr
                                   in
                                     collectExpr globalAstMap caller acc3 specializedExpr
                               )

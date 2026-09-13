@@ -254,5 +254,59 @@ test("curried and uncurried fallback calls preserve residual type applications",
   }
 });
 
+test("a partially applied constructor keeps its typed head and remaining function type", () => {
+  const { env } = extern(local("unused", 0));
+  const tupleType = new C.ADT("Data.Tuple.Tuple", ["Data", "Tuple", "Tuple"], [string, int]);
+  const constructor = new Sem.NeutCtorDef(
+    new C.Qualified(new Maybe.Just("Data.Tuple"), "Tuple"),
+    C.ProductType.value, "Tuple", "Tuple", ["value0", "value1"]);
+  const head = new Sem.SemTyped(func([string, int], tupleType), constructor);
+  const args = [new Sem.NeutLit(new C.LitString("a"))];
+
+  assert.deepStrictEqual(Sem.evalApp(env)(head)(args),
+    new Sem.SemTyped(func([int], tupleType), new Sem.NeutApp(head, args)));
+});
+
+for (const fixture of [
+  {
+    module: "Data.Tuple", name: "Tuple", constructorType: C.ProductType.value,
+    argumentTypes: [string, int],
+    resultType: new C.ADT("Data.Tuple.Tuple", ["Data", "Tuple", "Tuple"], [string, int]),
+    arguments: [new Sem.NeutLit(new C.LitString("a")), new Sem.NeutLit(new C.LitInt(1))],
+  },
+  {
+    module: "Data.List.Types", name: "Cons", constructorType: C.SumType.value,
+    argumentTypes: [string, new C.ADT("Data.List.Types.List", ["Data", "List", "Types", "List"], [string])],
+    resultType: new C.ADT("Data.List.Types.List", ["Data", "List", "Types", "List"], [string]),
+    arguments: [new Sem.NeutLit(new C.LitString("a")),
+      new Sem.NeutVar(new C.Qualified(new Maybe.Just("Fixture"), "tail"))],
+  },
+]) {
+  test(`staged ${fixture.name} applications saturate and retain the result type`, () => {
+    const { env } = extern(local("unused", 0));
+    const name = new C.Qualified(new Maybe.Just(fixture.module), fixture.name);
+    const typeName = fixture.name === "Cons" ? "List" : fixture.name;
+    const fields = ["value0", "value1"];
+    const head = new Sem.SemTyped(func(fixture.argumentTypes, fixture.resultType),
+      new Sem.NeutCtorDef(name, fixture.constructorType, typeName, fixture.name, fields));
+    const apply = (fn, args) => Sem.evalApp(env)(fn)(args);
+    const partial = apply(head, fixture.arguments.slice(0, 1));
+    const staged = apply(partial, fixture.arguments.slice(1));
+    const expected = new Sem.SemTyped(fixture.resultType,
+      new Sem.NeutData(name, fixture.constructorType, typeName, fixture.name,
+        fields.map((field, index) => pair(field, fixture.arguments[index]))));
+    assert.deepStrictEqual(staged, expected);
+    assert.deepStrictEqual(apply(head, fixture.arguments), expected);
+  });
+}
+
+test("joining staged runtime applications preserves a residual TypeApp head", () => {
+  const { name, env } = extern(local("unused", 0));
+  const head = new Sem.SemTypeApp(int, new Sem.NeutVar(name));
+  const args = [new Sem.NeutLit(new C.LitInt(1)), new Sem.NeutLit(new C.LitInt(2))];
+  const partial = Sem.evalApp(env)(head)(args.slice(0, 1));
+  assert.deepStrictEqual(Sem.evalApp(env)(partial)(args.slice(1)), new Sem.NeutApp(head, args));
+});
+
 console.log(`TypeApp scope regression tests: ${passed} passed, ${failed} failed (${output})`);
 if (failed) process.exitCode = 1;
