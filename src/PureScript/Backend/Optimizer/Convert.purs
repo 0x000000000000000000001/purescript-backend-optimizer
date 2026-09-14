@@ -484,7 +484,8 @@ buildM a env = build (getCtx env) a
 
 getCtx :: ConvertEnv -> Ctx
 getCtx env = Ctx
-  { currentLevel: env.currentLevel
+  { currentModule: env.currentModule
+  , currentLevel: env.currentLevel
   , lookupExtern
   , analyze: \ctx@(Ctx { effect }) expr ->
       case env.analyzeCustom ctx expr of

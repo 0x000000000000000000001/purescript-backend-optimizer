@@ -485,20 +485,12 @@ evalApp env hd spine = go Nothing env hd (List.fromFoldable spine)
     SemLam _ k, List.Cons arg args ->
       makeLet Nothing arg \nextArg ->
         let
-          nextTy = case mbTy of
-            Just (Func args' retTy) -> case Array.uncons args' of
-              Just { tail } | Array.length tail > 0 -> Just (Func tail retTy)
-              _ -> Just retTy
-            _ -> Nothing
+          nextTy = mbTy >>= consumeApplicationType 1
         in
           go nextTy env' (k nextArg) args
     SemRef ref sp sem, List.Cons arg args ->
       let
-        nextTy = case mbTy of
-          Just (Func args' retTy) -> case Array.uncons args' of
-            Just { tail } | Array.length tail > 0 -> Just (Func tail retTy)
-            _ -> Just retTy
-          _ -> Nothing
+        nextTy = mbTy >>= consumeApplicationType 1
       in
         go nextTy env' (evalRef env' ref sp (ExternApp [ arg ]) sem) args
     SemLet ident val k, args ->
@@ -533,17 +525,29 @@ evalApp env hd spine = go Nothing env hd (List.fromFoldable spine)
 
   withApplicationType mbTy count value =
     let
-      finalTy = case mbTy of
-        Just (Func args' retTy) ->
-          let remaining = Array.drop count args'
-          in if Array.null remaining then Just retTy else Just (Func remaining retTy)
-        _ -> mbTy
+      finalTy = mbTy >>= consumeApplicationType count
     in
       case finalTy of
         Just ty -> case value of
           SemTyped _ inner -> SemTyped ty inner
           _ -> SemTyped ty value
         Nothing -> value
+
+  -- Dictionaries are runtime arguments too. Consume their constraints before
+  -- the ordinary parameters, preserving any partially applied result type.
+  consumeApplicationType 0 ty = Just ty
+  consumeApplicationType count (ForAll _ ty) = consumeApplicationType count ty
+  consumeApplicationType count (ConstrainedType constraints body) =
+    if count < Array.length constraints then
+      Just (ConstrainedType (Array.drop count constraints) body)
+    else
+      consumeApplicationType (count - Array.length constraints) body
+  consumeApplicationType count (Func args ret) =
+    if count < Array.length args then
+      Just (Func (Array.drop count args) ret)
+    else
+      consumeApplicationType (count - Array.length args) ret
+  consumeApplicationType _ _ = Nothing
 
 -- | Évalue l'application d'une fonction décurryfiée. Tente de saturer la fonction avec 
 -- | les arguments fournis.
@@ -1193,9 +1197,15 @@ snocSpine spine = case _ of
 
 -- | Prépare l'environnement pour l'évaluation d'un groupe de définitions mutuellement récursives.
 envForGroup :: Env -> EvalRef -> InlineAccessor -> Array (Qualified Ident) -> Env
-envForGroup env ref acc group
-  | Array.null group = env
-  | otherwise = addStop env ref acc
+envForGroup env@(Env e) ref acc group =
+  let
+    -- Inlined constructor definitions belong to the imported implementation,
+    -- even while their arguments originate in the caller.
+    scopedEnv = case ref of
+      EvalExtern (Qualified (Just moduleName) _) -> Env (e { currentModule = moduleName })
+      _ -> env
+  in
+    if Array.null group then scopedEnv else addStop scopedEnv ref acc
 
 -- | Tente d'évaluer une fonction externe (FFI) si une implémentation sémantique (ForeignEval) est fournie pour elle.
 evalExternFromImpl :: Env -> Qualified Ident -> Tuple BackendAnalysis ExternImpl -> Array ExternSpine -> Maybe BackendSemantics
@@ -1483,7 +1493,8 @@ liftOp2 op a b = NeutPrimOp (Op2 op a b)
 
 -- | Contexte utilisé durant la phase de reconstruction (quote), gérant la profondeur (De Bruijn) et la pureté.
 newtype Ctx = Ctx
-  { currentLevel :: Int
+  { currentModule :: ModuleName
+  , currentLevel :: Int
   , lookupExtern :: Qualified Ident -> Maybe String -> Maybe BackendAnalysis
   , analyze :: Ctx -> BackendSyntax BackendExpr -> BackendAnalysis
   , effect :: Boolean
@@ -1509,7 +1520,7 @@ purely (Ctx ctx)
 quote :: Ctx -> BackendSemantics -> BackendExpr
 quote = go
   where
-  go ctx = case _ of
+  go ctx@(Ctx { currentModule }) = case _ of
     SemTyped ty a ->
       build ctx $ Typed ty (go ctx a)
     SemTypeApp ty a ->
@@ -1588,8 +1599,13 @@ quote = go
       buildStop ctx qual
     NeutData qual ct ty tag values ->
       build ctx $ CtorSaturated qual ct ty tag (map (quote ctx) <$> values)
-    NeutCtorDef _ ct ty tag fields ->
-      build ctx $ CtorDef ct ty tag fields
+    NeutCtorDef qual@(Qualified mn _) ct ty tag fields
+      -- A definition re-evaluates in the current module; imported constructors
+      -- must remain qualified references across optimization passes.
+      | mn /= Just currentModule ->
+          build ctx $ Var qual
+      | otherwise ->
+          build ctx $ CtorDef ct ty tag fields
     NeutUncurriedApp hd spine -> do
       let ctx' = purely ctx
       let hd' = quote ctx' hd

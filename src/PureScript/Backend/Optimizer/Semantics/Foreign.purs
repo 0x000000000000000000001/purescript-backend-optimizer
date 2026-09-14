@@ -71,6 +71,7 @@ coreForeignSemantics = Map.fromFoldable semantics
     , data_ord_ordNumber
     , data_ord_ordString
     , data_ring_intSub
+    , data_ring_negate
     , data_ring_numSub
     , data_semigroup_concatArray
     , data_semigroup_concatString
@@ -205,6 +206,30 @@ data_semiring_numMul = Tuple (qualified "Data.Semiring" "numMul") $ primBinaryOp
 
 data_ring_intSub :: ForeignSemantics
 data_ring_intSub = Tuple (qualified "Data.Ring" "intSub") $ primBinaryOperator (OpIntNum OpSubtract)
+
+-- Numeric negation must preserve signed zero even when the superclass's zero
+-- cannot be inlined. Other Ring dictionaries retain their own subtraction.
+data_ring_negate :: ForeignSemantics
+data_ring_negate = Tuple (qualified "Data.Ring" "negate") go
+  where
+  go env _ = case _ of
+    [ ExternApp [ dict ] ]
+      | Just op <- ringNegation dict ->
+          Just $ SemLam Nothing \a -> evalPrimOp env (Op1 op a)
+    _ -> Nothing
+
+  ringNegation = case _ of
+    SemTyped _ dict -> ringNegation dict
+    SemTypeApp _ dict -> ringNegation dict
+    SemRef (EvalExtern qual) [] _ -> knownRing qual
+    NeutVar qual -> knownRing qual
+    NeutStop qual -> knownRing qual
+    _ -> Nothing
+
+  knownRing qual
+    | isQualified "Data.Ring" "ringNumber" qual = Just OpNumberNegate
+    | isQualified "Data.Ring" "ringInt" qual = Just OpIntNegate
+    | otherwise = Nothing
 
 data_ring_numSub :: ForeignSemantics
 data_ring_numSub = Tuple (qualified "Data.Ring" "numSub") $ primBinaryOperator (OpNumberNum OpSubtract)

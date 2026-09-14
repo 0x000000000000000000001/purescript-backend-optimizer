@@ -8,12 +8,13 @@ const output = process.argv[2]
   ? resolve(process.argv[2])
   : fileURLToPath(new URL("../output/", import.meta.url));
 const load = (name) => import(pathToFileURL(resolve(output, name, "index.js")));
-const [C, S, Sem, Sub, Maybe, Tuple, Map, Ord, Foldable] = await Promise.all([
+const [C, S, Sem, Sub, Maybe, Tuple, Map, Ord, Foldable, Analysis] = await Promise.all([
   "PureScript.Backend.Optimizer.CoreFn",
   "PureScript.Backend.Optimizer.Syntax",
   "PureScript.Backend.Optimizer.Semantics",
   "PureScript.Backend.Optimizer.TypeSubstitution",
   "Data.Maybe", "Data.Tuple", "Data.Map", "Data.Ord", "Data.Foldable",
+  "PureScript.Backend.Optimizer.Analysis",
 ].map(load));
 
 const pair = (left, right) => new Tuple.Tuple(left, right);
@@ -306,6 +307,50 @@ test("joining staged runtime applications preserves a residual TypeApp head", ()
   const args = [new Sem.NeutLit(new C.LitInt(1)), new Sem.NeutLit(new C.LitInt(2))];
   const partial = Sem.evalApp(env)(head)(args.slice(0, 1));
   assert.deepStrictEqual(Sem.evalApp(env)(partial)(args.slice(1)), new Sem.NeutApp(head, args));
+});
+
+test("imported constructors retain their module through quotation and later saturation", () => {
+  const module = "Fixture.Consumer";
+  const imported = new C.Qualified(new Maybe.Just("Fixture.Tree"), "Leaf");
+  const current = new C.Qualified(new Maybe.Just(module), "main");
+  const constructor = new Sem.NeutCtorDef(imported, C.SumType.value,
+    "Tree", "Leaf", ["value0", "value1"]);
+  const lookup = () => () => nothing;
+  const ctx = {
+    currentModule: module, currentLevel: 0, lookupExtern: lookup, effect: false,
+    analyze: () => Analysis.analyze(Sem.hasAnalysisBackendExpr)(Sem.hasSyntaxBackendExpr)(lookup),
+  };
+  const env = {
+    currentModule: module, locals: Map.empty, localsSize: 0, directives: Map.empty,
+    evalExternRef: () => () => nothing,
+    evalExternSpine: () => name => spine => name === imported && spine.length === 0
+      ? new Maybe.Just(constructor) : nothing,
+  };
+  const build = Sem.build(ctx);
+  const optimize = expr => Sem.optimize(false)(ctx)(env)(current)(20)(expr).value1;
+  const quoted = optimize(build(new S.Var(imported)));
+  assert.deepStrictEqual(quoted.value1, new S.Var(imported));
+
+  const saturated = optimize(build(new S.App(quoted, [
+    build(new S.Lit(new C.LitString("label"))), build(new S.Lit(new C.LitInt(42))),
+  ])));
+  assert.ok(saturated.value1 instanceof S.CtorSaturated);
+  assert.deepStrictEqual(saturated.value1.value0, imported);
+
+  const localDefinition = new S.CtorDef(C.SumType.value, "Tree", "Leaf", ["value0", "value1"]);
+  assert.deepStrictEqual(optimize(build(localDefinition)).value1, localDefinition);
+});
+
+test("inlined constructor definitions are evaluated in their defining module", () => {
+  const { env, evaluate } = extern(new S.CtorDef(C.SumType.value,
+    "Tree", "Leaf", ["value0", "value1"]));
+  env.currentModule = "Fixture.Consumer";
+  const args = [new Sem.NeutLit(new C.LitString("label")), new Sem.NeutLit(new C.LitInt(42))];
+  const result = evaluate([new Sem.ExternApp(args)]);
+  assert.ok(result instanceof Maybe.Just);
+  assert.ok(result.value0 instanceof Sem.NeutData);
+  assert.deepStrictEqual(result.value0.value0,
+    new C.Qualified(new Maybe.Just("Fixture"), "Leaf"));
 });
 
 console.log(`TypeApp scope regression tests: ${passed} passed, ${failed} failed (${output})`);

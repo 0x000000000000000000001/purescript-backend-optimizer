@@ -160,3 +160,153 @@ test("a recursive specialization removes the static dictionary from its own call
   assert.equal(values.length, params.length, "the recursive call must not retain the removed dictionary");
   assert.equal(values[0].value1.value1, "value");
 });
+
+test("partial specializations retain dynamic constraints on bindings and call heads", () => {
+  const typedAnn = type => ({ ...ann, type: new Maybe.Just(type) });
+  const int = C.Int.value;
+  const a = new C.TypeVar("a");
+  const callback = type => new C.Func([type], type);
+  const dictType = type => new C.ADT("Fixture.Class", ["Fixture", "Class"], [type]);
+  const constrained = type => new C.ConstrainedType([
+    new Tuple.Tuple(["Fixture", "Class"], [type]),
+  ], new C.Func([callback(type), type], type));
+  const generic = new C.ForAll(["a"], constrained(a));
+  const variable = (name, type, isLocal = false) => new C.ExprVar(typedAnn(type),
+    new C.Qualified(isLocal ? Maybe.Nothing.value : new Maybe.Just("Fixture"), name));
+  const partial = new C.ExprApp(typedAnn(callback(int)),
+    new C.ExprApp(typedAnn(new C.Func([callback(int), int], int)),
+      new C.ExprTypeApp(typedAnn(constrained(int)), variable("keepCallback", generic), int),
+      variable("dictionary", dictType(int), true)), variable("identity", callback(int)));
+  const bindings = [
+    new C.Binding(typedAnn(generic), "keepCallback",
+      new C.ExprAbs(typedAnn(constrained(a)), "dictionary",
+        new C.ExprAbs(typedAnn(new C.Func([callback(a), a], a)), "callback",
+          variable("callback", callback(a), true)))),
+    new C.Binding(typedAnn(callback(int)), "identity",
+      new C.ExprAbs(typedAnn(callback(int)), "seed", variable("seed", int, true))),
+    new C.Binding(typedAnn(new C.Func([dictType(int)], callback(int))), "partial",
+      new C.ExprAbs(typedAnn(new C.Func([dictType(int)], callback(int))), "dictionary", partial)),
+  ];
+  const module = { name: "Fixture", decls: bindings.map(binding => new C.NonRec(binding)) };
+  const insert = Map.insert(Ord.ordString);
+  const globals = bindings.reduce((map, binding) => insert(`Fixture.${binding.value1}`)(binding)(map), Map.empty);
+  const instances = M.collectInstantiations(globals)(Map.empty)(module);
+  const rewritten = M.monomorphize(globals)(instances)(module);
+  const resultBindings = rewritten.decls.flatMap(bind => bind instanceof C.NonRec ? [bind.value0] : bind.value0);
+  const specialization = resultBindings.find(binding => binding.value1.startsWith("keepCallback__"));
+  assert.ok(specialization);
+  assert.deepEqual(specialization.value0.type, new Maybe.Just(constrained(int)),
+    "the remaining dynamic dictionary must stay in the specialized binding type");
+  const result = resultBindings.find(binding => binding.value1 === "partial");
+  const saturated = new C.ExprApp(typedAnn(int), result.value2.value2, variable("seed", int, true));
+  const spine = M.collectSpine(saturated);
+  assert.equal(spine.f_var.value1.value1, specialization.value1);
+  assert.deepEqual(spine.f_var.value0.type, new Maybe.Just(constrained(int)),
+    "the call head must expose the same dynamic dictionary as its declaration");
+  const args = spine.spine.filter(arg => arg instanceof M.SpineApp).map(arg => arg.value0);
+  assert.deepEqual(args.map(arg => arg.value1.value1), ["dictionary", "identity", "seed"]);
+});
+
+test("a local recursive specialization keeps the original function in callback scope", () => {
+  const typedAnn = type => ({ ...ann, type: new Maybe.Just(type) });
+  const a = new C.TypeVar("a");
+  const int = C.Int.value;
+  const fn = type => new C.Func([type], type);
+  const generic = new C.ForAll(["a"], fn(a));
+  const variable = (name, type, module = Maybe.Nothing.value) =>
+    new C.ExprVar(typedAnn(type), new C.Qualified(module, name));
+  const app = (callee, value, type) => new C.ExprApp(typedAnn(type), callee, value);
+  const passType = new C.ForAll(["a"], new C.Func([fn(a), a], a));
+  const recursive = new C.Binding(typedAnn(generic), "go",
+    new C.ExprAbs(typedAnn(fn(a)), "x", app(app(
+      variable("pass", passType, new Maybe.Just("Fixture")),
+      variable("go", generic), fn(a)), variable("x", a), a)));
+  const body = new C.ExprLet(typedAnn(int), [new C.Rec([recursive])], app(
+    new C.ExprTypeApp(typedAnn(fn(int)), variable("go", generic), int),
+    variable("value", int), int));
+  const main = new C.Binding(typedAnn(fn(int)), "main",
+    new C.ExprAbs(typedAnn(fn(int)), "value", body));
+  const module = { name: "Fixture", decls: [new C.NonRec(main)] };
+  const rewritten = M.monomorphize(Map.empty)(Map.empty)(module);
+  const rewrittenMain = rewritten.decls[0].value0.value2;
+  const groups = rewrittenMain.value2.value1;
+  assert.ok(groups.some(group => group.value0.some(binding => binding.value1.startsWith("go__"))),
+    "the fixture must exercise an injected local specialization");
+
+  const globals = { pass: callback => value => {
+    assert.equal(typeof callback, "function");
+    return value;
+  } };
+  const evaluateScoped = (expr, locals = {}) => {
+    if (expr instanceof C.ExprVar) {
+      const scope = expr.value1.value0 instanceof Maybe.Just ? globals : locals;
+      assert.ok(Object.hasOwn(scope, expr.value1.value1), `Unbound name: ${expr.value1.value1}`);
+      return scope[expr.value1.value1];
+    }
+    if (expr instanceof C.ExprAbs) {
+      return value => evaluateScoped(expr.value2, { ...locals, [expr.value1]: value });
+    }
+    if (expr instanceof C.ExprApp) return evaluateScoped(expr.value1, locals)(evaluateScoped(expr.value2, locals));
+    if (expr instanceof C.ExprTypeApp) return evaluateScoped(expr.value1, locals);
+    if (expr instanceof C.ExprLet) {
+      let scope = { ...locals };
+      for (const group of expr.value1) {
+        const bindings = group instanceof C.Rec ? group.value0 : [group.value0];
+        const groupScope = { ...scope };
+        if (group instanceof C.Rec) for (const binding of bindings) groupScope[binding.value1] = undefined;
+        for (const binding of bindings) groupScope[binding.value1] = evaluateScoped(binding.value2, groupScope);
+        scope = groupScope;
+      }
+      return evaluateScoped(expr.value2, scope);
+    }
+    throw new Error(`Unexpected fixture expression: ${expr.constructor.name}`);
+  };
+  assert.equal(evaluateScoped(rewrittenMain)(42), 42);
+});
+
+test("local specialization preserves each application and TypeApp result annotation", () => {
+  const typedAnn = type => ({ ...ann, type: new Maybe.Just(type) });
+  const int = C.Int.value;
+  const string = C.String.value;
+  const a = new C.TypeVar("a");
+  const b = new C.TypeVar("b");
+  const fn = (args, result) => new C.Func(args, result);
+  const variable = (name, type, module = Maybe.Nothing.value) =>
+    new C.ExprVar(typedAnn(type), new C.Qualified(module, name));
+  const app = (callee, value, type) => new C.ExprApp(typedAnn(type), callee, value);
+  const genericLocal = new C.ForAll(["a"], fn([a, string], a));
+  const localBinding = new C.Binding(typedAnn(genericLocal), "choose",
+    new C.ExprAbs(typedAnn(fn([a, string], a)), "first",
+      new C.ExprAbs(typedAnn(fn([string], a)), "second", variable("first", a))));
+  const localCall = app(app(
+    new C.ExprTypeApp(typedAnn(fn([int, string], int)), variable("choose", genericLocal), int),
+    variable("value", int), fn([string], int)), variable("text", string), int);
+  const externalType = new C.ForAll(["a", "b"], fn([a, b], int));
+  const afterFirstType = new C.ForAll(["b"], fn([int, b], int));
+  const externalHead = new C.ExprTypeApp(typedAnn(fn([int, string], int)),
+    new C.ExprTypeApp(typedAnn(afterFirstType),
+      variable("external", externalType, new Maybe.Just("Foreign")), int), string);
+  const body = new C.ExprLet(typedAnn(int), [new C.Rec([localBinding])],
+    app(app(externalHead, localCall, fn([string], int)), variable("text", string), int));
+  const mainType = fn([int, string], int);
+  const main = new C.Binding(typedAnn(mainType), "main",
+    new C.ExprAbs(typedAnn(mainType), "value",
+      new C.ExprAbs(typedAnn(fn([string], int)), "text", body)));
+  const rewritten = M.monomorphize(Map.empty)(Map.empty)({
+    name: "Fixture", decls: [new C.NonRec(main)],
+  });
+  const rewrittenBody = rewritten.decls[0].value0.value2.value2.value2;
+  assert.ok(rewrittenBody.value1.some(group => group.value0.some(binding =>
+    binding.value1.startsWith("choose__"))), "the local specialization path must run");
+  const full = rewrittenBody.value2;
+  const partial = full.value1;
+  assert.deepEqual(partial.value0.type, new Maybe.Just(fn([string], int)),
+    "the external prefix still awaits its second argument");
+  assert.deepEqual(partial.value1.value0.type, new Maybe.Just(fn([int, string], int)));
+  assert.deepEqual(partial.value1.value1.value0.type, new Maybe.Just(afterFirstType),
+    "the first TypeApp retains its remaining quantifier");
+  const specializedCall = partial.value2;
+  assert.deepEqual(specializedCall.value1.value0.type, new Maybe.Just(fn([string], int)),
+    "the specialized local prefix still awaits its second argument");
+  assert.match(M.collectSpine(specializedCall).f_var.value1.value1, /^choose__/);
+});

@@ -127,6 +127,14 @@ function deserialize(buffer) {
 
 // In-memory cache to avoid re-reading the same file
 const ramCache = new Map();
+let currentBuildModules = null;
+
+// Specialized implementations are valid only for the build that emitted them.
+// Forward references must not load a previous build's specialization names.
+export const beginPurmetaBuild = function() {
+  ramCache.clear();
+  currentBuildModules = new Set();
+};
 
 export const writePurmetaSyncImpl = function(moduleName) {
   return function(data) {
@@ -138,6 +146,7 @@ export const writePurmetaSyncImpl = function(moduleName) {
       const filePath = path.join(dir, moduleName + '.purmeta');
       const buffer = serialize(data);
       fs.writeFileSync(filePath, buffer);
+      if (currentBuildModules !== null) currentBuildModules.add(moduleName);
       
       // Store in LRU / RAM temporarily just in case
       ramCache.set(moduleName, data);
@@ -149,6 +158,9 @@ export const readPurmetaSyncImpl = function(moduleName) {
   return function(just) {
     return function(nothing) {
       return function() {
+        if (currentBuildModules !== null && !currentBuildModules.has(moduleName)) {
+          return nothing;
+        }
         if (ramCache.has(moduleName)) {
           return just(ramCache.get(moduleName));
         }

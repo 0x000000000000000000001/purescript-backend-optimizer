@@ -108,7 +108,7 @@ decodeTypeTableST typeTableJson = do
         Right _ -> pure $ Just (Left (TypeMismatch "ExprType"))
         Left _ -> do
           case decodeJObject j of
-            Left err -> pure $ Just (Left (TypeMismatch "ExprType"))
+            Left _ -> pure $ Just (Left (TypeMismatch "ExprType"))
             Right o -> do
               let typRes = getField decodeString o "type"
               case typRes of

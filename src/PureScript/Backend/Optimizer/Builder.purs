@@ -25,7 +25,7 @@ import PureScript.Backend.Optimizer.CoreFn (Ann, Ident, Module(..), Qualified)
 import PureScript.Backend.Optimizer.Semantics (BackendExpr, Ctx, ExternImpl, InlineDirectiveMap)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
 import PureScript.Backend.Optimizer.Syntax (BackendSyntax)
-import PureScript.Backend.Optimizer.Cache (writePurmetaSync, clearPurmetaCache)
+import PureScript.Backend.Optimizer.Cache (writePurmetaSync, clearPurmetaCache, beginPurmetaBuild)
 import Effect.Unsafe (unsafePerformEffect)
 
 type BuildEnv =
@@ -48,8 +48,11 @@ type BuildOptions m =
 -- | Builds modules given a _sorted_ list of modules.
 -- | See `PureScript.Backend.Optimizer.CoreFn.Sort.sortModules`.
 buildModules :: forall m. Monad m => BuildOptions m -> List (Module Ann) -> m Unit
-buildModules options coreFnModules =
-  void $ go { directives: options.directives, implementations: Map.empty, moduleIndex: 0, exports: Map.empty } coreFnModules
+buildModules options coreFnModules = do
+  _ <- pure unit
+  unsafePerformEffect do
+    beginPurmetaBuild
+    pure $ void $ go { directives: options.directives, implementations: Map.empty, moduleIndex: 0, exports: Map.empty } coreFnModules
   where
   moduleCount = List.length coreFnModules
   
@@ -67,6 +70,7 @@ buildModules options coreFnModules =
       Just cachedMod -> do
         let
           newDirectives = foldrWithIndex Map.insert directives cachedMod.directives
+          _ = unsafePerformEffect (writePurmetaSync name cachedMod.implementations)
           _ = unsafePerformEffect clearPurmetaCache
           
         go 

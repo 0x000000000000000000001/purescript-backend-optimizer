@@ -35,6 +35,7 @@ import Data.Set as Set
 import Data.String.Pattern (Pattern(..))
 import Data.Tuple (Tuple(..))
 import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Module(..), ModuleName(..), Prop(..), Qualified(..))
+import PureScript.Backend.Optimizer.CoreFn.BindingGroups (sortBindingGroups)
 import PureScript.Backend.Optimizer.FfiSupport (hashString)
 import PureScript.Backend.Optimizer.Substitute (substituteExprType, unify)
 
@@ -252,9 +253,9 @@ collectExpr globalAstMap modName acc expr = case expr of
                  numParams = Array.length paramTypes
                  appliedArgs = Array.take numParams args'
                  remainingArgs = Array.drop numParams args'
-                 s1 = foldl (\acc (Tuple paramType arg) ->
-                        let actualType = case getExprAnn arg of Ann a -> fromMaybe Any a.type
-                        in unify paramType actualType acc
+                 s1 = foldl (\currentSubst (Tuple paramType appliedArg) ->
+                        let actualType = case getExprAnn appliedArg of Ann a -> fromMaybe Any a.type
+                        in unify paramType actualType currentSubst
                       ) s (Array.zip paramTypes appliedArgs)
                in
                  unifySpine ret remainingArgs s1
@@ -325,9 +326,9 @@ collectLocalExpr targets recs acc expr = case expr of
                 numParams = Array.length paramTypes
                 appliedArgs = Array.take numParams args'
                 remainingArgs = Array.drop numParams args'
-                s1 = foldl (\acc (Tuple paramType arg) ->
-                       let actualType = case getExprAnn arg of Ann a -> fromMaybe Any a.type
-                       in unify paramType actualType acc
+                s1 = foldl (\currentSubst (Tuple paramType appliedArg) ->
+                       let actualType = case getExprAnn appliedArg of Ann a -> fromMaybe Any a.type
+                       in unify paramType actualType currentSubst
                      ) s (Array.zip paramTypes appliedArgs)
               in
                 unifySpine ret remainingArgs s1
@@ -345,10 +346,15 @@ collectLocalExpr targets recs acc expr = case expr of
                 if (hasTypeVariables genericType) && (hasTypeVariables instType && instType == stripForAlls genericType) then
                   acc
                 else
-                  Map.insertWith (\old new -> { genericType: new.genericType, insts: old.insts <> new.insts }) id { genericType, insts: [finalSubst] } acc
+                  Map.insertWith (\old new -> { genericType: new.genericType, insts: Array.nub (old.insts <> new.insts) }) id { genericType, insts: [finalSubst] } acc
+            else if genericType == Any then
+              -- Compiler-generated pattern continuations have no type annotation.
+              -- An empty substitution cannot specialize or restore their type;
+              -- cloning them at every call duplicates all nested continuations.
+              acc
             else
               -- Even if finalSubst is empty, we must record the genericType so it can be restored!
-              Map.insertWith (\old new -> { genericType: new.genericType, insts: old.insts <> new.insts }) id { genericType, insts: [Map.empty] } acc
+              Map.insertWith (\old new -> { genericType: new.genericType, insts: Array.nub (old.insts <> new.insts) }) id { genericType, insts: [Map.empty] } acc
         _ -> collectLocalExpr targets recs acc f_var
       
       acc2 = foldl (collectLocalExpr targets recs) acc1 args
@@ -562,16 +568,16 @@ substituteVars subst = go
     ExprAccessor ann e prop -> ExprAccessor ann (go e) prop
     ExprUpdate ann e props -> ExprUpdate ann (go e) (map (\(Prop p v) -> Prop p (go v)) props)
 
-  goGuard subst (Unconditional e) = Unconditional (substituteVars subst e)
-  goGuard subst (Guarded guards) = Guarded (map (\(Guard e1 e2) -> Guard (substituteVars subst e1) (substituteVars subst e2)) guards)
+  goGuard guardSubst (Unconditional e) = Unconditional (substituteVars guardSubst e)
+  goGuard guardSubst (Guarded guards) = Guarded (map (\(Guard e1 e2) -> Guard (substituteVars guardSubst e1) (substituteVars guardSubst e2)) guards)
 
 applyStaticArgs :: Array (Expr Ann) -> Array (Expr Ann) -> Expr Ann -> Expr Ann
-applyStaticArgs dictArgs normalArgs body =
+applyStaticArgs dictArgs normalArgs functionBody =
   let
     -- Traverse every supplied argument once so retained dynamic dictionary
     -- binders are not consumed again as normal parameters.
     args = map (Tuple "dict") dictArgs <> map (Tuple "norm") normalArgs
-    result = goCollect args body
+    result = goCollect args functionBody
   in
     substituteVars result.subst result.expr
   where
@@ -697,7 +703,9 @@ monomorphize globalAstMap instMap (Module m) =
                                     Nothing -> specializedExpr
 
                             newName = Ident (name <> "__" <> hashString specKey)
-                            newBinding = Rec [ Binding (mapAnn (\t -> stripTypeVariables (substFn t)) ann) newName etaExpandedExpr ]
+                            -- Dynamic dictionaries still have runtime parameters.
+                            -- Keep their constraints after removing only static ones.
+                            newBinding = Rec [ Binding (mapAnn substFn ann) newName etaExpandedExpr ]
                           in
                             Just newBinding
                         else Nothing
@@ -716,7 +724,7 @@ monomorphize globalAstMap instMap (Module m) =
           Rec bindings -> Array.concatMap (\(Binding _ (Ident name) _) -> getInjectedBindsFor (modNameStr <> "." <> name)) bindings
       in originalBinds <> injectedBinds
 
-    finalDecls = Array.concatMap processDecl m.decls
+    finalDecls = sortBindingGroups m.name (Array.concatMap processDecl m.decls)
     newIdents = getBindIdents finalDecls
   in
     Module (m { decls = finalDecls, exports = newIdents })
@@ -775,7 +783,7 @@ collectFreeVarsAlt (CaseAlternative binders cg) =
     Set.difference used bound
 
 monomorphizeExpr :: String -> InstantiationMap -> Map Ident (Expr Ann) -> Expr Ann -> Expr Ann
-monomorphizeExpr modName instMap localDicts expr = case expr of
+monomorphizeExpr modName instMap localDicts rootExpr = case rootExpr of
   ExprVar ann ident@(Qualified mbMod (Ident name)) ->
     case mbMod of
       Nothing -> case Map.lookup (Ident name) localDicts of
@@ -820,19 +828,21 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
                in case Map.lookup qualName instMap of
                     Just typeMap ->
                       case Map.lookup specKey typeMap of
-                        Just info -> 
+                        Just _ ->
                           let
                              stripForAlls2 = case _ of
                                ForAll _ b -> stripForAlls2 b
                                x -> x
-                             substFn t = stripStaticConstraints dictArgs (substituteExprType info.subst (stripForAlls2 t))
-                             newAnn = varAnn { type = map (\t -> stripTypeVariables (substFn t)) varAnn.type }
+                             -- varAnn binds the call site's type variables; info.subst
+                             -- belongs to the definition and may use different names.
+                             substFn t = stripStaticConstraints dictArgs (substituteExprType subst (stripForAlls2 t))
+                             newAnn = varAnn { type = map substFn varAnn.type }
                              definerMod = case String.split (Pattern ".") qualName of
                                parts -> String.joinWith "." (fromMaybe [] (Array.init parts))
                              resolvedMod = Just (ModuleName definerMod)
                              specializedVar = ExprVar (Ann newAnn) (Qualified resolvedMod specializedName)
                           in
-                             rebuildSpine (Ann ann) specializedVar (map SpineApp filteredArgs)
+                             rebuildSpecializedCall (Ann ann) specializedVar filteredArgs
                         Nothing -> transformedExpr
                     Nothing -> transformedExpr
         _ -> transformedExpr
@@ -856,9 +866,9 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
         
       localInstMap = collectLocalExpr boundIds Set.empty Map.empty (ExprLet ann binds e)
       
-      fastPath = ExprLet ann (map (monomorphizeBindLocal modName instMap newLocalDicts) binds) (monomorphizeExpr modName instMap newLocalDicts e)
     in
-      if Map.isEmpty localInstMap then fastPath
+      if Map.isEmpty localInstMap then
+        ExprLet ann (map (monomorphizeBindLocal modName instMap newLocalDicts) binds) (monomorphizeExpr modName instMap newLocalDicts e)
       else
         let
           injectType ty expr =
@@ -930,9 +940,9 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
                       Nothing -> accRec
                   ) { newBinds: [], polyMap: acc.polyMap } bs
                 in
-                  if Array.length bs == 1 then
-                    { binds: acc.binds <> map (\b -> Rec [b]) specs.newBinds <> [Rec bs], polyMap: specs.polyMap }
-                  else if Array.length specs.newBinds > 0 then
+                  -- Specialized bodies can still pass the original recursive
+                  -- function as a value, so both must share the same scope.
+                  if Array.length specs.newBinds > 0 then
                     { binds: Array.snoc acc.binds (Rec (specs.newBinds <> bs)), polyMap: specs.polyMap }
                   else
                     { binds: Array.snoc acc.binds (Rec bs), polyMap: acc.polyMap }
@@ -941,11 +951,15 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
           polys = processBinds.polyMap
           
           go expr = case expr of
-            ExprApp annApp _ _ ->
+            ExprApp _ _ _ ->
               let
-                spineRec = collectSpine expr
+                spineRec = collectAnnotatedSpine expr
                 f_var = spineRec.f_var
-                spine = spineRec.spine
+                spine = map (\(Tuple _ arg) -> arg) spineRec.spine
+                transformedSpine = map (\(Tuple appAnn arg) -> Tuple appAnn case arg of
+                  SpineApp e' -> SpineApp (go e')
+                  SpineTypeApp t -> SpineTypeApp t) spineRec.spine
+                fallback = foldl applyAnnotatedSpine (go f_var) transformedSpine
               in
                 case f_var of
                   ExprVar varAnn (Qualified Nothing id) | Just insts <- Map.lookup id polys ->
@@ -967,9 +981,9 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
                           numParams = Array.length paramTypes
                           appliedArgs = Array.take numParams args'
                           remainingArgs = Array.drop numParams args'
-                          s1 = foldl (\acc (Tuple paramType arg) ->
-                                 let actualType = case getExprAnn arg of Ann a -> fromMaybe Any a.type
-                                 in unify paramType actualType acc
+                          s1 = foldl (\currentSubst (Tuple paramType appliedArg) ->
+                                 let actualType = case getExprAnn appliedArg of Ann a -> fromMaybe Any a.type
+                                 in unify paramType actualType currentSubst
                                ) s (Array.zip paramTypes appliedArgs)
                         in
                           unifySpine ret remainingArgs s1
@@ -985,20 +999,13 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
                             Just mangledId ->
                               let
                                 newVar = ExprVar (mapAnn (\_ -> defaultToAny instType) varAnn) (Qualified Nothing mangledId)
+                                valueSpine = Array.filter (\(Tuple _ arg) -> case arg of
+                                  SpineApp _ -> true
+                                  SpineTypeApp _ -> false) transformedSpine
                               in
-                                foldl (\acc a -> ExprApp annApp acc (go a)) newVar args
-                            Nothing ->
-                              let
-                                app1 = foldl (\acc t -> ExprTypeApp annApp acc t) (go f_var) typeArgs
-                              in
-                                foldl (\acc a -> ExprApp annApp acc (go a)) app1 args
-                  _ -> 
-                     let
-                       typeArgs = getSpineTypeArgs spine
-                       args = getSpineArgs spine
-                       app1 = foldl (\acc t -> ExprTypeApp annApp acc t) (go f_var) typeArgs
-                     in
-                       foldl (\acc a -> ExprApp annApp acc (go a)) app1 args
+                                foldl applyAnnotatedSpine newVar valueSpine
+                            Nothing -> fallback
+                  _ -> fallback
             ExprLit annLit lit -> ExprLit annLit (map go lit)
             ExprAbs annAbs id e' -> ExprAbs annAbs id (go e')
             ExprLet annLet binds' e' -> ExprLet annLet (map goBind binds') (go e')
@@ -1024,7 +1031,7 @@ monomorphizeExpr modName instMap localDicts expr = case expr of
   ExprConstructor ann t c ids -> ExprConstructor ann t c ids
   ExprAccessor ann e prop -> ExprAccessor ann (monomorphizeExpr modName instMap localDicts e) prop
   ExprUpdate ann e props -> ExprUpdate ann (monomorphizeExpr modName instMap localDicts e) (map (monomorphizeProp modName instMap localDicts) props)
-  _ -> expr
+  _ -> rootExpr
   where
   -- Keep the original head boundary and each application's TAST annotation.
   collectAnnotatedSpine = go []
@@ -1064,11 +1071,24 @@ monomorphizeGuard modName instMap localDicts (Guard e1 e2) = Guard (monomorphize
 monomorphizeProp :: String -> InstantiationMap -> Map Ident (Expr Ann) -> Prop (Expr Ann) -> Prop (Expr Ann)
 monomorphizeProp modName instMap localDicts (Prop p e) = Prop p (monomorphizeExpr modName instMap localDicts e)
 
-rebuildSpine :: Ann -> Expr Ann -> Array SpineArg -> Expr Ann
-rebuildSpine finalAnn f spine = Array.foldl applySpine f spine
+rebuildSpecializedCall :: Ann -> Expr Ann -> Array (Expr Ann) -> Expr Ann
+rebuildSpecializedCall (Ann sourceAnn) f args = Array.foldl applyArgument f args
   where
-  applySpine acc (SpineApp arg) = ExprApp finalAnn acc arg
-  applySpine acc (SpineTypeApp t) = ExprTypeApp finalAnn acc t
+  -- Each application consumes one remaining runtime parameter. In particular,
+  -- a partial application must not inherit the saturated call's result type.
+  applyArgument acc arg =
+    let resultType = inferExprType acc >>= consumeArgument
+    in ExprApp (Ann (sourceAnn { type = resultType })) acc arg
+
+  consumeArgument = case _ of
+    ForAll _ body -> consumeArgument body
+    ConstrainedType constraints body -> case Array.uncons constraints of
+      Just { tail } -> Just (if Array.null tail then body else ConstrainedType tail body)
+      Nothing -> consumeArgument body
+    Func params result -> case Array.uncons params of
+      Just { tail } -> Just (if Array.null tail then result else Func tail result)
+      Nothing -> consumeArgument result
+    _ -> Nothing
 
 hasTypeVariables :: ExprType -> Boolean
 hasTypeVariables (TypeVar v) = String.take 1 v == String.toLower (String.take 1 v) && v /= "gopurs_runtime.Value"
