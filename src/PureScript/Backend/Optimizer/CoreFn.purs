@@ -97,6 +97,8 @@ newtype Ann = Ann
   { span :: SourceSpan
   , meta :: Maybe Meta
   , type :: Maybe ExprType
+  , usageCount :: Int
+  , escapes :: Boolean
   }
 
 -- | Represents the structural PureScript type of an expression.

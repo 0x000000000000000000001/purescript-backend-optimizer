@@ -154,7 +154,12 @@ decodeAnn typeTable _path json = do
                 Just id -> Array.index typeTable id
                 Nothing -> Nothing
                 
-  pure $ Ann { span: emptySpan, meta, type: type_ }
+  usageCountMb <- getFieldOptional' decodeInt obj "usageCount"
+  let usageCount = fromMaybe 0 usageCountMb
+  escapesMb <- getFieldOptional' decodeBoolean obj "escapes"
+  let escapes = fromMaybe true escapesMb
+
+  pure $ Ann { span: emptySpan, meta, type: type_, usageCount, escapes }
 
 decodeImport :: forall a. (Json -> JsonDecode a) -> Json -> JsonDecode (Import a)
 decodeImport decodeAnn' json = do
