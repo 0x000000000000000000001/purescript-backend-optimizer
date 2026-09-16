@@ -73,7 +73,7 @@ import Data.Tuple (Tuple(..), fst, snd)
 import Partial.Unsafe (unsafeCrashWith)
 import PureScript.Backend.Optimizer.Analysis (class HasAnalysis, BackendAnalysis(..), Capture(..), Complexity(..), ResultTerm(..), Usage(..), analysisOf, bound, bump, complex, updated, withRewrite)
 import PureScript.Backend.Optimizer.CoreFn (ConstructorType, ExprType(..), Ident(..), Literal(..), ModuleName, Prop(..), ProperName, Qualified(..), findProp, propKey, propValue)
-import PureScript.Backend.Optimizer.Syntax (class HasSyntax, BackendAccessor(..), BackendEffect, BackendOperator(..), BackendOperator1(..), BackendOperator2(..), BackendOperatorNum(..), BackendOperatorOrd(..), BackendSyntax(Var, Local, Lit, App, Abs, UncurriedApp, UncurriedAbs, UncurriedEffectApp, UncurriedEffectAbs, Accessor, Update, CtorSaturated, CtorDef, LetRec, Let, EffectBind, EffectPure, EffectDefer, Branch, PrimOp, PrimEffect, PrimUndefined, Fail, Typed, UsageMeta), Level(..), Pair(..), syntaxOf)
+import PureScript.Backend.Optimizer.Syntax (class HasSyntax, BackendAccessor(..), BackendEffect, BackendOperator(..), BackendOperator1(..), BackendOperator2(..), BackendOperatorNum(..), BackendOperatorOrd(..), BackendSyntax(Var, Local, Lit, App, Abs, UncurriedApp, UncurriedAbs, UncurriedEffectApp, UncurriedEffectAbs, Accessor, Update, CtorSaturated, CtorDef, LetRec, Let, EffectBind, EffectPure, EffectDefer, Branch, PrimOp, PrimEffect, PrimUndefined, Fail, Typed), Level(..), Pair(..), syntaxOf)
 import PureScript.Backend.Optimizer.Syntax as Syn
 import PureScript.Backend.Optimizer.TypeSubstitution as TypeSubstitution
 import PureScript.Backend.Optimizer.Utils (foldl1Array, foldr1Array)
@@ -93,7 +93,6 @@ data MkFn a
 data BackendSemantics
   = SemTyped ExprType BackendSemantics
   | SemTypeApp ExprType BackendSemantics
-  | SemUsageMeta { usageCount :: Int, escapes :: Boolean } BackendSemantics
   | SemRef EvalRef (Array ExternSpine) (Lazy BackendSemantics)
   | SemLam (Maybe Ident) (BackendSemantics -> BackendSemantics)
   | SemMkFn (MkFn BackendSemantics)
@@ -386,8 +385,6 @@ instance Eval f => Eval (BackendSyntax f) where
       guardFailOver snd (map (eval env) <$> fields) $ NeutData qual ct ty tag
     Typed t a ->
       SemTyped t (eval env a)
-    UsageMeta meta a ->
-      SemUsageMeta meta (eval env a)
 
 instance Eval BackendExpr where
   eval = go
@@ -1526,8 +1523,6 @@ quote = go
   go ctx@(Ctx { currentModule }) = case _ of
     SemTyped ty a ->
       build ctx $ Typed ty (go ctx a)
-    SemUsageMeta meta a ->
-      build ctx $ UsageMeta meta (go ctx a)
     SemTypeApp ty a ->
       build ctx $ Syn.TypeApp (go ctx a) ty
     -- Block constructors
@@ -2275,20 +2270,17 @@ guardFailOver f as k =
 unwrapSemTyped :: BackendSemantics -> BackendSemantics
 unwrapSemTyped = case _ of
   SemTyped _ a -> unwrapSemTyped a
-  SemUsageMeta _ a -> unwrapSemTyped a
   a -> a
 
 unwrapBackendExpr :: BackendExpr -> BackendExpr
 unwrapBackendExpr expr@(ExprSyntax _ syn) = case syn of
   Typed _ inner -> unwrapBackendExpr inner
-  UsageMeta _ inner -> unwrapBackendExpr inner
   _ -> expr
 unwrapBackendExpr expr = expr
 
 untypedExpr :: BackendExpr -> BackendExpr
 untypedExpr = case _ of
   ExprSyntax _ (Typed _ a) -> untypedExpr a
-  ExprSyntax _ (UsageMeta _ a) -> untypedExpr a
   a -> a
 
 

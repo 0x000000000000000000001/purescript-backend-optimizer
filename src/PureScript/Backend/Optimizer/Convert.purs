@@ -79,11 +79,11 @@ import Effect.Unsafe (unsafePerformEffect)
 import Partial.Unsafe (unsafeCrashWith)
 import PureScript.Backend.Optimizer.Analysis (BackendAnalysis, analysisOf, analyze, analyzeEffectBlock)
 import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), ClassDecl, Comment, ConstructorType(..), DataDecl, Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Meta(..), Module(..), ModuleName(..), ProperName(..), Qualified(..), ReExport, binderAnn, exprAnn, findProp, propKey, propValue, qualifiedModuleName, unQualified)
-import PureScript.Backend.Optimizer.Directives (DirectiveHeaderResult, parseDirectiveHeader)
 import PureScript.Backend.Optimizer.CoreFn.Usage (invalidateSourceUsageModule)
+import PureScript.Backend.Optimizer.Directives (DirectiveHeaderResult, parseDirectiveHeader)
 import PureScript.Backend.Optimizer.Semantics (BackendExpr(..), BackendSemantics, Ctx(..), DataTypeMeta, Env(..), EvalRef(..), ExternImpl(..), ExternSpine(..), InlineAccessor(..), InlineDirective(..), InlineDirectiveMap, NeutralExpr(..), build, evalExternFromImpl, evalExternRefFromImpl, freeze, optimize, unwrapSemTyped)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
-import PureScript.Backend.Optimizer.Syntax (BackendAccessor(..), BackendOperator(..), BackendOperator1(..), BackendOperator2(..), BackendOperatorOrd(..), BackendSyntax(Var, Local, Lit, App, Abs, UncurriedApp, UncurriedAbs, Accessor, Update, CtorDef, LetRec, Let, Branch, PrimOp, PrimUndefined, Fail, Typed, UsageMeta), Level(..), Pair(..))
+import PureScript.Backend.Optimizer.Syntax (BackendAccessor(..), BackendOperator(..), BackendOperator1(..), BackendOperator2(..), BackendOperatorOrd(..), BackendSyntax(Var, Local, Lit, App, Abs, UncurriedApp, UncurriedAbs, Accessor, Update, CtorDef, LetRec, Let, Branch, PrimOp, PrimUndefined, Fail, Typed), Level(..), Pair(..))
 import PureScript.Backend.Optimizer.Syntax as Syn
 import PureScript.Backend.Optimizer.Utils (foldl1Array)
 import PureScript.Backend.Optimizer.Cache (readPurmetaSync)
@@ -131,9 +131,6 @@ type ConvertM = Function ConvertEnv
 toBackendModule :: Module Ann -> ConvertM (Tuple OptimizationSteps BackendModule)
 toBackendModule source = toBackendModuleWithoutSourceUsage (invalidateSourceUsageModule source)
 
--- Pattern compilation and inlining introduce/copy bindings. Source IDs and
--- version-one usage facts are intentionally absent from BackendSyntax. A backend requiring
--- last-use or sharing information must recompute it after its final rewrites.
 toBackendModuleWithoutSourceUsage :: Module Ann -> ConvertM (Tuple OptimizationSteps BackendModule)
 toBackendModuleWithoutSourceUsage (Module mod) env = do
   let
@@ -541,21 +538,16 @@ toBackendExpr expr = toBackendExprWithType Nothing expr
 toBackendExprWithType :: Maybe ExprType -> Expr Ann -> ConvertM BackendExpr
 toBackendExprWithType mbTy expr = do
   backendExpr <- go expr
-  let Ann ann = exprAnn expr
   pure
-    let
-      typedExpr = case
-        case annotationType of
+    case
+      case annotationType of
+        Just t -> Just t
+        Nothing -> case mbTy of
           Just t -> Just t
-          Nothing -> case mbTy of
-            Just t -> Just t
-            Nothing -> inferExprType expr
-        of
-        Just t -> ExprSyntax (analysisOf backendExpr) (Typed t backendExpr)
-        Nothing -> backendExpr
-    in
-      if ann.usageCount == 0 && ann.escapes == true then typedExpr
-      else ExprSyntax (analysisOf backendExpr) (UsageMeta { usageCount: ann.usageCount, escapes: ann.escapes } typedExpr)
+          Nothing -> inferExprType expr
+      of
+      Just t -> ExprSyntax (analysisOf backendExpr) (Typed t backendExpr)
+      Nothing -> backendExpr
   where
   -- Synthetic dictionary applications can retain the head's constrained
   -- annotation in TAST. The supplied dictionary consumes exactly one

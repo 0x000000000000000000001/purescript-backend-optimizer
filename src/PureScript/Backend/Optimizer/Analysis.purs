@@ -410,8 +410,6 @@ analyze externAnalysis expr = case expr of
         $ analyzeDefault expr
   Typed _ a ->
     analysisOf a
-  UsageMeta _ a ->
-    analysisOf a
 
 analyzeEffectBlock :: forall a. HasAnalysis a => HasSyntax a => (Qualified Ident -> Maybe String -> Maybe BackendAnalysis) -> BackendSyntax a -> BackendAnalysis
 analyzeEffectBlock externAnalysis expr = case expr of
@@ -455,8 +453,6 @@ analyzeEffectBlock externAnalysis expr = case expr of
       $ complex NonTrivial
       $ analyzeDefault expr
   Typed _ a ->
-    analysisOf a
-  UsageMeta _ a ->
     analysisOf a
   _ ->
     analyze externAnalysis expr

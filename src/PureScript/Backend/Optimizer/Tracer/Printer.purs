@@ -292,8 +292,6 @@ printBackendSyntax = case _ of
     printUncurriedApp false (primOp "" "fail") []
   Typed _ a ->
     a
-  UsageMeta _ a ->
-    a
 
 printBackendRewriteCase :: forall a. BackendRewrite a -> Doc Void
 printBackendRewriteCase = case _ of

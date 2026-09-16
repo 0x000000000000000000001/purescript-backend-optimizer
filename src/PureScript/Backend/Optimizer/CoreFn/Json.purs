@@ -155,19 +155,14 @@ decodeAnn typeTable _path json = do
                 Just id -> Array.index typeTable id
                 Nothing -> Nothing
                 
-  usageCountMb <- getFieldOptional' decodeInt obj "usageCount"
-  let usageCount = fromMaybe 0 usageCountMb
-  escapesMb <- getFieldOptional' decodeBoolean obj "escapes"
-  let escapes = fromMaybe true escapesMb
+  pure $ Ann { span: emptySpan, meta, type: type_, sourceUsage: Nothing }
 
-  pure $ Ann { span: emptySpan, meta, type: type_, usageCount, escapes, sourceUsage: Nothing }
-
--- A standalone annotation has no root contract or module provenance. Only
+-- A standalone annotation has no module provenance. Only
 -- decodeModule can attach usable source facts; the public decodeAnn stays safe.
-decodeAnnWithUsage :: ModuleName -> Boolean -> Array ExprType -> String -> Json -> JsonDecode Ann
-decodeAnnWithUsage moduleName supported typeTable path json = do
+decodeAnnWithUsage :: ModuleName -> Array ExprType -> String -> Json -> JsonDecode Ann
+decodeAnnWithUsage moduleName typeTable path json = do
   Ann ann <- decodeAnn typeTable path json
-  sourceUsage <- if supported then decodeSourceUsage moduleName json else pure Nothing
+  sourceUsage <- decodeSourceUsage moduleName json
   pure $ Ann (ann { sourceUsage = sourceUsage })
 
 decodeSourceUsage :: ModuleName -> Json -> JsonDecode (Maybe SourceUsage)
@@ -215,15 +210,6 @@ decodeVariableUse moduleName json = do
     proof <- decodeBoolean value
     if proof then pure true else Left $ TypeMismatch "lastLocalUse true or null"
 
-supportsUsageV1 :: Object Json -> Boolean
-supportsUsageV1 root = case Object.lookup "usageAnalysis" root of
-  Just json -> case decodeJObject json of
-    Right obj -> case getField decodeInt obj "version", getField decodeString obj "phase" of
-      Right 1, Right "corefn" -> true
-      _, _ -> false
-    Left _ -> false
-  Nothing -> false
-
 decodeImport :: forall a. (Json -> JsonDecode a) -> Json -> JsonDecode (Import a)
 decodeImport decodeAnn' json = do
   obj <- decodeJObject json
@@ -262,7 +248,7 @@ decodeModule :: Json -> JsonDecode (Module Ann)
 decodeModule json = do
   obj <- decodeJObject json
   name <- getField decodeModuleName obj "moduleName"
-  mod <- decodeModule' (decodeAnnWithUsage name (supportsUsageV1 obj)) json
+  mod <- decodeModule' (decodeAnnWithUsage name) json
   validateSourceUsageModule mod
   pure mod
 

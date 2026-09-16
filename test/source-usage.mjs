@@ -28,7 +28,6 @@ const fixture = (name = "Fixture") => ({
   reExports: {}, decls: [{ bindType: "NonRec", identifier: "identity", annotation: ann(),
     expression: lambda("x", 0, variable("x", 0)) }],
   foreign: [], comments: [], typeTable: [],
-  usageAnalysis: { version: 1, phase: "corefn" },
 });
 const decode = json => {
   const result = Json.decodeModule(json);
@@ -49,7 +48,7 @@ const collectUsage = value => {
   ];
 };
 
-test("recognized facts retain their module-local identity and exact local values", () => {
+test("direct annotation facts retain their module-local identity and exact local values", () => {
   const module = decode(fixture());
   assert.deepEqual(binding(module), { binding: { moduleName: "Fixture", bindingId: 0 },
     maxUses: new Maybe.Just(1), hasEscapingUseContext: new Maybe.Just(false) });
@@ -58,24 +57,51 @@ test("recognized facts retain their module-local identity and exact local values
   assert.notDeepEqual(binding(module).binding, binding(decode(fixture("Other"))).binding);
 });
 
-test("a missing or unsupported root contract ignores even malformed source blocks", () => {
-  for (const contract of [undefined, null, { version: 2, phase: "corefn" },
-    { version: 1, phase: "optimized" }]) {
+test("missing or null annotation blocks leave source usage unknown", () => {
+  for (const missing of [true, false]) {
     const json = fixture();
-    json.usageAnalysis = contract;
-    rawExpr(json).annotation.bindingUsage = "unknown future format";
+    if (missing) {
+      delete rawExpr(json).annotation.bindingUsage;
+      delete rawExpr(json).body.annotation.variableUse;
+    } else {
+      rawExpr(json).annotation.bindingUsage = null;
+      rawExpr(json).body.annotation.variableUse = null;
+    }
     const module = decode(json);
     assert.ok(collectUsage(module).every(value => value instanceof Maybe.Nothing));
   }
 });
 
-test("standalone decodeAnn cannot manufacture provenance or infer a contract", () => {
+test("obsolete root metadata cannot activate, disable or bypass annotation decoding", () => {
+  for (const marker of [null, { version: 1, phase: "corefn" },
+    { version: 2, phase: "optimized" }, "obsolete"]) {
+    const json = fixture();
+    json.usageAnalysis = marker;
+    assert.deepEqual(binding(decode(json)).maxUses, new Maybe.Just(1));
+    rawExpr(json).annotation.bindingUsage = "malformed";
+    rejects(json);
+  }
+});
+
+test("obsolete annotation fields neither supply facts nor survive decoding", () => {
+  const json = fixture();
+  rawExpr(json).annotation = ann({ usageCount: 0, escapes: false });
+  rawExpr(json).body.annotation = ann({ usageCount: 1, escapes: true });
+  const module = decode(json);
+  assert.ok(collectUsage(module).every(value => value instanceof Maybe.Nothing));
+  for (const annotation of [expr(module).value0, expr(module).value2.value0]) {
+    assert.equal(Object.hasOwn(annotation, "usageCount"), false);
+    assert.equal(Object.hasOwn(annotation, "escapes"), false);
+  }
+});
+
+test("standalone decodeAnn cannot manufacture module provenance", () => {
   const result = Json.decodeAnn([])("Fixture.purs")(rawExpr(fixture()).annotation);
   assert.ok(result instanceof Either.Right);
   assert.deepEqual(result.value0.sourceUsage, nothing);
 });
 
-test("missing and null optional facts remain unknown; legacy zero is never promoted", () => {
+test("missing and null optional facts remain unknown", () => {
   for (const missing of [true, false]) {
     const json = fixture();
     const b = rawExpr(json).annotation.bindingUsage;
@@ -89,8 +115,6 @@ test("missing and null optional facts remain unknown; legacy zero is never promo
       b.hasEscapingUseContext = null;
       v.lastLocalUse = null;
     }
-    rawExpr(json).annotation.usageCount = 0;
-    rawExpr(json).annotation.escapes = false;
     const module = decode(json);
     assert.deepEqual(binding(module).maxUses, nothing);
     assert.deepEqual(binding(module).hasEscapingUseContext, nothing);
@@ -109,13 +133,14 @@ test("large counts become unknown without the IntLiteral 2147483648 wraparound",
   assert.deepEqual(binding(decode(json)).maxUses, new Maybe.Just(0));
 });
 
-test("known-contract malformed numeric and boolean facts are rejected", () => {
+test("malformed numeric and boolean facts are rejected without a root marker", () => {
   for (const maxUses of [-1, 0.5, "1"]) {
     const json = fixture(); rawExpr(json).annotation.bindingUsage.maxUses = maxUses; rejects(json);
   }
   for (const bindingId of [-1, 0.5, 2147483648, "0"]) {
     const json = fixture(); rawExpr(json).annotation.bindingUsage.bindingId = bindingId; rejects(json);
   }
+  const missingId = fixture(); delete rawExpr(missingId).annotation.bindingUsage.bindingId; rejects(missingId);
   const json = fixture(); rawExpr(json).body.annotation.variableUse.lastLocalUse = false; rejects(json);
   const other = fixture(); rawExpr(other).annotation.bindingUsage.hasEscapingUseContext = 0; rejects(other);
 });
@@ -153,4 +178,14 @@ test("conversion never carries source certificates into the optimized backend IR
     traceIdents: Set.empty };
   const result = Convert.toBackendModule(module)(options);
   assert.equal(collectUsage(result).length, 0);
+  const changedFacts = fixture();
+  rawExpr(changedFacts).annotation.bindingUsage.maxUses = 2;
+  rawExpr(changedFacts).annotation.bindingUsage.hasEscapingUseContext = true;
+  rawExpr(changedFacts).body.annotation.variableUse.lastLocalUse = null;
+  assert.deepEqual(Convert.toBackendModule(decode(changedFacts))(options), result,
+    "Source-local counts and contexts cannot override optimized backend analysis");
+  delete rawExpr(changedFacts).annotation.bindingUsage;
+  delete rawExpr(changedFacts).body.annotation.variableUse;
+  assert.deepEqual(Convert.toBackendModule(decode(changedFacts))(options), result,
+    "Absent facts preserve backend behavior");
 });

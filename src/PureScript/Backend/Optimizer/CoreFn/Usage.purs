@@ -23,7 +23,7 @@ import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Bindi
 invalidateSourceUsage :: Ann -> Ann
 invalidateSourceUsage (Ann ann) = Ann (ann { sourceUsage = Nothing })
 
--- Imports cannot carry source facts under v1. Executable annotations occur in
+-- Imports cannot carry source usage facts. Executable annotations occur in
 -- declarations; this traversal removes identities as well as counts/proofs.
 invalidateSourceUsageModule :: Module Ann -> Module Ann
 invalidateSourceUsageModule (Module mod) = Module (mod

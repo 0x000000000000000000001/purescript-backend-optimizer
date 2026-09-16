@@ -15,7 +15,7 @@ import Data.Newtype (unwrap)
 import Data.Tuple (Tuple(..))
 import PureScript.Backend.Optimizer.Codegen.Tco (TcoExpr(..))
 import PureScript.Backend.Optimizer.CoreFn (ExprType(..), Ident(..), Literal(..), Prop(..), Qualified(..))
-import PureScript.Backend.Optimizer.Syntax (BackendEffect(..), BackendOperator(..), BackendSyntax(Var, Local, Lit, App, Abs, UncurriedApp, UncurriedAbs, UncurriedEffectApp, UncurriedEffectAbs, Accessor, Update, CtorSaturated, CtorDef, LetRec, Let, EffectBind, EffectPure, EffectDefer, Branch, PrimOp, PrimEffect, PrimUndefined, Fail, Typed, UsageMeta), Pair(..))
+import PureScript.Backend.Optimizer.Syntax (BackendEffect(..), BackendOperator(..), BackendSyntax(Var, Local, Lit, App, Abs, UncurriedApp, UncurriedAbs, UncurriedEffectApp, UncurriedEffectAbs, Accessor, Update, CtorSaturated, CtorDef, LetRec, Let, EffectBind, EffectPure, EffectDefer, Branch, PrimOp, PrimEffect, PrimUndefined, Fail, Typed), Pair(..))
 import PureScript.Backend.Optimizer.Syntax as Syn
 
 unify :: ExprType -> ExprType -> Map String ExprType -> Map String ExprType
@@ -89,7 +89,6 @@ substituteAst insts mangle = go Nothing
   where
   go mbTy (TcoExpr a syn) = case syn of
     Typed ty inner -> TcoExpr a (Typed ty (go (Just ty) inner))
-    UsageMeta usage inner -> TcoExpr a (UsageMeta usage (go mbTy inner))
     Var (Qualified mbMn (Ident name)) ->
       let
         fullName = case mbMn of
@@ -159,7 +158,6 @@ mapTcoExprTypes f = go
   where
   go (TcoExpr a syn) = case syn of
     Typed ty inner -> TcoExpr a (Typed (f ty) (go inner))
-    UsageMeta usage inner -> TcoExpr a (UsageMeta usage (go inner))
     Var v -> TcoExpr a (Var v)
     App fn args -> TcoExpr a (App (go fn) (map go args))
     Syn.TypeApp fn ty -> TcoExpr a (Syn.TypeApp (go fn) (f ty))

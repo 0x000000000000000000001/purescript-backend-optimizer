@@ -101,12 +101,10 @@ newtype Ann = Ann
   { span :: SourceSpan
   , meta :: Maybe Meta
   , type :: Maybe ExprType
-  , usageCount :: Int
-  , escapes :: Boolean
   , sourceUsage :: Maybe SourceUsage
   }
 
--- | CoreFn v1 facts, valid only before transformations. The module component
+-- | CoreFn usage facts, valid only before transformations. The module component
 -- | prevents unrelated source modules from sharing the same local identity.
 newtype SourceBindingId = SourceBindingId
   { moduleName :: ModuleName
