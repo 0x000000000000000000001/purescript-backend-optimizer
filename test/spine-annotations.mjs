@@ -12,7 +12,8 @@ const [C, M, Maybe, Map, Tuple] = await Promise.all([
   "PureScript.Backend.Optimizer.CoreFn", "PureScript.Backend.Optimizer.Monomorphize",
   "Data.Maybe", "Data.Map", "Data.Tuple",
 ].map(load));
-const ann = type => ({ type: new Maybe.Just(type), meta: Maybe.Nothing.value });
+const ann = type => ({ type: new Maybe.Just(type), meta: Maybe.Nothing.value,
+  span: C.emptySpan, usageCount: 0, escapes: true, sourceUsage: Maybe.Nothing.value });
 const variable = (name, type) => new C.ExprVar(ann(type),
   new C.Qualified(new Maybe.Just("Fixture"), name));
 const func = (args, result) => new C.Func(args, result);

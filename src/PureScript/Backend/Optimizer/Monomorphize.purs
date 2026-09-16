@@ -36,6 +36,7 @@ import Data.String.Pattern (Pattern(..))
 import Data.Tuple (Tuple(..))
 import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Module(..), ModuleName(..), Prop(..), Qualified(..))
 import PureScript.Backend.Optimizer.CoreFn.BindingGroups (sortBindingGroups)
+import PureScript.Backend.Optimizer.CoreFn.Usage (invalidateSourceUsageModule)
 import PureScript.Backend.Optimizer.FfiSupport (hashString)
 import PureScript.Backend.Optimizer.Substitute (substituteExprType, unify)
 
@@ -727,7 +728,9 @@ monomorphize globalAstMap instMap (Module m) =
     finalDecls = sortBindingGroups m.name (Array.concatMap processDecl m.decls)
     newIdents = getBindIdents finalDecls
   in
-    Module (m { decls = finalDecls, exports = newIdents })
+    -- Specialization and dictionary inlining change use counts and lexical
+    -- identities. No source certificate survives this public boundary.
+    invalidateSourceUsageModule $ Module (m { decls = finalDecls, exports = newIdents })
 
 monomorphizeBind :: String -> InstantiationMap -> Map Ident (Expr Ann) -> Bind Ann -> Array (Bind Ann)
 monomorphizeBind modName instMap localDicts (NonRec binding) =

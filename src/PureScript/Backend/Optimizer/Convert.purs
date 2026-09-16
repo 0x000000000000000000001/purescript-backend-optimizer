@@ -80,6 +80,7 @@ import Partial.Unsafe (unsafeCrashWith)
 import PureScript.Backend.Optimizer.Analysis (BackendAnalysis, analysisOf, analyze, analyzeEffectBlock)
 import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), ClassDecl, Comment, ConstructorType(..), DataDecl, Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Meta(..), Module(..), ModuleName(..), ProperName(..), Qualified(..), ReExport, binderAnn, exprAnn, findProp, propKey, propValue, qualifiedModuleName, unQualified)
 import PureScript.Backend.Optimizer.Directives (DirectiveHeaderResult, parseDirectiveHeader)
+import PureScript.Backend.Optimizer.CoreFn.Usage (invalidateSourceUsageModule)
 import PureScript.Backend.Optimizer.Semantics (BackendExpr(..), BackendSemantics, Ctx(..), DataTypeMeta, Env(..), EvalRef(..), ExternImpl(..), ExternSpine(..), InlineAccessor(..), InlineDirective(..), InlineDirectiveMap, NeutralExpr(..), build, evalExternFromImpl, evalExternRefFromImpl, freeze, optimize, unwrapSemTyped)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
 import PureScript.Backend.Optimizer.Syntax (BackendAccessor(..), BackendOperator(..), BackendOperator1(..), BackendOperator2(..), BackendOperatorOrd(..), BackendSyntax(Var, Local, Lit, App, Abs, UncurriedApp, UncurriedAbs, Accessor, Update, CtorDef, LetRec, Let, Branch, PrimOp, PrimUndefined, Fail, Typed, UsageMeta), Level(..), Pair(..))
@@ -128,7 +129,13 @@ type ConvertEnv =
 type ConvertM = Function ConvertEnv
 
 toBackendModule :: Module Ann -> ConvertM (Tuple OptimizationSteps BackendModule)
-toBackendModule (Module mod) env = do
+toBackendModule source = toBackendModuleWithoutSourceUsage (invalidateSourceUsageModule source)
+
+-- Pattern compilation and inlining introduce/copy bindings. Source IDs and
+-- version-one usage facts are intentionally absent from BackendSyntax. A backend requiring
+-- last-use or sharing information must recompute it after its final rewrites.
+toBackendModuleWithoutSourceUsage :: Module Ann -> ConvertM (Tuple OptimizationSteps BackendModule)
+toBackendModuleWithoutSourceUsage (Module mod) env = do
   let
     directives :: DirectiveHeaderResult
     directives = parseDirectiveHeader mod.name mod.comments

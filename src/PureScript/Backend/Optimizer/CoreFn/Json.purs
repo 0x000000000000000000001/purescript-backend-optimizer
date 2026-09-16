@@ -35,7 +35,8 @@ import Foreign.Object as Object
 import Partial.Unsafe (unsafePartial)
 import Prelude as Prelude
 import PureScript.Backend.Optimizer.CoreFn.TypeTable (decodeTypeTableST)
-import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), ClassDecl, Comment(..), ConstructorType(..), DataConstructor, DataDecl, Expr(..), ExprType, Guard(..), Ident(..), Import(..), Literal(..), Meta(..), Module(..), ModuleName(..), Prop(..), ProperName(..), Qualified(..), ReExport(..), SourcePos, SourceSpan, emptySpan)
+import PureScript.Backend.Optimizer.CoreFn.Usage (validateSourceUsageModule)
+import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), BindingUsage, CaseAlternative(..), CaseGuard(..), ClassDecl, Comment(..), ConstructorType(..), DataConstructor, DataDecl, Expr(..), ExprType, Guard(..), Ident(..), Import(..), Literal(..), Meta(..), Module(..), ModuleName(..), Prop(..), ProperName(..), Qualified(..), ReExport(..), SourceBindingId(..), SourcePos, SourceSpan, SourceUsage, VariableUse, emptySpan)
 import Safe.Coerce (coerce)
 import Unsafe.Coerce (unsafeCoerce)
 
@@ -159,7 +160,69 @@ decodeAnn typeTable _path json = do
   escapesMb <- getFieldOptional' decodeBoolean obj "escapes"
   let escapes = fromMaybe true escapesMb
 
-  pure $ Ann { span: emptySpan, meta, type: type_, usageCount, escapes }
+  pure $ Ann { span: emptySpan, meta, type: type_, usageCount, escapes, sourceUsage: Nothing }
+
+-- A standalone annotation has no root contract or module provenance. Only
+-- decodeModule can attach usable source facts; the public decodeAnn stays safe.
+decodeAnnWithUsage :: ModuleName -> Boolean -> Array ExprType -> String -> Json -> JsonDecode Ann
+decodeAnnWithUsage moduleName supported typeTable path json = do
+  Ann ann <- decodeAnn typeTable path json
+  sourceUsage <- if supported then decodeSourceUsage moduleName json else pure Nothing
+  pure $ Ann (ann { sourceUsage = sourceUsage })
+
+decodeSourceUsage :: ModuleName -> Json -> JsonDecode (Maybe SourceUsage)
+decodeSourceUsage moduleName json = do
+  obj <- decodeJObject json
+  bindingUsage <- getFieldOptional' (decodeBindingUsage moduleName) obj "bindingUsage"
+  variableUse <- getFieldOptional' (decodeVariableUse moduleName) obj "variableUse"
+  pure case bindingUsage, variableUse of
+    Nothing, Nothing -> Nothing
+    _, _ -> Just { bindingUsage, variableUse }
+
+decodeSourceBindingId :: ModuleName -> Json -> JsonDecode SourceBindingId
+decodeSourceBindingId moduleName json = do
+  num <- decodeNumber json
+  case Int.fromNumber num of
+    Just bindingId | bindingId >= 0 -> pure $ SourceBindingId { moduleName, bindingId }
+    _ -> Left $ TypeMismatch "nonnegative source bindingId within Int range"
+
+decodeBindingUsage :: ModuleName -> Json -> JsonDecode BindingUsage
+decodeBindingUsage moduleName json = do
+  obj <- decodeJObject json
+  binding <- getField (decodeSourceBindingId moduleName) obj "bindingId"
+  nestedBound <- getFieldOptional' decodeUsageBound obj "maxUses"
+  hasEscapingUseContext <- getFieldOptional' decodeBoolean obj "hasEscapingUseContext"
+  pure { binding, maxUses: join nestedBound, hasEscapingUseContext }
+
+-- Haskell counts are arbitrary-precision integers. A larger count is unknown
+-- here, never truncated, wrapped or replaced with zero.
+decodeUsageBound :: Json -> JsonDecode (Maybe Int)
+decodeUsageBound json = do
+  num <- decodeNumber json
+  if isNonNegativeInteger num then pure (Int.fromNumber num)
+  else Left $ TypeMismatch "nonnegative integral maxUses"
+
+foreign import isNonNegativeInteger :: Number -> Boolean
+
+decodeVariableUse :: ModuleName -> Json -> JsonDecode VariableUse
+decodeVariableUse moduleName json = do
+  obj <- decodeJObject json
+  binding <- getField (decodeSourceBindingId moduleName) obj "bindingId"
+  lastLocalUse <- getFieldOptional' decodeLastLocalUse obj "lastLocalUse"
+  pure { binding, lastLocalUse }
+  where
+  decodeLastLocalUse value = do
+    proof <- decodeBoolean value
+    if proof then pure true else Left $ TypeMismatch "lastLocalUse true or null"
+
+supportsUsageV1 :: Object Json -> Boolean
+supportsUsageV1 root = case Object.lookup "usageAnalysis" root of
+  Just json -> case decodeJObject json of
+    Right obj -> case getField decodeInt obj "version", getField decodeString obj "phase" of
+      Right 1, Right "corefn" -> true
+      _, _ -> false
+    Left _ -> false
+  Nothing -> false
 
 decodeImport :: forall a. (Json -> JsonDecode a) -> Json -> JsonDecode (Import a)
 decodeImport decodeAnn' json = do
@@ -196,7 +259,12 @@ decodeClassDecl tt json = do
   pure { name, vars, superclasses, methods }
 
 decodeModule :: Json -> JsonDecode (Module Ann)
-decodeModule = decodeModule' decodeAnn
+decodeModule json = do
+  obj <- decodeJObject json
+  name <- getField decodeModuleName obj "moduleName"
+  mod <- decodeModule' (decodeAnnWithUsage name (supportsUsageV1 obj)) json
+  validateSourceUsageModule mod
+  pure mod
 
 decodeModule' :: forall a. (Array ExprType -> String -> Json -> JsonDecode a) -> Json -> JsonDecode (Module a)
 decodeModule' decodeAnn' json = do

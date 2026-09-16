@@ -1,5 +1,9 @@
 module PureScript.Backend.Optimizer.CoreFn
   ( Ann(..)
+  , BindingUsage
+  , SourceBindingId(..)
+  , SourceUsage
+  , VariableUse
   , Bind(..)
   , Binder(..)
   , Binding(..)
@@ -99,6 +103,33 @@ newtype Ann = Ann
   , type :: Maybe ExprType
   , usageCount :: Int
   , escapes :: Boolean
+  , sourceUsage :: Maybe SourceUsage
+  }
+
+-- | CoreFn v1 facts, valid only before transformations. The module component
+-- | prevents unrelated source modules from sharing the same local identity.
+newtype SourceBindingId = SourceBindingId
+  { moduleName :: ModuleName
+  , bindingId :: Int
+  }
+
+derive newtype instance Eq SourceBindingId
+derive newtype instance Ord SourceBindingId
+
+type BindingUsage =
+  { binding :: SourceBindingId
+  , maxUses :: Maybe Int
+  , hasEscapingUseContext :: Maybe Boolean
+  }
+
+type VariableUse =
+  { binding :: SourceBindingId
+  , lastLocalUse :: Maybe Boolean
+  }
+
+type SourceUsage =
+  { bindingUsage :: Maybe BindingUsage
+  , variableUse :: Maybe VariableUse
   }
 
 -- | Represents the structural PureScript type of an expression.
