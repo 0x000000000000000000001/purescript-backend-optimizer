@@ -82,7 +82,7 @@ import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Bindi
 import PureScript.Backend.Optimizer.Directives (DirectiveHeaderResult, parseDirectiveHeader)
 import PureScript.Backend.Optimizer.Semantics (BackendExpr(..), BackendSemantics, Ctx(..), DataTypeMeta, Env(..), EvalRef(..), ExternImpl(..), ExternSpine(..), InlineAccessor(..), InlineDirective(..), InlineDirectiveMap, NeutralExpr(..), build, evalExternFromImpl, evalExternRefFromImpl, freeze, optimize, unwrapSemTyped)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
-import PureScript.Backend.Optimizer.Syntax (BackendAccessor(..), BackendOperator(..), BackendOperator1(..), BackendOperator2(..), BackendOperatorOrd(..), BackendSyntax(Var, Local, Lit, App, Abs, UncurriedApp, UncurriedAbs, Accessor, Update, CtorDef, LetRec, Let, Branch, PrimOp, PrimUndefined, Fail, Typed), Level(..), Pair(..))
+import PureScript.Backend.Optimizer.Syntax (BackendAccessor(..), BackendOperator(..), BackendOperator1(..), BackendOperator2(..), BackendOperatorOrd(..), BackendSyntax(Var, Local, Lit, App, Abs, UncurriedApp, UncurriedAbs, Accessor, Update, CtorDef, LetRec, Let, Branch, PrimOp, PrimUndefined, Fail, Typed, UsageMeta), Level(..), Pair(..))
 import PureScript.Backend.Optimizer.Syntax as Syn
 import PureScript.Backend.Optimizer.Utils (foldl1Array)
 import PureScript.Backend.Optimizer.Cache (readPurmetaSync)
@@ -534,16 +534,21 @@ toBackendExpr expr = toBackendExprWithType Nothing expr
 toBackendExprWithType :: Maybe ExprType -> Expr Ann -> ConvertM BackendExpr
 toBackendExprWithType mbTy expr = do
   backendExpr <- go expr
+  let Ann ann = exprAnn expr
   pure
-    case
-      case annotationType of
-        Just t -> Just t
-        Nothing -> case mbTy of
+    let
+      typedExpr = case
+        case annotationType of
           Just t -> Just t
-          Nothing -> inferExprType expr
-      of
-      Just t -> ExprSyntax (analysisOf backendExpr) (Typed t backendExpr)
-      Nothing -> backendExpr
+          Nothing -> case mbTy of
+            Just t -> Just t
+            Nothing -> inferExprType expr
+        of
+        Just t -> ExprSyntax (analysisOf backendExpr) (Typed t backendExpr)
+        Nothing -> backendExpr
+    in
+      if ann.usageCount == 0 && ann.escapes == true then typedExpr
+      else ExprSyntax (analysisOf backendExpr) (UsageMeta { usageCount: ann.usageCount, escapes: ann.escapes } typedExpr)
   where
   -- Synthetic dictionary applications can retain the head's constrained
   -- annotation in TAST. The supplied dictionary consumes exactly one

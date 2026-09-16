@@ -185,6 +185,7 @@ data BackendSyntax a
   -- | 
   -- | Ex: `Typed Int (LitInt 42)` tells the Go generator to treat this node strictly as an `int`.
   | Typed ExprType a
+  | UsageMeta { usageCount :: Int, escapes :: Boolean } a
 
 derive instance Eq a => Eq (BackendSyntax a)
 
@@ -344,6 +345,7 @@ instance Foldable BackendSyntax where
     CtorDef _ _ _ _ -> mempty
     Fail _ -> mempty
     Typed _ a -> f a
+    UsageMeta _ a -> f a
 
 instance Traversable BackendSyntax where
   sequence a = sequenceDefault a
@@ -405,6 +407,8 @@ instance Traversable BackendSyntax where
       pure (Fail a)
     Typed t a ->
       Typed t <$> f a
+    UsageMeta usage a ->
+      UsageMeta usage <$> f a
 
 derive instance Functor Pair
 
