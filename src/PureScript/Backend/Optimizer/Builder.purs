@@ -26,7 +26,7 @@ import PureScript.Backend.Optimizer.Semantics (BackendExpr, Ctx, ExternImpl, Inl
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
 import PureScript.Backend.Optimizer.Syntax (BackendSyntax)
 import PureScript.Backend.Optimizer.Cache (writePurmetaSync, trimPurmetaCache, beginPurmetaBuild)
-import Effect.Unsafe (unsafePerformEffect)
+import Effect.Class (class MonadEffect, liftEffect)
 
 type BuildEnv =
   { implementations :: Map (Qualified Ident) (Tuple BackendAnalysis ExternImpl)
@@ -47,12 +47,10 @@ type BuildOptions m =
 
 -- | Builds modules given a _sorted_ list of modules.
 -- | See `PureScript.Backend.Optimizer.CoreFn.Sort.sortModules`.
-buildModules :: forall m. Monad m => BuildOptions m -> List (Module Ann) -> m Unit
+buildModules :: forall m. MonadEffect m => BuildOptions m -> List (Module Ann) -> m Unit
 buildModules options coreFnModules = do
-  _ <- pure unit
-  unsafePerformEffect do
-    beginPurmetaBuild
-    pure $ void $ go { directives: options.directives, implementations: Map.empty, moduleIndex: 0, exports: Map.empty } coreFnModules
+  liftEffect beginPurmetaBuild
+  void $ go { directives: options.directives, implementations: Map.empty, moduleIndex: 0, exports: Map.empty } coreFnModules
   where
   moduleCount = List.length coreFnModules
   
@@ -70,8 +68,8 @@ buildModules options coreFnModules = do
       Just cachedMod -> do
         let
           newDirectives = foldrWithIndex Map.insert directives cachedMod.directives
-          _ = unsafePerformEffect (writePurmetaSync name cachedMod.implementations)
-          _ = unsafePerformEffect trimPurmetaCache
+        liftEffect $ writePurmetaSync name cachedMod.implementations
+        liftEffect trimPurmetaCache
           
         go 
           { directives: newDirectives
@@ -101,9 +99,8 @@ buildModules options coreFnModules = do
         options.onCodegenModule (buildEnv { implementations = backendMod.implementations }) coreFnModule' backendMod optimizationSteps
         
         -- Write this module's implementations to disk
-        let _ = unsafePerformEffect (writePurmetaSync name backendMod.implementations)
-        -- let _ = unsafePerformEffect (logMemory ("Builder loop optimized: " <> unwrap name))
-        let _ = unsafePerformEffect trimPurmetaCache
+        liftEffect $ writePurmetaSync name backendMod.implementations
+        liftEffect trimPurmetaCache
         
         go
           { directives: newDirectives

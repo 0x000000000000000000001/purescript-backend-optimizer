@@ -10,9 +10,9 @@ const output = process.argv[2]
   ? resolve(process.argv[2])
   : fileURLToPath(new URL("../output/", import.meta.url));
 const load = name => import(pathToFileURL(resolve(output, name, "index.js")));
-const [Builder, Cache, Effect, List, Map, Maybe] = await Promise.all([
+const [Builder, Cache, EffectClass, List, Map, Maybe, Set] = await Promise.all([
   "PureScript.Backend.Optimizer.Builder", "PureScript.Backend.Optimizer.Cache",
-  "Effect", "Data.List.Types", "Data.Map", "Data.Maybe",
+  "Effect.Class", "Data.List.Types", "Data.Map", "Data.Maybe", "Data.Set",
 ].map(load));
 
 const temporaryWorkingDirectory = t => {
@@ -31,7 +31,7 @@ test("a new build ignores old purmeta until the module is written in that build"
   Cache.clearPurmetaCache();
   assert.ok(Cache.readPurmetaSync("Later")() instanceof Maybe.Just);
 
-  Builder.buildModules(Effect.monadEffect)({})(List.Nil.value)();
+  Builder.buildModules(EffectClass.monadEffectEffect)({})(List.Nil.value)();
   assert.ok(Cache.readPurmetaSync("Later")() instanceof Maybe.Nothing,
     "a forward lookup must not inline a specialization from a previous build");
 
@@ -40,11 +40,11 @@ test("a new build ignores old purmeta until the module is written in that build"
   assert.ok(Cache.readPurmetaSync("Later")() instanceof Maybe.Just,
     "current-build implementations remain readable after RAM eviction");
 
-  Builder.buildModules(Effect.monadEffect)({})(List.Nil.value)();
+  Builder.buildModules(EffectClass.monadEffectEffect)({})(List.Nil.value)();
   assert.ok(Cache.readPurmetaSync("Later")() instanceof Maybe.Nothing,
     "starting another build invalidates the previous build's written-module set");
 
-  const reusableBuild = Builder.buildModules(Effect.monadEffect)({})(List.Nil.value);
+  const reusableBuild = Builder.buildModules(EffectClass.monadEffectEffect)({})(List.Nil.value);
   reusableBuild();
   Cache.writePurmetaSync("Later")(Map.empty)();
   Cache.clearPurmetaCache();
@@ -62,7 +62,38 @@ test("a module accepted by onSkipModule publishes its validated implementations"
     onPrepareModule: () => value => () => value,
     onSkipModule: () => () => () => new Maybe.Just(cached),
   };
-  Builder.buildModules(Effect.monadEffect)(options)(new List.Cons(module, List.Nil.value))();
+  Builder.buildModules(EffectClass.monadEffectEffect)(options)(new List.Cons(module, List.Nil.value))();
   Cache.clearPurmetaCache();
   assert.ok(Cache.readPurmetaSync("Cached")() instanceof Maybe.Just);
+});
+
+test("fresh modules publish implementations after codegen and before preparing the next module", t => {
+  temporaryWorkingDirectory(t);
+  const emptyModule = name => ({
+    name, path: `${name}.purs`, span: null, imports: [], exports: [], reExports: [],
+    dataDecls: [], classDecls: [], decls: [], foreign: Map.empty, comments: [],
+  });
+  const events = [];
+  const options = {
+    directives: Map.empty, foreignSemantics: Map.empty, traceIdents: Set.empty, rewriteLimit: 100,
+    analyzeCustom: () => () => Maybe.Nothing.value,
+    onPrepareModule: () => module => () => {
+      if (module.name === "Second") {
+        assert.ok(Cache.readPurmetaSync("First")() instanceof Maybe.Just,
+          "the next module can inline the preceding module");
+      }
+      events.push(`prepare:${module.name}`);
+      return module;
+    },
+    onSkipModule: () => () => () => Maybe.Nothing.value,
+    onCodegenModule: () => module => () => () => () => {
+      assert.ok(Cache.readPurmetaSync(module.name)() instanceof Maybe.Nothing,
+        "a module is published only after its codegen callback");
+      events.push(`codegen:${module.name}`);
+    },
+  };
+  const modules = new List.Cons(emptyModule("First"), new List.Cons(emptyModule("Second"), List.Nil.value));
+  Builder.buildModules(EffectClass.monadEffectEffect)(options)(modules)();
+  assert.deepEqual(events, ["prepare:First", "codegen:First", "prepare:Second", "codegen:Second"]);
+  assert.ok(Cache.readPurmetaSync("Second")() instanceof Maybe.Just);
 });

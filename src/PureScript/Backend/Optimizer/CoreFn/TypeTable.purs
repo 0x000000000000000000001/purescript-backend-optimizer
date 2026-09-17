@@ -5,6 +5,7 @@ import Control.Monad.ST as ST
 import Control.Monad.ST.Ref as STRef
 import Data.Argonaut (Json, JsonDecodeError(..), caseJson, isNull)
 import Data.Array as Array
+import Data.Array.ST as STArray
 import Data.Either (Either(..), note)
 import Data.Int as Int
 import Data.Maybe (Maybe(..), fromMaybe)
@@ -75,17 +76,14 @@ decodeConstraintRef j = do
   args <- getField (decodeArray decodeInt) o "args"
   pure { fqn, args }
 
-unsafeUpdateAt :: forall a. Int -> a -> Array a -> Array a
-unsafeUpdateAt i x arr = fromMaybe arr (Array.updateAt i x arr)
-
 decodeTypeTableST :: forall r. Array Json -> ST.ST r (Either JsonDecodeError (Array ExprType))
 decodeTypeTableST typeTableJson = do
-  resArray <- STRef.new (Array.replicate (Array.length typeTableJson) Nothing)
+  resArray <- STArray.thaw (Array.replicate (Array.length typeTableJson) Nothing)
   
   let
     resolveId force id = do
-      resE <- STRef.read resArray
-      case Array.index resE id of
+      resolved <- STArray.peek id resArray
+      case resolved of
         Just (Just val) -> pure (Just val)
         _ -> if force then pure (Just (Right Any)) else pure Nothing
 
@@ -247,14 +245,14 @@ decodeTypeTableST typeTableJson = do
   ST.while (STRef.read changed) do
     _ <- STRef.write false changed
     ST.for 0 (Array.length typeTableJson) \ix -> do
-      resE <- STRef.read resArray
-      case Array.index resE ix of
+      resolved <- STArray.peek ix resArray
+      case resolved of
         Just Nothing -> do
           let j = unsafePartial (Array.unsafeIndex typeTableJson ix)
           mbVal <- decodeObj' false j
           case mbVal of
             Just val -> do
-              _ <- STRef.modify (unsafeUpdateAt ix (Just val)) resArray
+              _ <- STArray.poke ix (Just val) resArray
               _ <- STRef.write true changed
               pure unit
             Nothing -> pure unit
@@ -265,8 +263,8 @@ decodeTypeTableST typeTableJson = do
     _ <- STRef.write false hasCycles
     firstUnresolved <- STRef.new Nothing
     ST.for 0 (Array.length typeTableJson) \ix -> do
-      resE <- STRef.read resArray
-      case Array.index resE ix of
+      resolved <- STArray.peek ix resArray
+      case resolved of
         Just Nothing -> do
           mbFirst <- STRef.read firstUnresolved
           case mbFirst of
@@ -282,35 +280,29 @@ decodeTypeTableST typeTableJson = do
       Just ix -> do
         let j = unsafePartial (Array.unsafeIndex typeTableJson ix)
         val <- decodeObj' true j
-        _ <- STRef.modify (unsafeUpdateAt ix (Just (fromMaybe (Left (TypeMismatch "Cycle")) val))) resArray
+        _ <- STArray.poke ix (Just (fromMaybe (Left (TypeMismatch "Cycle")) val)) resArray
         _ <- STRef.write true hasCycles
         _ <- STRef.write true changed
         ST.while (STRef.read changed) do
           _ <- STRef.write false changed
           ST.for 0 (Array.length typeTableJson) \i -> do
-            resE <- STRef.read resArray
-            case Array.index resE i of
+            resolved <- STArray.peek i resArray
+            case resolved of
               Just Nothing -> do
                 let j2 = unsafePartial (Array.unsafeIndex typeTableJson i)
                 mbVal <- decodeObj' false j2
                 case mbVal of
                   Just v -> do
-                    _ <- STRef.modify (unsafeUpdateAt i (Just v)) resArray
+                    _ <- STArray.poke i (Just v) resArray
                     _ <- STRef.write true changed
                     pure unit
                   Nothing -> pure unit
               _ -> pure unit
         pure unit
 
-  finalRes <- STRef.read resArray
-  let 
-    extract :: Int -> Either JsonDecodeError ExprType
-    extract ix = case Array.index finalRes ix of
-      Just (Just (Right val)) -> Right val
-      Just (Just (Left err)) -> Left err
-      _ -> Left (TypeMismatch "Unresolved Type (Cycle Deadlock)")
-  
+  finalRes <- STArray.freeze resArray
   let
-    l = Array.length typeTableJson
-    arr = if l == 0 then [] else map extract (Array.range 0 (l - 1))
-  pure (sequence arr)
+    extract = case _ of
+      Just result -> result
+      Nothing -> Left (TypeMismatch "Unresolved Type (Cycle Deadlock)")
+  pure (traverse extract finalRes)
