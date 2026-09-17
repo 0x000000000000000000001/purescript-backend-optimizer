@@ -3,6 +3,7 @@ module PureScript.Backend.Optimizer.Cache
   , readPurmetaSync
   , beginPurmetaBuild
   , clearPurmetaCache
+  , trimPurmetaCache
   , logMemory
   ) where
 
@@ -21,6 +22,7 @@ type BackendImplementations = Map (Qualified Ident) (Tuple BackendAnalysis Exter
 foreign import writePurmetaSyncImpl :: String -> BackendImplementations -> Effect Unit
 foreign import readPurmetaSyncImpl :: String -> (BackendImplementations -> Maybe BackendImplementations) -> Maybe BackendImplementations -> Effect (Maybe BackendImplementations)
 foreign import clearPurmetaCacheImpl :: Effect Unit
+foreign import trimPurmetaCacheImpl :: Effect Unit
 foreign import beginPurmetaBuild :: Effect Unit
 
 writePurmetaSync :: ModuleName -> BackendImplementations -> Effect Unit
@@ -32,8 +34,10 @@ readPurmetaSync mn = readPurmetaSyncImpl (unwrap mn) Just Nothing
 clearPurmetaCache :: Effect Unit
 clearPurmetaCache = clearPurmetaCacheImpl
 
+trimPurmetaCache :: Effect Unit
+trimPurmetaCache = trimPurmetaCacheImpl
+
 foreign import logMemoryImpl :: String -> Effect Unit
 
 logMemory :: String -> Effect Unit
 logMemory = logMemoryImpl
-

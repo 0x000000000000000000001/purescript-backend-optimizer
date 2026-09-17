@@ -125,14 +125,28 @@ function deserialize(buffer) {
   return walk(parsed);
 }
 
-// In-memory cache to avoid re-reading the same file
+// The byte budget describes serialized payloads, not decoded JavaScript heap.
+// Trim only between modules, preserving reuse throughout one module's work.
+const maxRamCacheBytes = 64 * 1024 * 1024;
 const ramCache = new Map();
+let ramCacheBytes = 0;
 let currentBuildModules = null;
+
+function rememberModule(moduleName, data, bytes) {
+  const previous = ramCache.get(moduleName);
+  if (previous !== undefined) {
+    ramCacheBytes -= previous.bytes;
+    ramCache.delete(moduleName);
+  }
+  ramCache.set(moduleName, { data, bytes });
+  ramCacheBytes += bytes;
+}
 
 // Specialized implementations are valid only for the build that emitted them.
 // Forward references must not load a previous build's specialization names.
 export const beginPurmetaBuild = function() {
   ramCache.clear();
+  ramCacheBytes = 0;
   currentBuildModules = new Set();
 };
 
@@ -148,8 +162,7 @@ export const writePurmetaSyncImpl = function(moduleName) {
       fs.writeFileSync(filePath, buffer);
       if (currentBuildModules !== null) currentBuildModules.add(moduleName);
       
-      // Store in LRU / RAM temporarily just in case
-      ramCache.set(moduleName, data);
+      rememberModule(moduleName, data, buffer.byteLength);
     };
   };
 };
@@ -161,8 +174,11 @@ export const readPurmetaSyncImpl = function(moduleName) {
         if (currentBuildModules !== null && !currentBuildModules.has(moduleName)) {
           return nothing;
         }
-        if (ramCache.has(moduleName)) {
-          return just(ramCache.get(moduleName));
+        const cached = ramCache.get(moduleName);
+        if (cached !== undefined) {
+          ramCache.delete(moduleName);
+          ramCache.set(moduleName, cached);
+          return just(cached.data);
         }
         
         const filePath = path.join('.purmeta', moduleName + '.purmeta');
@@ -173,7 +189,7 @@ export const readPurmetaSyncImpl = function(moduleName) {
         try {
           const buffer = fs.readFileSync(filePath);
           const data = deserialize(buffer);
-          ramCache.set(moduleName, data);
+          rememberModule(moduleName, data, buffer.byteLength);
           return just(data);
         } catch (e) {
           console.error("Failed to read purmeta for " + moduleName + ": " + e.message);
@@ -186,8 +202,7 @@ export const readPurmetaSyncImpl = function(moduleName) {
 
 let baselineRss = 0;
 
-export const clearPurmetaCacheImpl = function() {
-  ramCache.clear();
+function maybeCollectGarbage() {
   if (global.gc) {
     const currentRss = process.memoryUsage().rss;
     const diffRss = currentRss - baselineRss;
@@ -199,11 +214,26 @@ export const clearPurmetaCacheImpl = function() {
       baselineRss = process.memoryUsage().rss; 
     }
   }
+}
+
+export const clearPurmetaCacheImpl = function() {
+  ramCache.clear();
+  ramCacheBytes = 0;
+  maybeCollectGarbage();
+};
+
+export const trimPurmetaCacheImpl = function() {
+  while (ramCacheBytes > maxRamCacheBytes && ramCache.size !== 0) {
+    const oldest = ramCache.keys().next().value;
+    ramCacheBytes -= ramCache.get(oldest).bytes;
+    ramCache.delete(oldest);
+  }
+  maybeCollectGarbage();
 };
 
 export const logMemoryImpl = function(label) {
   return function() {
-    // GC is now managed in clearPurmetaCacheImpl, no forced GC here
+    // GC is managed at module boundaries, with no forced GC here
     const mem = process.memoryUsage();
     console.log(`[Memory - ${label}] HeapUsed: ${Math.round(mem.heapUsed / 1024 / 1024)} MB | RSS: ${Math.round(mem.rss / 1024 / 1024)} MB`);
   };
