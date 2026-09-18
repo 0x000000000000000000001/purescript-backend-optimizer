@@ -14,6 +14,7 @@ module PureScript.Backend.Optimizer.App
 
 import Prelude
 
+import Control.Parallel (parTraverse)
 import Data.Argonaut.Decode.Error (printJsonDecodeError)
 import Data.Argonaut.Parser (jsonParser)
 import Data.Array as Array
@@ -25,6 +26,7 @@ import Data.Int as Int
 import Data.String as String
 import Data.String.Pattern (Pattern(..))
 import Data.Traversable (traverse)
+import Effect (Effect)
 import Effect.Aff (Aff, attempt)
 import Effect.Class (liftEffect)
 import Effect.Console as Console
@@ -62,18 +64,31 @@ readCoreFnModule filePath = do
 -- | Reads and sorts all CoreFn modules from an output directory (e.g. "output")
 coreFnModulesFromOutput :: String -> Aff (List.List (Module Ann))
 coreFnModulesFromOutput outputDir = do
+  jobs <- liftEffect moduleReadConcurrency
   files <- FS.readdir outputDir
-  validDirs <- Array.filterA
-    ( \f -> do
-        stat <- FS.stat (outputDir <> "/" <> f)
-        pure (Stats.isDirectory stat)
-    )
-    files
-
-  mbModules <- traverse (\dir -> readCoreFnModule (outputDir <> "/" <> dir <> "/corefn.json")) validDirs
+  -- Bound both decoding memory and open files. Each batch preserves input order,
+  -- so scheduling cannot change the order passed to the dependency sorter.
+  let
+    readDirectory dir = do
+      stat <- FS.stat (outputDir <> "/" <> dir)
+      if Stats.isDirectory stat then
+        readCoreFnModule (outputDir <> "/" <> dir <> "/corefn.json")
+      else
+        pure Nothing
+    loadBatches remaining
+      | Array.null remaining = pure List.Nil
+      | otherwise = do
+          let { before, after } = Array.splitAt jobs remaining
+          batch <- parTraverse readDirectory before
+          rest <- loadBatches after
+          pure (List.Cons batch rest)
+  mbModules <- if jobs == 1 then traverse readDirectory files
+    else Array.concat <<< Array.fromFoldable <$> loadBatches files
   let modulesArray = Array.catMaybes mbModules
   let modulesList = List.fromFoldable modulesArray
   pure (sortModules modulesList)
+
+foreign import moduleReadConcurrency :: Effect Int
 
 type CLIArgs =
   { mbMainModule :: Maybe String
