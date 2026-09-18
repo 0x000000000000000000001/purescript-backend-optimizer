@@ -118,10 +118,16 @@ specializationKey instType dictArgs normalArgs =
 
 collectInstantiations :: Map String (Binding Ann) -> InstantiationMap -> Module Ann -> InstantiationMap
 collectInstantiations globalAstMap acc (Module m) =
-  let
-    modNameStr = unwrap m.name
-  in
-    foldl (collectBind globalAstMap modNameStr) acc m.decls
+  foldl collectTopBind acc m.decls
+  where
+  modNameStr = unwrap m.name
+  -- Qualify free globals once at the top-level boundary. References left
+  -- unqualified are lexical locals, including nested let and case bindings.
+  collectTopBinding acc1 (Binding _ _ expr) =
+    collectExpr globalAstMap modNameStr acc1 (resolveGlobals modNameStr Set.empty expr)
+  collectTopBind acc1 = case _ of
+    NonRec binding -> collectTopBinding acc1 binding
+    Rec bindings -> foldl collectTopBinding acc1 bindings
 
 collectBind :: Map String (Binding Ann) -> String -> InstantiationMap -> Bind Ann -> InstantiationMap
 collectBind globalAstMap modName acc (NonRec binding) = collectBinding globalAstMap modName acc binding
@@ -208,11 +214,9 @@ stripStaticConstraints dictArgs = case _ of
 
 collectExpr :: Map String (Binding Ann) -> String -> InstantiationMap -> Expr Ann -> InstantiationMap
 collectExpr globalAstMap modName acc expr = case expr of
-  ExprVar (Ann ann) (Qualified mbMod (Ident name)) ->
+  ExprVar (Ann ann) (Qualified (Just mod) (Ident name)) ->
     let
-      qualName = case mbMod of
-        Just mod -> unwrap mod <> "." <> name
-        Nothing -> modName <> "." <> name
+      qualName = unwrap mod <> "." <> name
       trueGenericType = case Map.lookup qualName globalAstMap of
         Just (Binding (Ann bAnn) _ _) -> bAnn.type
         Nothing -> ann.type
@@ -221,6 +225,7 @@ collectExpr globalAstMap modName acc expr = case expr of
         Just t ->
           Map.insertWith (\new old -> Map.unionWith (\a b -> { instType: a.instType, dictArgs: a.dictArgs, normalArgs: a.normalArgs, callers: Set.union a.callers b.callers, subst: a.subst }) new old) qualName (Map.singleton (mangleType (defaultToAny t)) { instType: defaultToAny t, dictArgs: [], normalArgs: [], callers: Set.singleton modName, subst: Map.empty }) acc
         Nothing -> acc
+  ExprVar _ (Qualified Nothing _) -> acc
   ExprApp _ _ _ ->
     let
       { f_var, spine } = collectSpine expr
@@ -230,11 +235,9 @@ collectExpr globalAstMap modName acc expr = case expr of
       acc2 = foldl (collectExpr globalAstMap modName) acc1 args
     in
       case f_var of
-        ExprVar (Ann varAnn) (Qualified mbMod (Ident name)) ->
+        ExprVar (Ann varAnn) (Qualified (Just mod) (Ident name)) ->
           let
-             qualName = case mbMod of
-               Just mod -> unwrap mod <> "." <> name
-               Nothing -> modName <> "." <> name
+             qualName = unwrap mod <> "." <> name
              trueGenericType = case Map.lookup qualName globalAstMap of
                Just (Binding (Ann bAnn) _ _) -> case bAnn.type of
                  Just t -> t
@@ -507,7 +510,7 @@ rewriteExpr globalAstMap = goLocals
               fullName = mn <> "." <> (\(Ident n) -> n) ident
             in
               case Map.lookup fullName globalAstMap of
-                Just (Binding _ _ val) -> resolveDict val
+                Just (Binding _ _ val) -> resolveDict (resolveGlobals mn Set.empty val)
                 Nothing -> Nothing
       ExprApp _ (ExprVar _ (Qualified _ (Ident ctorName))) arg | String.contains (Pattern "$Dict") ctorName -> resolveDict arg
       _ -> Nothing
@@ -740,7 +743,7 @@ monomorphizeBind modName instMap localDicts (Rec bindings) =
 
 monomorphizeBinding :: String -> InstantiationMap -> Map Ident (Expr Ann) -> Binding Ann -> Binding Ann
 monomorphizeBinding modName instMap localDicts (Binding ann (Ident name) expr) =
-  Binding ann (Ident name) (monomorphizeExpr modName instMap localDicts expr)
+  Binding ann (Ident name) (monomorphizeExpr modName instMap localDicts (resolveGlobals modName Set.empty expr))
 
 collectFreeVars :: Expr Ann -> Set Ident
 collectFreeVars = case _ of
@@ -808,7 +811,7 @@ monomorphizeExpr modName instMap localDicts rootExpr = case rootExpr of
       args' = getSpineArgs spine'
     in
       case f_var' of
-        ExprVar (Ann varAnn) (Qualified mbMod (Ident name)) ->
+        ExprVar (Ann varAnn) (Qualified (Just mod) (Ident name)) ->
           let
              genericType = fromMaybe Any varAnn.type
              subst = buildSubst genericType typeArgs
@@ -817,9 +820,7 @@ monomorphizeExpr modName instMap localDicts rootExpr = case rootExpr of
                x -> x
              instType = stripTypeVariables (substituteExprType subst (stripForAlls genericType))
              { dictArgs, normalArgs } = partitionArgs genericType args'
-             qualName = case mbMod of
-               Just mod -> unwrap mod <> "." <> name
-               Nothing -> modName <> "." <> name
+             qualName = unwrap mod <> "." <> name
              filteredArgs = Array.filter (\d -> not (isStatic d)) dictArgs <> normalArgs
              
           in
@@ -1224,7 +1225,7 @@ transitiveCollect globalAstMap initialMap = loop initialMap
                   in
                     case genericExprOpt of
                       Just (Binding _ _ expr) ->
-                        if hasTypeVariables info.instType then acc2
+                        if hasTypeVariables info.instType || Set.isEmpty info.callers then acc2
                         else
                           let
                             stripForAlls = case _ of
@@ -1233,17 +1234,12 @@ transitiveCollect globalAstMap initialMap = loop initialMap
                             astSubstFn t = substituteExprType info.subst (stripForAlls t)
                             exprWithDicts = applyStaticArgs info.dictArgs info.normalArgs expr
                             resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
+                            substitutedExpr = rewriteExpr globalAstMap Map.empty Map.empty astSubstFn resolvedExpr
+                            -- Qualified globals determine this body's dependencies;
+                            -- its lexical locals cannot name another specialization.
+                            specializedExpr = monomorphizeExpr definerMod specializationMap Map.empty substitutedExpr
                           in
-                            foldl
-                              ( \acc3 caller ->
-                                  let
-                                    substitutedExpr = rewriteExpr globalAstMap Map.empty Map.empty astSubstFn resolvedExpr
-                                    specializedExpr = monomorphizeExpr caller specializationMap Map.empty substitutedExpr
-                                  in
-                                    collectExpr globalAstMap caller acc3 specializedExpr
-                              )
-                              acc2
-                              (Set.toUnfoldable info.callers :: Array String)
+                            collectExpr globalAstMap definerMod acc2 specializedExpr
                       Nothing -> acc2
               )
               acc1

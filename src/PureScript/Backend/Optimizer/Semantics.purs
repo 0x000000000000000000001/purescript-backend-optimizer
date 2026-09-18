@@ -659,17 +659,19 @@ instantiateNeutralType arg (NeutralExpr (Typed (ForAll vars bodyTy) body)) = do
 instantiateNeutralType _ _ = Nothing
 
 substituteNeutralTypes :: Map String ExprType -> NeutralExpr -> NeutralExpr
-substituteNeutralTypes subst expression@(NeutralExpr syntax) = case syntax of
-  Typed (ForAll vars bodyTy) body ->
-    let
-      scope = TypeSubstitution.underForAllAvoid (typeNames expression) subst vars bodyTy
-    in
-      NeutralExpr $ Typed
-        (ForAll scope.vars (TypeSubstitution.substitute scope.substitution scope.body))
-        (substituteNeutralTypes scope.substitution body)
-  Typed ty body -> NeutralExpr $ Typed (TypeSubstitution.substitute subst ty) (substituteNeutralTypes subst body)
-  Syn.TypeApp fn ty -> NeutralExpr $ Syn.TypeApp (substituteNeutralTypes subst fn) (TypeSubstitution.substitute subst ty)
-  _ -> NeutralExpr (substituteNeutralTypes subst <$> syntax)
+substituteNeutralTypes subst expression@(NeutralExpr syntax)
+  | Map.isEmpty subst = expression
+  | otherwise = case syntax of
+      Typed (ForAll vars bodyTy) body ->
+        let
+          scope = TypeSubstitution.underForAllAvoidLazy (\_ -> typeNames expression) subst vars bodyTy
+        in
+          NeutralExpr $ Typed
+            (ForAll scope.vars (TypeSubstitution.substitute scope.substitution scope.body))
+            (substituteNeutralTypes scope.substitution body)
+      Typed ty body -> NeutralExpr $ Typed (TypeSubstitution.substitute subst ty) (substituteNeutralTypes subst body)
+      Syn.TypeApp fn ty -> NeutralExpr $ Syn.TypeApp (substituteNeutralTypes subst fn) (TypeSubstitution.substitute subst ty)
+      _ -> NeutralExpr (substituteNeutralTypes subst <$> syntax)
   where
   typeNames (NeutralExpr node) = foldMap typeNames node <> case node of
     Typed ty _ -> TypeSubstitution.typeVariables ty

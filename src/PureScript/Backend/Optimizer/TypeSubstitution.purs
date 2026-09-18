@@ -2,6 +2,7 @@ module PureScript.Backend.Optimizer.TypeSubstitution
   ( substitute
   , underForAll
   , underForAllAvoid
+  , underForAllAvoidLazy
   , typeVariables
   ) where
 
@@ -19,7 +20,9 @@ import PureScript.Backend.Optimizer.CoreFn (ExprType(..))
 
 -- | Simultaneous substitution: inserted types retain their own free variables.
 substitute :: Map String ExprType -> ExprType -> ExprType
-substitute substitution = go
+substitute substitution
+  | Map.isEmpty substitution = identity
+  | otherwise = go
   where
   go ty = case ty of
     TypeVar name -> fromMaybe ty (Map.lookup name substitution)
@@ -54,20 +57,34 @@ underForAllAvoid
   -> Array String
   -> ExprType
   -> { vars :: Array String, body :: ExprType, substitution :: Map String ExprType }
-underForAllAvoid avoid substitution vars body =
+underForAllAvoid avoid = underForAllAvoidLazy (\_ -> avoid)
+
+-- | Collect expression names only when a bound variable must be renamed.
+underForAllAvoidLazy
+  :: (Unit -> Set String)
+  -> Map String ExprType
+  -> Array String
+  -> ExprType
+  -> { vars :: Array String, body :: ExprType, substitution :: Map String ExprType }
+underForAllAvoidLazy avoid substitution vars body =
   let
     scoped = foldl (flip Map.delete) substitution vars
     captures = foldMap freeVariables (Map.values scoped)
-    used = avoid
-      <> Set.fromFoldable vars
-      <> typeVariables body
-      <> Map.keys substitution
-      <> foldMap typeVariables (Map.values substitution)
-    renamed = foldl (rename captures)
-      { vars: [], substitution: scoped, used }
-      vars
   in
-    { vars: renamed.vars, body, substitution: renamed.substitution }
+    if not (Array.any (flip Set.member captures) vars) then
+      { vars, body, substitution: scoped }
+    else
+      let
+        used = avoid unit
+          <> Set.fromFoldable vars
+          <> typeVariables body
+          <> Map.keys substitution
+          <> foldMap typeVariables (Map.values substitution)
+        renamed = foldl (rename captures)
+          { vars: [], substitution: scoped, used }
+          vars
+      in
+        { vars: renamed.vars, body, substitution: renamed.substitution }
   where
   rename captures state name
     | Set.member name captures =

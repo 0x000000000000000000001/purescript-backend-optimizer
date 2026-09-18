@@ -8,13 +8,14 @@ const output = process.argv[2]
   ? resolve(process.argv[2])
   : fileURLToPath(new URL("../output/", import.meta.url));
 const load = (name) => import(pathToFileURL(resolve(output, name, "index.js")));
-const [C, S, Sem, Sub, Maybe, Tuple, Map, Ord, Foldable, Analysis] = await Promise.all([
+const [C, S, Sem, Sub, Maybe, Tuple, Map, Ord, Foldable, Analysis, Set] = await Promise.all([
   "PureScript.Backend.Optimizer.CoreFn",
   "PureScript.Backend.Optimizer.Syntax",
   "PureScript.Backend.Optimizer.Semantics",
   "PureScript.Backend.Optimizer.TypeSubstitution",
   "Data.Maybe", "Data.Tuple", "Data.Map", "Data.Ord", "Data.Foldable",
   "PureScript.Backend.Optimizer.Analysis",
+  "Data.Set",
 ].map(load));
 
 const pair = (left, right) => new Tuple.Tuple(left, right);
@@ -133,6 +134,58 @@ test("substitution is simultaneous rather than recursively replacing inserted va
 test("substitution preserves an inner quantifier that shadows its key", () => {
   const type = forall(["a"], func([a], a));
   assert.deepStrictEqual(substitute([["a", int]], type), type);
+});
+
+test("an empty substitution shares the original type tree", () => {
+  const type = freeze(forall(["a"], new C.Record(new C.Row([
+    pair("items", new C.Array(func([a], new C.Array(a)))),
+  ], nothing))));
+  assert.strictEqual(Sub.substitute(Map.empty)(type), type);
+});
+
+test("a shadowed substitution shares untouched expression descendants", () => {
+  let body = typed(a, local("value", 0));
+  for (let index = 0; index < 128; index++) {
+    body = typed(forall([`unused${index}`], int), body);
+  }
+  freeze(body);
+  const inner = freeze(typed(forall(["a"], int), body));
+  const generic = freeze(typed(forall(["a"], int), inner));
+  const result = instantiate(int, generic);
+  assert.deepStrictEqual(result, typed(int, inner));
+  assert.strictEqual(result.value1.value1, body,
+    "once the substitution is masked, descendants need no traversal or copies");
+});
+
+test("capture-free quantifiers do not collect expression names", () => {
+  let visits = 0;
+  const avoid = () => { visits++; return Set.empty; };
+  const body = freeze(func([a, b], a));
+  for (const [entries, vars, expectedEntries] of [
+    [[], ["b"], []],
+    [[["a", int]], ["b"], [["a", int]]],
+    [[["a", b]], ["a"], []],
+  ]) {
+    const result = Sub.underForAllAvoidLazy(avoid)(substitution(entries))(vars)(body);
+    assert.deepStrictEqual(result, { vars, body, substitution: substitution(expectedEntries) });
+    assert.strictEqual(result.body, body);
+  }
+  assert.equal(visits, 0);
+});
+
+test("capture avoidance collects expression names once and preserves fresh-name selection", () => {
+  let visits = 0;
+  const reserved = Set.singleton("b_typeapp0");
+  const avoid = () => { visits++; return reserved; };
+  const subst = substitution([["a", b]]);
+  const body = freeze(func([a, b], a));
+  const result = Sub.underForAllAvoidLazy(avoid)(subst)(["b"])(body);
+  assert.equal(visits, 1);
+  assert.deepStrictEqual(result, {
+    vars: ["b_typeapp1"], body,
+    substitution: substitution([["a", b], ["b", variable("b_typeapp1")]]),
+  });
+  assert.deepStrictEqual(result, Sub.underForAllAvoid(reserved)(subst)(["b"])(body));
 });
 
 test("capture avoidance preserves free variables and renames bound occurrences", () => {
