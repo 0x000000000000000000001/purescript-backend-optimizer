@@ -12,7 +12,7 @@ import Data.Array as Array
 import Data.Foldable (foldMap, foldl)
 import Data.Map (Map)
 import Data.Map as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Set (Set)
 import Data.Set as Set
 import Data.Tuple (Tuple(..))
@@ -22,7 +22,7 @@ import PureScript.Backend.Optimizer.CoreFn (ExprType(..))
 substitute :: Map String ExprType -> ExprType -> ExprType
 substitute substitution
   | Map.isEmpty substitution = identity
-  | otherwise = go
+  | otherwise = \ty -> if mightChange substitution ty then go ty else ty
   where
   go ty = case ty of
     TypeVar name -> fromMaybe ty (Map.lookup name substitution)
@@ -128,3 +128,27 @@ collectVariables includeBound = go
     ConstrainedType constraints body ->
       foldMap (\(Tuple _ args) -> foldMap go args) constraints <> go body
     _ -> Set.empty
+
+-- A conservative pre-pass: quantifiers must retain capture avoidance even when
+-- none of the substitution keys occurs in the body.
+mightChange :: Map String ExprType -> ExprType -> Boolean
+mightChange substitution = go
+  where
+  go :: ExprType -> Boolean
+  go = case _ of
+    TypeVar name -> Map.member name substitution
+    ForAll _ _ -> true
+    Array item -> go item
+    ADT _ _ args -> Array.any go args
+    TypeApp fn args -> if go fn then true else Array.any go args
+    Func args result -> if Array.any go args then true else go result
+    Row fields tail ->
+      if Array.any (\(Tuple _ ty) -> go ty) fields then true
+      else case tail of
+        Nothing -> false
+        Just ty -> go ty
+    Record row -> go row
+    ConstrainedType constraints body ->
+      if Array.any (\(Tuple _ args) -> Array.any go args) constraints then true
+      else go body
+    _ -> false

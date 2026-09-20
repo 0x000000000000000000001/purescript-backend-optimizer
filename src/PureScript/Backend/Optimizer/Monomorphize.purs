@@ -271,11 +271,12 @@ collectExpr globalAstMap modName acc expr = case expr of
                x -> x
              instType = stripTypeVariables (substituteExprType subst (stripForAlls genericType))
              { dictArgs, normalArgs } = partitionArgs genericType args
-             specKey = specializationKey instType dictArgs normalArgs
           in
              if not (hasTypeVariables genericType) then acc2
              else if hasTypeVariables instType then acc2
-             else Map.insertWith (\new old -> Map.unionWith (\a b -> { instType: a.instType, dictArgs: a.dictArgs, normalArgs: a.normalArgs, callers: Set.union a.callers b.callers, subst: a.subst }) new old) qualName (Map.singleton specKey { instType: defaultToAny instType, dictArgs, normalArgs, callers: Set.singleton modName, subst }) acc2
+             else
+               let specKey = specializationKey instType dictArgs normalArgs
+               in Map.insertWith (\new old -> Map.unionWith (\a b -> { instType: a.instType, dictArgs: a.dictArgs, normalArgs: a.normalArgs, callers: Set.union a.callers b.callers, subst: a.subst }) new old) qualName (Map.singleton specKey { instType: defaultToAny instType, dictArgs, normalArgs, callers: Set.singleton modName, subst }) acc2
         _ -> acc2
 
   ExprLit _ lit -> foldl (collectExpr globalAstMap modName) acc lit
@@ -827,13 +828,13 @@ monomorphizeExpr modName instMap localDicts rootExpr = case rootExpr of
              if hasTypeVariables instType then
                transformedExpr
              else
-               let specKey = specializationKey instType dictArgs normalArgs
-                   specializedName = Ident (name <> "__" <> hashString specKey)
-               in case Map.lookup qualName instMap of
+               case Map.lookup qualName instMap of
                     Just typeMap ->
-                      case Map.lookup specKey typeMap of
+                      let specKey = specializationKey instType dictArgs normalArgs
+                      in case Map.lookup specKey typeMap of
                         Just _ ->
                           let
+                             specializedName = Ident (name <> "__" <> hashString specKey)
                              stripForAlls2 = case _ of
                                ForAll _ b -> stripForAlls2 b
                                x -> x

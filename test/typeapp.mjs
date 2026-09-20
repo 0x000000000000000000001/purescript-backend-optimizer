@@ -143,6 +143,19 @@ test("an empty substitution shares the original type tree", () => {
   assert.strictEqual(Sub.substitute(Map.empty)(type), type);
 });
 
+test("unrelated substitution keys share an open type tree without copying it", () => {
+  const type = freeze(new C.Record(new C.Row([
+    pair("zeta", new C.Array(func([b, string], b))),
+    pair("alpha", new C.ADT("Data.Maybe.Maybe", ["Data", "Maybe", "Maybe"], [b])),
+  ], new Maybe.Just(variable("tail")))));
+  assert.strictEqual(substitute([["a", int]], type), type);
+});
+
+test("an irrelevant key still preserves capture-avoidance renaming under ForAll", () => {
+  const type = freeze(forall(["b"], int));
+  assert.deepStrictEqual(substitute([["a", b]], type), forall(["b_typeapp0"], int));
+});
+
 test("a shadowed substitution shares untouched expression descendants", () => {
   let body = typed(a, local("value", 0));
   for (let index = 0; index < 128; index++) {
