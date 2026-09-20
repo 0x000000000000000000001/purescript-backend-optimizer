@@ -6,7 +6,8 @@
 -- | 3. En préparant la décurryfication (via eta-expansion) pour s'assurer que l'arité des fonctions reste visible après l'élimination des dictionnaires.
 
 module PureScript.Backend.Optimizer.Monomorphize
-  ( InstantiationMap
+  ( Instantiation
+  , InstantiationMap
   , collectInstantiations
   , collectAllTypes
   , mangleType
@@ -40,7 +41,34 @@ import PureScript.Backend.Optimizer.CoreFn.Usage (invalidateSourceUsageModule)
 import PureScript.Backend.Optimizer.FfiSupport (hashString)
 import PureScript.Backend.Optimizer.Substitute (substituteExprType, unify)
 
-type InstantiationMap = Map String (Map String { instType :: ExprType, dictArgs :: Array (Expr Ann), normalArgs :: Array (Expr Ann), callers :: Set String, subst :: Map String ExprType })
+type Instantiation =
+  { instType :: ExprType
+  , dictArgs :: Array (Expr Ann)
+  , normalArgs :: Array (Expr Ann)
+  , callers :: Set String
+  , subst :: Map String ExprType
+  }
+
+type InstantiationMap = Map String (Map String Instantiation)
+
+type PreparedInstantiations = Map (Tuple String String)
+  { info :: Instantiation, expr :: Expr Ann }
+
+-- Private identity guard for immutable compiler inputs, not semantic equality.
+-- Reboxing may cause a cache miss; it must never permit an approximate hit.
+foreign import sameIdentity :: forall a. a -> a -> Boolean
+
+sameInstantiationInputs :: Instantiation -> Instantiation -> Boolean
+sameInstantiationInputs a b =
+  sameIdentity a.instType b.instType
+    && sameIdentity a.subst b.subst
+    && sameArguments a.dictArgs b.dictArgs
+    && sameArguments a.normalArgs b.normalArgs
+  where
+  -- The native bridge may rebuild the array container while retaining its items.
+  sameArguments xs ys = Array.length xs == Array.length ys
+    && Array.all identity (Array.zipWith sameIdentity xs ys)
+
 
 isStatic :: Expr Ann -> Boolean
 isStatic = case _ of
@@ -1206,18 +1234,19 @@ binderIdents = case _ of
   _ -> Set.empty
 
 transitiveCollect :: Map String (Binding Ann) -> InstantiationMap -> InstantiationMap
-transitiveCollect globalAstMap initialMap = loop initialMap
+transitiveCollect globalAstMap initialMap = loop Map.empty initialMap
   where
-  loop currentMap =
+  loop :: PreparedInstantiations -> InstantiationMap -> InstantiationMap
+  loop prepared currentMap =
     let
       -- Foreign declarations have no AST body from which to emit a specialization.
       -- Keep their collected type information, but never embed nonexistent
       -- specialized foreign names in another specialization's static arguments.
       specializationMap = Map.filterKeys (\name -> Map.member name globalAstMap) currentMap
-      newMap = Array.foldl
+      collected = Array.foldl
         ( \acc1 (Tuple qualName typeMap) ->
             Array.foldl
-              ( \acc2 (Tuple _ info) ->
+              ( \acc2 (Tuple specKey info) ->
                   let
                     definerMod = case String.split (Pattern ".") qualName of
                       parts -> String.joinWith "." (fromMaybe [] (Array.init parts))
@@ -1233,21 +1262,38 @@ transitiveCollect globalAstMap initialMap = loop initialMap
                               ForAll _ b -> stripForAlls b
                               x -> x
                             astSubstFn t = substituteExprType info.subst (stripForAlls t)
-                            exprWithDicts = applyStaticArgs info.dictArgs info.normalArgs expr
-                            resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
-                            substitutedExpr = rewriteExpr globalAstMap Map.empty Map.empty astSubstFn resolvedExpr
+                            cacheKey = Tuple qualName specKey
+                            cached = case Map.lookup cacheKey acc2.prepared of
+                              Just entry | sameInstantiationInputs entry.info info ->
+                                { expr: entry.expr, prepared: acc2.prepared }
+                              _ ->
+                                let
+                                  exprWithDicts = applyStaticArgs info.dictArgs info.normalArgs expr
+                                  resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
+                                  preparedExpr = rewriteExpr globalAstMap Map.empty Map.empty astSubstFn resolvedExpr
+                                in
+                                  { expr: preparedExpr
+                                  , prepared: Map.insert cacheKey { info, expr: preparedExpr } acc2.prepared
+                                  }
+                            -- Only this prefix depends on the fixed global AST and
+                            -- these immutable inputs. The specialization map changes
+                            -- each round, so the following passes must still run.
+                            substitutedExpr = cached.expr
                             -- Qualified globals determine this body's dependencies;
                             -- its lexical locals cannot name another specialization.
                             specializedExpr = monomorphizeExpr definerMod specializationMap Map.empty substitutedExpr
                           in
-                            collectExpr globalAstMap definerMod acc2 specializedExpr
+                            { instantiations: collectExpr globalAstMap definerMod acc2.instantiations specializedExpr
+                            , prepared: cached.prepared
+                            }
                       Nothing -> acc2
               )
               acc1
               (Map.toUnfoldable typeMap :: Array _)
         )
-        currentMap
+        { instantiations: currentMap, prepared }
         (Map.toUnfoldable currentMap :: Array _)
+      newMap = collected.instantiations
     in
       let
         countCallers m = Array.foldl
@@ -1259,4 +1305,4 @@ transitiveCollect globalAstMap initialMap = loop initialMap
         callers1 = countCallers currentMap
         callers2 = countCallers newMap
       in
-        if callers1 == callers2 then currentMap else loop newMap
+        if callers1 == callers2 then currentMap else loop collected.prepared newMap
