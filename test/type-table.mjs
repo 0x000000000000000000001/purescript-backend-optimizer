@@ -30,13 +30,51 @@ assert.equal(JSON.stringify(forward), before, "decoding must not mutate the inpu
 assert.deepStrictEqual(right(forward), values, "each decoding must start with an empty result table");
 assert.deepStrictEqual(right([{ type: "Array", element: 0 }]), [new C.Array(C.Any.value)]);
 assert.deepStrictEqual(right([{ type: "Array", element: 1 }, { type: "Array", element: 0 }]), [new C.Array(C.Any.value), new C.Array(new C.Array(C.Any.value))]);
+const cascaded = right([
+  { type: "Array", element: 1 }, { type: "Array", element: 0 },
+  { type: "Array", element: 3 }, { type: "Array", element: 2 },
+  { type: "Func", args: [1, 3], ret: 0 },
+]);
+assert.deepStrictEqual(cascaded.slice(0, 4), [
+  new C.Array(C.Any.value), new C.Array(new C.Array(C.Any.value)),
+  new C.Array(C.Any.value), new C.Array(new C.Array(C.Any.value)),
+], "resolve between forced cycles, keeping the first unresolved index");
+assert.equal(cascaded[1].value0, cascaded[0]);
+assert.equal(cascaded[3].value0, cascaded[2]);
+assert.equal(cascaded[4].value0[0], cascaded[1]);
+assert.equal(cascaded[4].value0[1], cascaded[3]);
+assert.equal(cascaded[4].value1, cascaded[0]);
+assert.deepStrictEqual(right([
+  { type: "Array", element: 1 }, { type: "Array", element: 2 },
+  { type: "Array", element: 1 },
+]), [new C.Array(C.Any.value), new C.Array(C.Any.value), new C.Array(new C.Array(C.Any.value))],
+"force the first unresolved index even when it only depends on a later cycle");
 for (const element of [-1, 42]) {
   assert.deepStrictEqual(right([{ type: "Array", element }]), [new C.Array(C.Any.value)], "preserve forced fallback for unresolved integer references");
 }
 for (const table of [["Unknown"], [{ type: "Array", element: 0.5 }], [{ type: "Func", args: [] }]]) {
   assert.ok(decode(table) instanceof Either.Left, "malformed types must remain errors");
 }
-console.log("PASS type table decoding: primitives, forward/shared references, independent runs, cycles, invalid indices and errors");
+assert.deepStrictEqual(decode([
+  { type: "Array", element: 2 }, "Unknown", { type: "Func", args: [] },
+]), decode([{ type: "Func", args: [] }]), "return the error at the first table index, even when a later index fails in an earlier round");
+for (const dependent of [
+  { type: "TypeApp", constructor: 1, args: null },
+  { type: "Row", fields: [{ label: "x", type: 1 }], tail: "invalid" },
+  { type: "ConstrainedType", constraints: [{ fqn: ["Eq"], args: [1] }], body: "invalid" },
+]) {
+  assert.deepStrictEqual(decode([dependent, "Unknown"]), decode(["Unknown"]),
+    "a reference error must retain priority over a later malformed JSON field");
+}
+for (const [cyclic, resolved] of [
+  [{ type: "TypeApp", constructor: 0, args: null }, { type: "TypeApp", constructor: 1, args: null }],
+  [{ type: "Row", fields: [{ label: "x", type: 0 }], tail: "invalid" }, { type: "Row", fields: [], tail: "invalid" }],
+  [{ type: "ConstrainedType", constraints: [{ fqn: ["Eq"], args: [0] }], body: "invalid" }, { type: "ConstrainedType", constraints: [], body: "invalid" }],
+]) {
+  assert.deepStrictEqual(decode([cyclic]), decode([resolved, "Any"]),
+    "forcing a cycle must still expose the deferred malformed JSON field");
+}
+console.log("PASS type table decoding: primitives, forward/shared references, independent runs, cascading cycles, invalid indices and deferred error order");
 
 if (process.argv[3]) {
   if (!process.argv[4]) throw new Error("Corpus comparison also requires a baseline module path");
