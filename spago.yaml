@@ -10,6 +10,7 @@ package:
     - enums: ">=6.0.1 <7.0.0"
     - foldable-traversable: ">=6.0.0 <7.0.0"
     - foreign-object: ">=4.1.0 <5.0.0"
+    - functions: ">=6.0.0 <7.0.0"
     - integers: ">=6.0.0 <7.0.0"
     - language-cst-parser: ">=0.14.1 <0.15.0"
     - lazy: ">=6.0.0 <7.0.0"

@@ -10,6 +10,7 @@ module PureScript.Backend.Optimizer.Builder
 
 import Prelude
 
+import Data.Function.Uncurried (mkFn2)
 import Data.FoldableWithIndex (foldrWithIndex)
 import Data.List (List(..))
 import Data.List as List
@@ -20,9 +21,10 @@ import Data.Set (Set)
 import Data.Set as Set
 import Data.Tuple (Tuple(..))
 import PureScript.Backend.Optimizer.Analysis (BackendAnalysis)
+import PureScript.Backend.Optimizer.BoundedMemo (createBoundedMemo)
 import PureScript.Backend.Optimizer.Convert (BackendModule, OptimizationSteps, toBackendModule)
 import PureScript.Backend.Optimizer.CoreFn (Ann, Ident, Module(..), Qualified)
-import PureScript.Backend.Optimizer.Semantics (BackendExpr, Ctx, ExternImpl, InlineDirectiveMap)
+import PureScript.Backend.Optimizer.Semantics (BackendExpr, Ctx, ExternImpl, InlineDirectiveMap, instantiateNeutralType)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
 import PureScript.Backend.Optimizer.Syntax (BackendSyntax)
 import PureScript.Backend.Optimizer.Cache (writePurmetaSync, trimPurmetaCache, beginPurmetaBuild)
@@ -79,10 +81,14 @@ buildModules options coreFnModules = do
           }
           remainingModules
       Nothing -> do
+        -- Only the pure type instantiation is memoized. Each module owns its
+        -- bounded cache; implementation lookup and directives remain live.
+        instantiate <- liftEffect $ createBoundedMemo 512 (mkFn2 instantiateNeutralType)
         let
           Tuple optimizationSteps backendMod = toBackendModule coreFnModule'
             { analyzeCustom: options.analyzeCustom
             , currentModule: name
+            , instantiateNeutral: instantiate
             , currentLevel: 0
             , toLevel: Map.empty
             , implementations

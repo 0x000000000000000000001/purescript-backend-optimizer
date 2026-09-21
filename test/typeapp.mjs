@@ -8,7 +8,7 @@ const output = process.argv[2]
   ? resolve(process.argv[2])
   : fileURLToPath(new URL("../output/", import.meta.url));
 const load = (name) => import(pathToFileURL(resolve(output, name, "index.js")));
-const [C, S, Sem, Sub, Maybe, Tuple, Map, Ord, Foldable, Analysis, Set] = await Promise.all([
+const [C, S, Sem, Sub, Maybe, Tuple, Map, Ord, Foldable, Analysis, Set, Memo] = await Promise.all([
   "PureScript.Backend.Optimizer.CoreFn",
   "PureScript.Backend.Optimizer.Syntax",
   "PureScript.Backend.Optimizer.Semantics",
@@ -16,6 +16,7 @@ const [C, S, Sem, Sub, Maybe, Tuple, Map, Ord, Foldable, Analysis, Set] = await 
   "Data.Maybe", "Data.Tuple", "Data.Map", "Data.Ord", "Data.Foldable",
   "PureScript.Backend.Optimizer.Analysis",
   "Data.Set",
+  "PureScript.Backend.Optimizer.BoundedMemo",
 ].map(load));
 
 const pair = (left, right) => new Tuple.Tuple(left, right);
@@ -34,8 +35,11 @@ const nothing = Maybe.Nothing.value;
 const substitution = (entries) => Map.fromFoldable(Ord.ordString)(Foldable.foldableArray)(
   entries.map(([name, type]) => pair(name, type)));
 const substitute = (entries, type) => Sub.substitute(substitution(entries))(type);
+const cachedInstantiate = Memo.createBoundedMemo(512)((type, expr) => Sem.instantiateNeutralType(type)(expr))();
 const instantiate = (type, expr) => {
-  const result = Sem.instantiateNeutralType(type)(expr);
+  const result = cachedInstantiate(type)(expr);
+  assert.deepStrictEqual(result, Sem.instantiateNeutralType(type)(expr));
+  assert.strictEqual(cachedInstantiate(type)(expr), result, "cached instantiation must reuse its result");
   assert.ok(result instanceof Maybe.Just, "An explicit quantifier must be instantiated");
   return result.value0;
 };
@@ -252,6 +256,7 @@ test("expressions without an explicit quantifier cannot guess an instantiation",
 const extern = (body, directive = Sem.InlineAlways.value) => {
   const name = new C.Qualified(new Maybe.Just("Fixture"), "external");
   const env = {
+    instantiateNeutral: cachedInstantiate,
     currentModule: "Fixture", locals: Map.empty, localsSize: 0,
     evalExternRef: () => () => nothing,
     evalExternSpine: () => () => () => nothing,
@@ -262,6 +267,36 @@ const extern = (body, directive = Sem.InlineAlways.value) => {
   const implementation = pair({}, new Sem.ExternExpr([], body));
   return { name, env, evaluate: (spine) => Sem.evalExternFromImpl(env)(name)(implementation)(spine) };
 };
+
+test("a cached instantiation does not bypass a later InlineNever directive", () => {
+  const body = freeze(typed(forall(["a"], func([a], a)), lambda(["value"], typed(a, local("value", 0)))));
+  const { env, name, evaluate } = extern(body);
+  let calls = 0;
+  env.instantiateNeutral = Memo.createBoundedMemo(2)((type, expr) => {
+    calls++; return Sem.instantiateNeutralType(type)(expr);
+  })();
+  const argument = new Sem.NeutLit(new C.LitInt(1));
+  const spine = [new Sem.ExternTypeApp(int), new Sem.ExternApp([argument])];
+  evaluate(spine);
+  evaluate(spine);
+  assert.equal(calls, 1);
+  env.directives = Map.singleton(new Sem.EvalExtern(name))(Map.singleton(Sem.InlineRef.value)(Sem.InlineNever.value));
+  assert.deepStrictEqual(evaluate(spine), new Maybe.Just(new Sem.NeutApp(new Sem.SemTypeApp(int, new Sem.NeutStop(name)), [argument])));
+  assert.equal(calls, 1, "InlineNever must be checked before invoking the instantiator");
+});
+
+test("a same-named replacement implementation cannot reuse the previous body", () => {
+  const one = freeze(typed(forall(["a"], int), new S.Lit(new C.LitInt(1))));
+  const two = freeze(typed(forall(["a"], int), new S.Lit(new C.LitInt(2))));
+  const { env, name } = extern(one);
+  const spine = [new Sem.ExternTypeApp(string)];
+  for (const body of [one, two, one, two]) {
+    const impl = pair({}, new Sem.ExternExpr([], body));
+    const actual = Sem.evalExternFromImpl(env)(name)(impl)(spine);
+    const expected = Sem.evalExternFromImpl({ ...env, instantiateNeutral: Sem.instantiateNeutralType })(name)(impl)(spine);
+    assert.deepStrictEqual(actual, expected);
+  }
+});
 
 test("an unconsumable external TypeApp cannot be erased by the runtime spine fallback", () => {
   const body = typed(func([a], a), lambda(["value"], typed(a, local("value", 0))));
@@ -387,6 +422,7 @@ test("imported constructors retain their module through quotation and later satu
     analyze: () => Analysis.analyze(Sem.hasAnalysisBackendExpr)(Sem.hasSyntaxBackendExpr)(lookup),
   };
   const env = {
+    instantiateNeutral: cachedInstantiate,
     currentModule: module, locals: Map.empty, localsSize: 0, directives: Map.empty,
     evalExternRef: () => () => nothing,
     evalExternSpine: () => name => spine => name === imported && spine.length === 0

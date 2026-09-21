@@ -113,6 +113,7 @@ type BackendModule =
 
 type ConvertEnv =
   { analyzeCustom :: Ctx -> BackendSyntax BackendExpr -> Maybe BackendAnalysis
+  , instantiateNeutral :: ExprType -> NeutralExpr -> Maybe NeutralExpr
   , currentLevel :: Int
   , currentModule :: ModuleName
   , dataTypes :: Map ProperName DataTypeMeta
@@ -272,7 +273,7 @@ type OptimizationSteps = Array (Tuple (Qualified Ident) (NonEmptyArray BackendEx
 
 toTopLevelBackendBinding :: Array (Qualified Ident) -> ConvertEnv -> Binding Ann -> Accum ConvertEnv (Tuple Ident (WithDeps NeutralExpr))
 toTopLevelBackendBinding group env (Binding (Ann bindingAnn) ident cfn) = do
-  let evalEnv = Env { currentModule: env.currentModule, evalExternRef: makeExternEvalRef group env, evalExternSpine: makeExternEvalSpine group env, locals: Map.empty, localsSize: 0, directives: env.directives }
+  let evalEnv = Env { currentModule: env.currentModule, instantiateNeutral: env.instantiateNeutral, evalExternRef: makeExternEvalRef group env, evalExternSpine: makeExternEvalSpine group env, locals: Map.empty, localsSize: 0, directives: env.directives }
   let qualifiedIdent = Qualified (Just env.currentModule) ident
   let backendExpr = toBackendExpr cfn env
   let enableTracing = Set.member qualifiedIdent env.traceIdents

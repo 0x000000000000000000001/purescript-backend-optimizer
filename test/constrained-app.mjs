@@ -15,6 +15,7 @@ const [C, Sem, Maybe, Tuple, Map] = await Promise.all([
 ].map(load));
 
 const env = {
+  instantiateNeutral: Sem.instantiateNeutralType,
   currentModule: "Fixture", locals: Map.empty, localsSize: 0, directives: Map.empty,
   evalExternRef: () => () => Maybe.Nothing.value,
   evalExternSpine: () => () => () => Maybe.Nothing.value,

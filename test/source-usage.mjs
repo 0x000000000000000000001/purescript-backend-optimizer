@@ -7,11 +7,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const output = process.argv[2] ? resolve(process.argv[2])
   : fileURLToPath(new URL("../output/", import.meta.url));
 const load = name => import(pathToFileURL(resolve(output, name, "index.js")));
-const [Json, Usage, Mono, Convert, Maybe, Either, Map, Set] = await Promise.all([
+const [Json, Usage, Mono, Convert, Sem, Maybe, Either, Map, Set] = await Promise.all([
   "PureScript.Backend.Optimizer.CoreFn.Json",
   "PureScript.Backend.Optimizer.CoreFn.Usage",
   "PureScript.Backend.Optimizer.Monomorphize",
   "PureScript.Backend.Optimizer.Convert",
+  "PureScript.Backend.Optimizer.Semantics",
   "Data.Maybe", "Data.Either", "Data.Map", "Data.Set",
 ].map(load));
 const nothing = Maybe.Nothing.value;
@@ -171,7 +172,7 @@ test("invalidation removes source identities and proofs before transformed modul
 
 test("conversion never carries source certificates into the optimized backend IR", () => {
   const module = decode(fixture());
-  const options = { analyzeCustom: () => () => nothing, currentModule: module.name,
+  const options = { instantiateNeutral: Sem.instantiateNeutralType, analyzeCustom: () => () => nothing, currentModule: module.name,
     currentLevel: 0, toLevel: Map.empty, implementations: Map.empty,
     moduleImplementations: Map.empty, optimizationSteps: [], directives: Map.empty,
     dataTypes: Map.empty, foreignSemantics: Map.empty, rewriteLimit: 100,

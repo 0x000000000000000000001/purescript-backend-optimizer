@@ -255,6 +255,7 @@ type InlineDirectiveMap = Map EvalRef (Map InlineAccessor InlineDirective)
 -- | L'environnement d'évaluation, transportant les variables locales et la configuration d'inlining.
 newtype Env = Env
   { currentModule :: ModuleName
+  , instantiateNeutral :: ExprType -> NeutralExpr -> Maybe NeutralExpr
   , locals :: Map Int (LocalBinding BackendSemantics)
   , localsSize :: Int
   , evalExternRef :: Env -> Qualified Ident -> Maybe BackendSemantics
@@ -1215,9 +1216,9 @@ evalExternFromImpl (Env e) qual (Tuple _ (ExternExpr _ _)) spine
   | Just { head: ExternTypeApp _ } <- Array.uncons spine
   , Just InlineNever <- Map.lookup (EvalExtern qual) e.directives >>= Map.lookup InlineRef =
       Just $ neutralSpine (NeutStop qual) spine
-evalExternFromImpl env qual (Tuple analysis (ExternExpr group expr)) spine
+evalExternFromImpl env@(Env e) qual (Tuple analysis (ExternExpr group expr)) spine
   | Just { head: ExternTypeApp ty, tail } <- Array.uncons spine
-  , Just instantiated <- instantiateNeutralType ty expr =
+  , Just instantiated <- e.instantiateNeutral ty expr =
       evalExternFromImpl env qual (Tuple analysis (ExternExpr group instantiated)) tail
 -- An identity only returns its caller's value. Reduce it without evaluating
 -- the annotated body, so no uninstantiated callee type enters the caller.

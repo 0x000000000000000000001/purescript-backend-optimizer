@@ -26,6 +26,7 @@ import Prelude
 
 import Data.Array as Array
 import Data.Foldable (foldl)
+import Data.FunctorWithIndex (mapWithIndex)
 import Data.Map (Map)
 import Data.Map as Map
 import Data.String as String
@@ -52,7 +53,11 @@ type Instantiation =
 type InstantiationMap = Map String (Map String Instantiation)
 
 type PreparedInstantiations = Map (Tuple String String)
-  { info :: Instantiation, expr :: Expr Ann }
+  { info :: Instantiation
+  , expr :: Expr Ann
+  , dependencies :: Map String Int
+  , contribution :: InstantiationMap
+  }
 
 -- Private identity guard for immutable compiler inputs, not semantic equality.
 -- Reboxing may cause a cache miss; it must never permit an approximate hit.
@@ -251,7 +256,7 @@ collectExpr globalAstMap modName acc expr = case expr of
     in
       case trueGenericType of
         Just t ->
-          Map.insertWith (\new old -> Map.unionWith (\a b -> { instType: a.instType, dictArgs: a.dictArgs, normalArgs: a.normalArgs, callers: Set.union a.callers b.callers, subst: a.subst }) new old) qualName (Map.singleton (mangleType (defaultToAny t)) { instType: defaultToAny t, dictArgs: [], normalArgs: [], callers: Set.singleton modName, subst: Map.empty }) acc
+          Map.insertWith (\new old -> Map.unionWith mergeInstantiation new old) qualName (Map.singleton (mangleType (defaultToAny t)) { instType: defaultToAny t, dictArgs: [], normalArgs: [], callers: Set.singleton modName, subst: Map.empty }) acc
         Nothing -> acc
   ExprVar _ (Qualified Nothing _) -> acc
   ExprApp _ _ _ ->
@@ -304,7 +309,7 @@ collectExpr globalAstMap modName acc expr = case expr of
              else if hasTypeVariables instType then acc2
              else
                let specKey = specializationKey instType dictArgs normalArgs
-               in Map.insertWith (\new old -> Map.unionWith (\a b -> { instType: a.instType, dictArgs: a.dictArgs, normalArgs: a.normalArgs, callers: Set.union a.callers b.callers, subst: a.subst }) new old) qualName (Map.singleton specKey { instType: defaultToAny instType, dictArgs, normalArgs, callers: Set.singleton modName, subst }) acc2
+               in Map.insertWith (\new old -> Map.unionWith mergeInstantiation new old) qualName (Map.singleton specKey { instType: defaultToAny instType, dictArgs, normalArgs, callers: Set.singleton modName, subst }) acc2
         _ -> acc2
 
   ExprLit _ lit -> foldl (collectExpr globalAstMap modName) acc lit
@@ -1233,6 +1238,50 @@ binderIdents = case _ of
   BinderLit _ lit -> foldl (\acc b -> Set.union (binderIdents b) acc) Set.empty lit
   _ -> Set.empty
 
+-- Map.insertWith passes the existing value first: preserve its payload and
+-- union callers, whether collecting directly or replaying a cached contribution.
+mergeInstantiation :: Instantiation -> Instantiation -> Instantiation
+mergeInstantiation first next = first { callers = Set.union first.callers next.callers }
+
+mergeInstantiations :: InstantiationMap -> InstantiationMap -> InstantiationMap
+mergeInstantiations = Map.unionWith (Map.unionWith mergeInstantiation)
+
+-- Conservative dependencies of monomorphizeExpr, including globals in local
+-- dictionaries and static arguments. Local specialization only introduces local
+-- names; every global it can consult comes from this prepared expression.
+collectDependencies :: Expr Ann -> Set String
+collectDependencies = go Set.empty
+  where
+  go acc = case _ of
+    ExprVar _ (Qualified (Just mod) (Ident name)) -> Set.insert (unwrap mod <> "." <> name) acc
+    ExprVar _ _ -> acc
+    ExprLit _ lit -> foldl go acc lit
+    ExprConstructor _ _ _ _ -> acc
+    ExprApp _ f x -> go (go acc f) x
+    ExprTypeApp _ e _ -> go acc e
+    ExprAbs _ _ e -> go acc e
+    ExprAccessor _ e _ -> go acc e
+    ExprUpdate _ e props -> foldl (\a (Prop _ v) -> go a v) (go acc e) props
+    ExprLet _ binds e -> foldl goBind (go acc e) binds
+    ExprCase _ exprs alts -> foldl goAlt (foldl go acc exprs) alts
+  goBind acc = case _ of
+    NonRec (Binding _ _ e) -> go acc e
+    Rec binds -> foldl (\a (Binding _ _ e) -> go a e) acc binds
+  goAlt acc (CaseAlternative _ guard) = case guard of
+    Unconditional e -> go acc e
+    Guarded guards -> foldl (\a (Guard g e) -> go (go a g) e) acc guards
+
+specializationCount :: InstantiationMap -> String -> Int
+specializationCount instantiations name = maybe 0 Map.size (Map.lookup name instantiations)
+
+-- Within one transitiveCollect call keys only grow, and globalAstMap is fixed.
+-- Equal cardinalities therefore imply equal key sets. Payload/caller changes
+-- cannot affect monomorphizeExpr, which only tests membership of those keys.
+sameDependencySizes :: InstantiationMap -> Map String Int -> Boolean
+sameDependencySizes instantiations dependencies = Array.all
+  (\(Tuple name size) -> specializationCount instantiations name == size)
+  (Map.toUnfoldable dependencies :: Array _)
+
 transitiveCollect :: Map String (Binding Ann) -> InstantiationMap -> InstantiationMap
 transitiveCollect globalAstMap initialMap = loop Map.empty initialMap
   where
@@ -1263,28 +1312,38 @@ transitiveCollect globalAstMap initialMap = loop Map.empty initialMap
                               x -> x
                             astSubstFn t = substituteExprType info.subst (stripForAlls t)
                             cacheKey = Tuple qualName specKey
-                            cached = case Map.lookup cacheKey acc2.prepared of
-                              Just entry | sameInstantiationInputs entry.info info ->
-                                { expr: entry.expr, prepared: acc2.prepared }
+                            previous = case Map.lookup cacheKey acc2.prepared of
+                              Just old | sameInstantiationInputs old.info info -> Just old
+                              _ -> Nothing
+                            reused = case previous of
+                              Just cached | sameDependencySizes specializationMap cached.dependencies -> Just cached
+                              _ -> Nothing
+                            entry = case reused of
+                              Just cached -> cached
                               _ ->
                                 let
-                                  exprWithDicts = applyStaticArgs info.dictArgs info.normalArgs expr
-                                  resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
-                                  preparedExpr = rewriteExpr globalAstMap Map.empty Map.empty astSubstFn resolvedExpr
+                                  substitutedExpr = case previous of
+                                    Just cached -> cached.expr
+                                    Nothing ->
+                                      let
+                                        exprWithDicts = applyStaticArgs info.dictArgs info.normalArgs expr
+                                        resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
+                                      in rewriteExpr globalAstMap Map.empty Map.empty astSubstFn resolvedExpr
+                                  dependencies = case previous of
+                                    Just cached -> mapWithIndex (\name _ -> specializationCount specializationMap name) cached.dependencies
+                                    Nothing -> Map.fromFoldable (map (\name -> Tuple name (specializationCount specializationMap name)) (Set.toUnfoldable (collectDependencies substitutedExpr) :: Array String))
+                                  specializedExpr = monomorphizeExpr definerMod specializationMap Map.empty substitutedExpr
                                 in
-                                  { expr: preparedExpr
-                                  , prepared: Map.insert cacheKey { info, expr: preparedExpr } acc2.prepared
+                                  { info
+                                  , expr: substitutedExpr
+                                  , dependencies
+                                  , contribution: collectExpr globalAstMap definerMod Map.empty specializedExpr
                                   }
-                            -- Only this prefix depends on the fixed global AST and
-                            -- these immutable inputs. The specialization map changes
-                            -- each round, so the following passes must still run.
-                            substitutedExpr = cached.expr
-                            -- Qualified globals determine this body's dependencies;
-                            -- its lexical locals cannot name another specialization.
-                            specializedExpr = monomorphizeExpr definerMod specializationMap Map.empty substitutedExpr
                           in
-                            { instantiations: collectExpr globalAstMap definerMod acc2.instantiations specializedExpr
-                            , prepared: cached.prepared
+                            { instantiations: mergeInstantiations acc2.instantiations entry.contribution
+                            , prepared: case reused of
+                                Just _ -> acc2.prepared
+                                Nothing -> Map.insert cacheKey entry acc2.prepared
                             }
                       Nothing -> acc2
               )

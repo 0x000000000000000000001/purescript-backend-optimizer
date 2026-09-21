@@ -22,6 +22,7 @@ const ctx = {
   analyze: () => Analysis.analyze(Sem.hasAnalysisBackendExpr)(Sem.hasSyntaxBackendExpr)(lookup),
 };
 const env = {
+  instantiateNeutral: Sem.instantiateNeutralType,
   currentModule: "Fixture", locals: Map.empty, localsSize: 0, directives: Map.empty,
   evalExternRef: lookup, evalExternSpine: () => () => () => nothing,
 };
