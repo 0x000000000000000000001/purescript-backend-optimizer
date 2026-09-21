@@ -1,5 +1,5 @@
 // Copy into a retained gopurs native bootstrap's output/purescript directory.
-// GOPURS_TEST_CORPUS=<TAST directory> go test -race ./purescript -run TestParallelLoad -v
+// GOPURS_TEST_CORPUS=<TAST directory> go test -race ./purescript -run 'Test(ParallelLoad|ModuleReadConcurrency)' -v
 package purescript
 
 import (
@@ -12,6 +12,34 @@ import (
 
 	"gopurs/output/gopurs_runtime"
 )
+
+func TestModuleReadConcurrency(t *testing.T) {
+	t.Run("unset", func(t *testing.T) {
+		t.Setenv("GOPURS_JOBS", "")
+		if err := os.Unsetenv("GOPURS_JOBS"); err != nil {
+			t.Fatal(err)
+		}
+		if got := PureScript_Backend_Optimizer_App_ModuleReadConcurrency(); got != 8 {
+			t.Fatalf("unset GOPURS_JOBS: got %d, want 8", got)
+		}
+	})
+	for _, test := range []struct {
+		configured string
+		want       int
+	}{
+		{"", 8}, {"0", 8}, {"-1", 8}, {"65", 8}, {"1.5", 8},
+		{"4x", 8}, {" 4", 8}, {"4 ", 8}, {"1e1", 8},
+		{"999999999999999999999999999999999999", 8},
+		{"1", 1}, {"4", 4}, {"8", 8}, {"64", 64},
+	} {
+		t.Run(test.configured, func(t *testing.T) {
+			t.Setenv("GOPURS_JOBS", test.configured)
+			if got := PureScript_Backend_Optimizer_App_ModuleReadConcurrency(); got != test.want {
+				t.Fatalf("GOPURS_JOBS=%q: got %d, want %d", test.configured, got, test.want)
+			}
+		})
+	}
+}
 
 func TestParallelLoad(t *testing.T) {
 	corpus := os.Getenv("GOPURS_TEST_CORPUS")

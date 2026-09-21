@@ -15,7 +15,7 @@ func ModuleReadConcurrency() int {
 			return jobs
 		}
 	}
-	return 1
+	return 8
 }
 
 // The legacy JSON BackendModule cache is not used by gopurs. Native ADTs cannot
