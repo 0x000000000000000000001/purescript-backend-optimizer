@@ -2,6 +2,7 @@ package purescript
 
 import (
 	"runtime"
+ "strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -186,4 +187,27 @@ func TestGeneratedBridge(t *testing.T) {
 	if calls != 2 {
 		t.Fatal("effect cache was shared", calls)
 	}
+}
+
+func TestGeneratedStringBridgeUsesContentAndFreshEffects(t *testing.T) {
+ calls := 0
+ callback := gopurs_runtime.Func2(func(a, b gopurs_runtime.Value) gopurs_runtime.Value {
+  calls++
+  if a.StrVal() == "Absent" { return gopurs_runtime.Value{} }
+  return gopurs_runtime.Str(a.StrVal()+"/"+b.StrVal())
+ })
+ effect := gopurs_runtime.Apply2(_Gopurs_PureScript_Backend_Optimizer_BoundedMemo_CreateStringMemo, gopurs_runtime.Int(512), callback)
+ memo := gopurs_runtime.Apply(effect, gopurs_runtime.Value{})
+ for i:=0;i<4;i++ {
+  result:=gopurs_runtime.Apply2(memo,gopurs_runtime.Str(strings.Clone("Dep")),gopurs_runtime.Str(strings.Clone("answer")))
+  if result.StrVal()!="Dep/answer" {t.Fatal(result)}
+ }
+ if calls!=1 {t.Fatalf("equal String keys missed through the native bridge: %d",calls)}
+ for i:=0;i<2;i++ {gopurs_runtime.Apply2(memo,gopurs_runtime.Str("Absent"),gopurs_runtime.Str("answer"))}
+ if calls!=2 {t.Fatalf("zero result not cached: %d",calls)}
+ for _,keys:=range [][2]string{{"A.B","c"},{"A","B.c"},{"Dep","other"},{"Other","answer"}} {gopurs_runtime.Apply2(memo,gopurs_runtime.Str(keys[0]),gopurs_runtime.Str(keys[1]))}
+ if calls!=6 {t.Fatal("qualified key pairs collided",calls)}
+ fresh:=gopurs_runtime.Apply(effect,gopurs_runtime.Value{})
+ gopurs_runtime.Apply2(fresh,gopurs_runtime.Str("Dep"),gopurs_runtime.Str("answer"))
+ if calls!=7 {t.Fatal("effect executions shared cache",calls)}
 }

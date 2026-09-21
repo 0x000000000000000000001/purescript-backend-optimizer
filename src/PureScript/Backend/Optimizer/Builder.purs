@@ -21,8 +21,8 @@ import Data.Set (Set)
 import Data.Set as Set
 import Data.Tuple (Tuple(..))
 import PureScript.Backend.Optimizer.Analysis (BackendAnalysis)
-import PureScript.Backend.Optimizer.BoundedMemo (createBoundedMemo)
-import PureScript.Backend.Optimizer.Convert (BackendModule, OptimizationSteps, toBackendModule)
+import PureScript.Backend.Optimizer.BoundedMemo (createBoundedMemo, createStringMemo)
+import PureScript.Backend.Optimizer.Convert (BackendModule, OptimizationSteps, lookupPurmetaImplementation, toBackendModuleWithLookup)
 import PureScript.Backend.Optimizer.CoreFn (Ann, Ident, Module(..), Qualified)
 import PureScript.Backend.Optimizer.Semantics (BackendExpr, Ctx, ExternImpl, InlineDirectiveMap, instantiateNeutralType)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
@@ -81,11 +81,12 @@ buildModules options coreFnModules = do
           }
           remainingModules
       Nothing -> do
-        -- Only the pure type instantiation is memoized. Each module owns its
-        -- bounded cache; implementation lookup and directives remain live.
+        -- Each module owns its caches. Purmeta is unchanged during conversion;
+        -- local implementations and directives remain live as bindings advance.
         instantiate <- liftEffect $ createBoundedMemo 512 (mkFn2 instantiateNeutralType)
+        lookupPurmeta <- liftEffect $ createStringMemo 512 (mkFn2 lookupPurmetaImplementation)
         let
-          Tuple optimizationSteps backendMod = toBackendModule coreFnModule'
+          Tuple optimizationSteps backendMod = toBackendModuleWithLookup lookupPurmeta coreFnModule'
             { analyzeCustom: options.analyzeCustom
             , currentModule: name
             , instantiateNeutral: instantiate

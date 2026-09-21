@@ -49,6 +49,8 @@ module PureScript.Backend.Optimizer.Convert
   , BackendModule
   , OptimizationSteps
   , toBackendModule
+  , toBackendModuleWithLookup
+  , lookupPurmetaImplementation
   ) where
 
 import Prelude
@@ -111,8 +113,8 @@ type BackendModule =
   , directives :: InlineDirectiveMap
   }
 
-type ConvertEnv =
-  { analyzeCustom :: Ctx -> BackendSyntax BackendExpr -> Maybe BackendAnalysis
+type ConvertEnvFields =
+  ( analyzeCustom :: Ctx -> BackendSyntax BackendExpr -> Maybe BackendAnalysis
   , instantiateNeutral :: ExprType -> NeutralExpr -> Maybe NeutralExpr
   , currentLevel :: Int
   , currentModule :: ModuleName
@@ -125,12 +127,41 @@ type ConvertEnv =
   , foreignSemantics :: Map (Qualified Ident) ForeignEval
   , rewriteLimit :: Int
   , traceIdents :: Set (Qualified Ident)
+  )
+
+type PurmetaLookup = String -> String -> Maybe (Tuple BackendAnalysis ExternImpl)
+
+type ConvertEnv =
+  { lookupPurmeta :: PurmetaLookup
+  | ConvertEnvFields
   }
 
 type ConvertM = Function ConvertEnv
 
-toBackendModule :: Module Ann -> ConvertM (Tuple OptimizationSteps BackendModule)
-toBackendModule source = toBackendModuleWithoutSourceUsage (invalidateSourceUsageModule source)
+toBackendModule :: Module Ann -> Record ConvertEnvFields -> Tuple OptimizationSteps BackendModule
+toBackendModule = toBackendModuleWithLookup lookupPurmetaImplementation
+
+-- | The caller owns the fallback's lifetime. Builder uses a private memo for
+-- | one synchronous module conversion, during which purmeta stays unchanged.
+-- | Local implementations still change after each binding and remain uncached.
+toBackendModuleWithLookup :: PurmetaLookup -> Module Ann -> Record ConvertEnvFields -> Tuple OptimizationSteps BackendModule
+toBackendModuleWithLookup lookupPurmeta source env =
+  toBackendModuleWithoutSourceUsage (invalidateSourceUsageModule source)
+    { lookupPurmeta
+    , analyzeCustom: env.analyzeCustom
+    , instantiateNeutral: env.instantiateNeutral
+    , currentLevel: env.currentLevel
+    , currentModule: env.currentModule
+    , dataTypes: env.dataTypes
+    , toLevel: env.toLevel
+    , implementations: env.implementations
+    , moduleImplementations: env.moduleImplementations
+    , optimizationSteps: env.optimizationSteps
+    , directives: env.directives
+    , foreignSemantics: env.foreignSemantics
+    , rewriteLimit: env.rewriteLimit
+    , traceIdents: env.traceIdents
+    }
 
 -- Pattern compilation and inlining introduce/copy bindings. Source IDs and
 -- source usage facts are intentionally absent from BackendSyntax. A backend requiring
@@ -470,15 +501,18 @@ makeExternEvalSpine group conv env qual spine = do
   isRuntimeSpine _ = true
 
 lookupImplementation :: ConvertEnv -> Qualified Ident -> Maybe (Tuple BackendAnalysis ExternImpl)
-lookupImplementation conv qual@(Qualified mbMn _) =
+lookupImplementation conv qual@(Qualified mbMn ident) =
   case Map.lookup qual conv.implementations of
     Just impl -> Just impl
     Nothing -> case mbMn of
-      Just mn ->
-        case unsafePerformEffect (readPurmetaSync mn) of
-          Just impls -> Map.lookup qual impls
-          Nothing -> Nothing
+      Just mn -> conv.lookupPurmeta (unwrap mn) (unwrap ident)
       Nothing -> Nothing
+
+lookupPurmetaImplementation :: PurmetaLookup
+lookupPurmetaImplementation moduleName ident =
+  case unsafePerformEffect (readPurmetaSync (ModuleName moduleName)) of
+    Just impls -> Map.lookup (Qualified (Just (ModuleName moduleName)) (Ident ident)) impls
+    Nothing -> Nothing
 
 makeExternEvalRef :: Array (Qualified Ident) -> ConvertEnv -> Env -> Qualified Ident -> Maybe BackendSemantics
 makeExternEvalRef group conv env qual =

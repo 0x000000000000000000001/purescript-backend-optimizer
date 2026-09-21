@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createBoundedMemo as createCurriedMemo } from "../src/PureScript/Backend/Optimizer/BoundedMemo.js";
+import { createBoundedMemo as createCurriedMemo, createStringMemo } from "../src/PureScript/Backend/Optimizer/BoundedMemo.js";
 const createBoundedMemo = capacity => callback => () => {
   const memo = createCurriedMemo(capacity)(callback)();
   return (a,b) => memo(a)(b);
@@ -54,4 +54,16 @@ test("disabled caches and undefined results", () => {
 test("reentrant computation", () => {
   const memo = createBoundedMemo(512)((a,b) => a === 0 ? b : 1+memo(a-1,b))();
   assert.equal(memo(8,4), 12);
+});
+
+test("string memo keys distinguish module/identifier pairs and retain missing results", () => {
+  let calls = 0;
+  const create = createStringMemo(2)((module, ident) => { calls++; return module === "Absent" ? undefined : [module,ident]; });
+  const memo=create();
+  assert.strictEqual(memo("A.B")("c"),memo(["A","B"].join("."))("c"));
+  assert.notDeepEqual(memo("A.B")("c"),memo("A")("B.c"));
+  memo("Absent")("x"); memo("Absent")("x");
+  assert.equal(calls,3);
+  memo("A.B")("c"); assert.equal(calls,4);
+  create()("Absent")("x"); assert.equal(calls,5);
 });

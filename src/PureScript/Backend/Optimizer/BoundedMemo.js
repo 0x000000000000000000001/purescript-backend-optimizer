@@ -32,3 +32,5 @@ export const createBoundedMemo = capacity => f => () => {
     return result;
   };
 };
+
+export const createStringMemo = createBoundedMemo;

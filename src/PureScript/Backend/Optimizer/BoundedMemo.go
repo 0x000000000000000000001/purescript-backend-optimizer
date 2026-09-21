@@ -14,6 +14,18 @@ func CreateBoundedMemo[A, B, R any](capacity int64, f func(A, B) R) func() func(
 	}
 }
 
+// Keep keys as native strings so equal names reuse results even when callers
+// produce distinct boxed String values.
+func CreateStringMemo[R any](capacity int64, f func(string, string) R) func() func(string) func(string) R {
+	create := createBoundedMemoCache[string, string, R](capacity, f)
+	return func() func(string) func(string) R {
+		lookup := create()
+		return func(a string) func(string) R {
+			return func(b string) R { return lookup(a, b) }
+		}
+	}
+}
+
 // Private memoization for immutable compiler trees. Comparable opaque native
 // representations are keyed without traversing their contents. Unsupported
 // representations deliberately miss. This is not a general mutable-object cache.

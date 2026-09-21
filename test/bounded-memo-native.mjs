@@ -19,8 +19,10 @@ const prefix = moduleName.replaceAll(".", "_");
 const prepared = Support.prepareFfi({ moduleName, path: source })(prefix + "_")(readFileSync(source, "utf8"))();
 const bridge = Bridge.generateFfiBridge(prefix)([])(prepared.decls)([
   new Tuple.Tuple("createBoundedMemo", Maybe.Nothing.value),
+  new Tuple.Tuple("createStringMemo", Maybe.Nothing.value),
 ]);
 assert.match(bridge, /CreateBoundedMemo\[gopurs_runtime\.Value, gopurs_runtime\.Value, gopurs_runtime\.Value\]/);
+assert.match(bridge, /CreateStringMemo\[gopurs_runtime\.Value\]/);
 assert.doesNotMatch(bridge, /Unbox\[(?:A|B|R)\]/);
 const workspace = mkdtempSync(join(tmpdir(), "gopurs-bounded-memo-"));
 try {
