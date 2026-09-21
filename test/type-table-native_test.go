@@ -1,4 +1,5 @@
-// Copy into a retained gopurs output/purescript directory, then from output run:
+// Copy into a JSON/TAST diagnostic build's output/purescript directory,
+// then from output run:
 // go test ./purescript -run '^TestTypeTable' -count=1 -v
 package purescript_test
 
