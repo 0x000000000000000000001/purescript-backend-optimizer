@@ -152,10 +152,36 @@ decodeTypeTableST typeTableJson = do
         _ -> if force then pure (Just (Right Any)) else pure Nothing
 
     resolveArgs force args = do
-      mbVals <- sequence <$> traverse (resolveId force) args
-      case mbVals of
-        Nothing -> pure Nothing
-        Just vals -> pure $ Just (sequence vals)
+      values <- STArray.new
+      waiting <- STRef.new false
+      firstError <- STRef.new Nothing
+      unsafePartial $ ST.for 0 (Array.length args) \ix -> do
+        resolved <- resolveId force (Array.unsafeIndex args ix)
+        case resolved of
+          Nothing -> do
+            _ <- STRef.write true waiting
+            pure unit
+          Just (Left err) -> do
+            previous <- STRef.read firstError
+            case previous of
+              Nothing -> do
+                _ <- STRef.write (Just err) firstError
+                pure unit
+              Just _ -> pure unit
+          Just (Right value) -> do
+            _ <- STArray.push value values
+            pure unit
+      -- sequence Maybe used to precede sequence Either: any pending reference
+      -- delays the result, even when an earlier argument already has an error.
+      pendingArgs <- STRef.read waiting
+      if pendingArgs then pure Nothing
+      else do
+        error <- STRef.read firstError
+        case error of
+          Just err -> pure $ Just (Left err)
+          Nothing -> do
+            result <- STArray.unsafeFreeze values
+            pure $ Just (Right result)
 
     resolveType force ref = case ref of
       Left err -> pure $ Just (Left err)

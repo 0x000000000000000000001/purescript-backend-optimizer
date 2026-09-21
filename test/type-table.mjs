@@ -6,9 +6,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const output = process.argv[2] ? resolve(process.argv[2]) : fileURLToPath(new URL("../output/", import.meta.url));
 const load = name => import(pathToFileURL(join(output, name, "index.js")));
-const [Decoder, C, Either] = await Promise.all([
+const [Decoder, C, Either, Tuple] = await Promise.all([
   "PureScript.Backend.Optimizer.CoreFn.TypeTable",
-  "PureScript.Backend.Optimizer.CoreFn", "Data.Either",
+  "PureScript.Backend.Optimizer.CoreFn", "Data.Either", "Data.Tuple",
 ].map(load));
 const decode = table => Decoder.decodeTypeTableST(table)();
 const right = table => {
@@ -52,6 +52,47 @@ assert.deepStrictEqual(right([
 for (const element of [-1, 42]) {
   assert.deepStrictEqual(right([{ type: "Array", element }]), [new C.Array(C.Any.value)], "preserve forced fallback for unresolved integer references");
 }
+// Exercise every caller of resolveArgs, including the empty result and forced
+// references. Repeated and out-of-order arguments must retain their positions.
+for (const [name, json, expected] of [
+  ["Adt", args => ({ type: "Adt", fqn: ["Test", "Args"], args }), args => new C.ADT("Test.Args", ["Test", "Args"], args)],
+  ["TypeApp", args => ({ type: "TypeApp", constructor: 1, args }), args => new C.TypeApp(C.Int.value, args)],
+  ["Func", args => ({ type: "Func", args, ret: 1 }), args => new C.Func(args, C.Int.value)],
+  ["ConstrainedType", args => ({ type: "ConstrainedType", constraints: [{ fqn: ["Eq"], args }], body: 1 }), args => new C.ConstrainedType([new Tuple.Tuple(["Eq"], args)], C.Int.value)],
+]) {
+  for (const [ids, types, description] of [
+    [[], [], "empty arguments"],
+    [[2, 1, 2], [C.String.value, C.Int.value, C.String.value], "ordered and repeated forward references"],
+    [[0, 1, 0], [C.Any.value, C.Int.value, C.Any.value], "self references forced to Any"],
+    [[2, -1, 42, 1], [C.String.value, C.Any.value, C.Any.value, C.Int.value], "absent references forced to Any"],
+  ]) {
+    assert.deepStrictEqual(right([json(ids), "Int", "String"]), [expected(types), C.Int.value, C.String.value], `${name}: ${description}`);
+  }
+}
+
+const argumentError = decode(["Unknown"]);
+const returnError = decode([{ type: "Array" }]);
+assert.ok(argumentError instanceof Either.Left);
+assert.ok(returnError instanceof Either.Left);
+assert.notDeepStrictEqual(argumentError, returnError, "error-priority checks require distinct errors");
+for (const [args, expected] of [[[1, 2], argumentError], [[2, 1], returnError]]) {
+  assert.deepStrictEqual(decode([
+    { type: "Func", args, ret: 3 }, "Unknown", { type: "Array" }, "Int",
+  ]), expected, "resolved arguments must retain the first error in argument order");
+}
+for (const args of [[1, 2], [2, 1]]) {
+  // Arg 1 fails, arg 2 is cyclic, and ret fails differently. During settling,
+  // sequence Maybe gives Nothing priority over Left in either argument order;
+  // Func must therefore select the return error instead of the argument error.
+  assert.deepStrictEqual(decode([
+    { type: "Func", args, ret: 3 }, "Unknown", { type: "Array", element: 2 }, { type: "Array" },
+  ]), returnError, "an unresolved argument before or after an error must keep all arguments pending");
+}
+for (const args of [[1, 42], [42, 1]]) {
+  assert.deepStrictEqual(decode([
+    { type: "Func", args, ret: 2 }, "Unknown", "Int",
+  ]), argumentError, "forcing an absent argument must retain an already resolved error");
+}
 for (const table of [["Unknown"], [{ type: "Array", element: 0.5 }], [{ type: "Func", args: [] }]]) {
   assert.ok(decode(table) instanceof Either.Left, "malformed types must remain errors");
 }
@@ -74,7 +115,7 @@ for (const [cyclic, resolved] of [
   assert.deepStrictEqual(decode([cyclic]), decode([resolved, "Any"]),
     "forcing a cycle must still expose the deferred malformed JSON field");
 }
-console.log("PASS type table decoding: primitives, forward/shared references, independent runs, cascading cycles, invalid indices and deferred error order");
+console.log("PASS type table decoding: primitives, forward/shared references, independent runs, cascading cycles, argument traversal, invalid indices and deferred error order");
 
 if (process.argv[3]) {
   if (!process.argv[4]) throw new Error("Corpus comparison also requires a baseline module path");
