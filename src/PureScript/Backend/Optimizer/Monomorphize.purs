@@ -19,14 +19,19 @@ module PureScript.Backend.Optimizer.Monomorphize
   , monomorphize
   , extractFuncType
   , transitiveCollect
+  , transitiveCollectWith
+  , TransitiveResult
+  , PreparedInstantiation
   , applyStaticArgs
   ) where
 
 import Prelude
 
+import Control.Monad.Rec.Class (class MonadRec, Step(..), tailRecM)
 import Data.Array as Array
 import Data.Foldable (foldl)
 import Data.FunctorWithIndex (mapWithIndex)
+import Data.Identity (Identity(..))
 import Data.Map (Map)
 import Data.Map as Map
 import Data.String as String
@@ -52,11 +57,24 @@ type Instantiation =
 
 type InstantiationMap = Map String (Map String Instantiation)
 
-type PreparedInstantiations = Map (Tuple String String)
+type PreparedInstantiation =
   { info :: Instantiation
   , expr :: Expr Ann
   , dependencies :: Map String Int
   , contribution :: InstantiationMap
+  }
+
+type PreparedInstantiations = Map (Tuple String String) PreparedInstantiation
+
+type TransitiveResult = Maybe
+  { key :: Tuple String String
+  , entry :: PreparedInstantiation
+  , reused :: Boolean
+  }
+
+type TransitiveState =
+  { prepared :: PreparedInstantiations
+  , instantiations :: InstantiationMap
   }
 
 -- Private identity guard for immutable compiler inputs, not semantic equality.
@@ -1283,85 +1301,110 @@ sameDependencySizes instantiations dependencies = Array.all
   (Map.toUnfoldable dependencies :: Array _)
 
 transitiveCollect :: Map String (Binding Ann) -> InstantiationMap -> InstantiationMap
-transitiveCollect globalAstMap initialMap = loop Map.empty initialMap
+transitiveCollect globalAstMap initialMap =
+  unwrap $ transitiveCollectWith (Identity <<< map (\job -> job unit)) globalAstMap initialMap
+
+-- | Evaluate a round's independent jobs, returning results in input order.
+-- | Jobs only read immutable snapshots. The ordered merge and the barrier
+-- | between fixed-point rounds remain here, independently of the dispatcher.
+transitiveCollectWith
+  :: forall m
+   . MonadRec m
+  => (Array (Unit -> TransitiveResult) -> m (Array TransitiveResult))
+  -> Map String (Binding Ann)
+  -> InstantiationMap
+  -> m InstantiationMap
+transitiveCollectWith runJobs globalAstMap initialMap =
+  tailRecM loop { prepared: Map.empty, instantiations: initialMap }
   where
-  loop :: PreparedInstantiations -> InstantiationMap -> InstantiationMap
-  loop prepared currentMap =
+  loop :: TransitiveState -> m (Step TransitiveState InstantiationMap)
+  loop { prepared, instantiations: currentMap } = do
     let
       -- Foreign declarations have no AST body from which to emit a specialization.
       -- Keep their collected type information, but never embed nonexistent
       -- specialized foreign names in another specialization's static arguments.
       specializationMap = Map.filterKeys (\name -> Map.member name globalAstMap) currentMap
-      collected = Array.foldl
-        ( \acc1 (Tuple qualName typeMap) ->
-            Array.foldl
-              ( \acc2 (Tuple specKey info) ->
-                  let
-                    definerMod = case String.split (Pattern ".") qualName of
-                      parts -> String.joinWith "." (fromMaybe [] (Array.init parts))
-
-                    genericExprOpt = Map.lookup qualName globalAstMap
-                  in
-                    case genericExprOpt of
-                      Just (Binding _ _ expr) ->
-                        if hasTypeVariables info.instType || Set.isEmpty info.callers then acc2
-                        else
-                          let
-                            stripForAlls = case _ of
-                              ForAll _ b -> stripForAlls b
-                              x -> x
-                            astSubstFn t = substituteExprType info.subst (stripForAlls t)
-                            cacheKey = Tuple qualName specKey
-                            previous = case Map.lookup cacheKey acc2.prepared of
-                              Just old | sameInstantiationInputs old.info info -> Just old
-                              _ -> Nothing
-                            reused = case previous of
-                              Just cached | sameDependencySizes specializationMap cached.dependencies -> Just cached
-                              _ -> Nothing
-                            entry = case reused of
-                              Just cached -> cached
-                              _ ->
-                                let
-                                  substitutedExpr = case previous of
-                                    Just cached -> cached.expr
-                                    Nothing ->
-                                      let
-                                        exprWithDicts = applyStaticArgs info.dictArgs info.normalArgs expr
-                                        resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
-                                      in rewriteExpr globalAstMap Map.empty Map.empty astSubstFn resolvedExpr
-                                  dependencies = case previous of
-                                    Just cached -> mapWithIndex (\name _ -> specializationCount specializationMap name) cached.dependencies
-                                    Nothing -> Map.fromFoldable (map (\name -> Tuple name (specializationCount specializationMap name)) (Set.toUnfoldable (collectDependencies substitutedExpr) :: Array String))
-                                  specializedExpr = monomorphizeExpr definerMod specializationMap Map.empty substitutedExpr
-                                in
-                                  { info
-                                  , expr: substitutedExpr
-                                  , dependencies
-                                  , contribution: collectExpr globalAstMap definerMod Map.empty specializedExpr
-                                  }
-                          in
-                            { instantiations: mergeInstantiations acc2.instantiations entry.contribution
-                            , prepared: case reused of
-                                Just _ -> acc2.prepared
-                                Nothing -> Map.insert cacheKey entry acc2.prepared
-                            }
-                      Nothing -> acc2
-              )
-              acc1
+      jobs = Array.concatMap
+        ( \(Tuple qualName typeMap) ->
+            map
+              (\(Tuple specKey info) _ -> collectEntry specializationMap prepared qualName specKey info)
               (Map.toUnfoldable typeMap :: Array _)
         )
-        { instantiations: currentMap, prepared }
         (Map.toUnfoldable currentMap :: Array _)
+    results <- runJobs jobs
+    let
+      collected = Array.foldl mergeResult { instantiations: currentMap, prepared } results
       newMap = collected.instantiations
+
+      countCallers m = Array.foldl
+        ( \acc (Tuple _ typeMap) ->
+            acc + Array.foldl (\a (Tuple _ info) -> a + Set.size info.callers) 0 (Map.toUnfoldable typeMap :: Array _)
+        )
+        0
+        (Map.toUnfoldable m :: Array _)
+      callers1 = countCallers currentMap
+      callers2 = countCallers newMap
+    pure $ if callers1 == callers2 then Done currentMap else Loop collected
+
+  collectEntry :: InstantiationMap -> PreparedInstantiations -> String -> String -> Instantiation -> TransitiveResult
+  collectEntry specializationMap prepared qualName specKey info =
+    let
+      definerMod = case String.split (Pattern ".") qualName of
+        parts -> String.joinWith "." (fromMaybe [] (Array.init parts))
+
+      genericExprOpt = Map.lookup qualName globalAstMap
     in
-      let
-        countCallers m = Array.foldl
-          ( \acc (Tuple _ typeMap) ->
-              acc + Array.foldl (\a (Tuple _ info) -> a + Set.size info.callers) 0 (Map.toUnfoldable typeMap :: Array _)
-          )
-          0
-          (Map.toUnfoldable m :: Array _)
-        callers1 = countCallers currentMap
-        callers2 = countCallers newMap
-      in
-        if callers1 == callers2 then currentMap else loop collected.prepared newMap
+      case genericExprOpt of
+        Just (Binding _ _ expr) ->
+          if hasTypeVariables info.instType || Set.isEmpty info.callers then Nothing
+          else
+            let
+              stripForAlls = case _ of
+                ForAll _ b -> stripForAlls b
+                x -> x
+              astSubstFn t = substituteExprType info.subst (stripForAlls t)
+              cacheKey = Tuple qualName specKey
+              previous = case Map.lookup cacheKey prepared of
+                Just old | sameInstantiationInputs old.info info -> Just old
+                _ -> Nothing
+              reused = case previous of
+                Just cached | sameDependencySizes specializationMap cached.dependencies -> Just cached
+                _ -> Nothing
+              entry = case reused of
+                Just cached -> cached
+                _ ->
+                  let
+                    substitutedExpr = case previous of
+                      Just cached -> cached.expr
+                      Nothing ->
+                        let
+                          exprWithDicts = applyStaticArgs info.dictArgs info.normalArgs expr
+                          resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
+                        in rewriteExpr globalAstMap Map.empty Map.empty astSubstFn resolvedExpr
+                    dependencies = case previous of
+                      Just cached -> mapWithIndex (\name _ -> specializationCount specializationMap name) cached.dependencies
+                      Nothing -> Map.fromFoldable (map (\name -> Tuple name (specializationCount specializationMap name)) (Set.toUnfoldable (collectDependencies substitutedExpr) :: Array String))
+                    specializedExpr = monomorphizeExpr definerMod specializationMap Map.empty substitutedExpr
+                  in
+                    { info
+                    , expr: substitutedExpr
+                    , dependencies
+                    , contribution: collectExpr globalAstMap definerMod Map.empty specializedExpr
+                    }
+            in
+              Just
+                { key: cacheKey
+                , entry
+                , reused: case reused of
+                    Just _ -> true
+                    Nothing -> false
+                }
+        Nothing -> Nothing
+
+  mergeResult :: TransitiveState -> TransitiveResult -> TransitiveState
+  mergeResult acc = case _ of
+    Nothing -> acc
+    Just { key, entry, reused } ->
+      { instantiations: mergeInstantiations acc.instantiations entry.contribution
+      , prepared: if reused then acc.prepared else Map.insert key entry acc.prepared
+      }
