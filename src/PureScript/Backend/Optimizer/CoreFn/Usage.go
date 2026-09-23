@@ -52,7 +52,21 @@ type vsIdentity struct {
 	bindingID  int64
 }
 
-type vsScope map[string]*vsIdentity
+// Scopes are persistent: register prepends a frame instead of copying the map.
+type vsScope struct {
+	parent   *vsScope
+	ident    string
+	identity *vsIdentity
+}
+
+func (s *vsScope) lookup(ident string) (*vsIdentity, bool) {
+	for current := s; current != nil; current = current.parent {
+		if current.ident == ident {
+			return current.identity, true
+		}
+	}
+	return nil, false
+}
 
 type vsChecker struct {
 	moduleName string
@@ -121,14 +135,10 @@ func (c *vsChecker) plain(ann gopurs_runtime.Value) {
 
 // register returns the scope extended with ident. Scopes are copied because
 // PureScript scopes are persistent maps.
-func (c *vsChecker) register(moduleName string, scope vsScope, ann gopurs_runtime.Value, ident string) vsScope {
+func (c *vsChecker) register(moduleName string, scope *vsScope, ann gopurs_runtime.Value, ident string) *vsScope {
 	info := vsUsage(ann)
 	if vsIsJust(gopurs_runtime.RecordGet(info, "variableUse")) {
 		c.fail("variableUse on a binding annotation")
-	}
-	next := make(vsScope, len(scope)+1)
-	for key, value := range scope {
-		next[key] = value
 	}
 	if bindingUsage := gopurs_runtime.RecordGet(info, "bindingUsage"); vsIsJust(bindingUsage) {
 		identity := gopurs_runtime.RecordGet(vsFromJust(bindingUsage), "binding")
@@ -142,14 +152,12 @@ func (c *vsChecker) register(moduleName string, scope vsScope, ann gopurs_runtim
 			c.fail("duplicate source bindingId")
 		}
 		c.seen[key] = true
-		next[ident] = &vsIdentity{moduleName: origin, bindingID: bindingID}
-	} else {
-		next[ident] = nil
+		return &vsScope{parent: scope, ident: ident, identity: &vsIdentity{moduleName: origin, bindingID: bindingID}}
 	}
-	return next
+	return &vsScope{parent: scope, ident: ident}
 }
 
-func (c *vsChecker) bindings(moduleName string, scope vsScope, group []gopurs_runtime.Value) vsScope {
+func (c *vsChecker) bindings(moduleName string, scope *vsScope, group []gopurs_runtime.Value) *vsScope {
 	for _, item := range group {
 		switch item.IntVal {
 		case vsTagNonRec:
@@ -173,7 +181,7 @@ func (c *vsChecker) bindings(moduleName string, scope vsScope, group []gopurs_ru
 	return scope
 }
 
-func (c *vsChecker) expression(moduleName string, scope vsScope, expr gopurs_runtime.Value) {
+func (c *vsChecker) expression(moduleName string, scope *vsScope, expr gopurs_runtime.Value) {
 	switch expr.IntVal {
 	case vsTagExprVar:
 		value := (*Constructor_PureScript_Backend_Optimizer_CoreFn_ExprVar[gopurs_runtime.Value])(expr.UnsafePtr)
@@ -186,7 +194,9 @@ func (c *vsChecker) expression(moduleName string, scope vsScope, expr gopurs_run
 			qualified := value.V1
 			var target *vsIdentity
 			if qualified.V0 == nil {
-				target = scope[qualified.V1]
+				if entry, found := scope.lookup(qualified.V1); found {
+					target = entry
+				}
 			}
 			expected := gopurs_runtime.RecordGet(use, "binding")
 			if target == nil || target.moduleName != gopurs_runtime.RecordGet(expected, "moduleName").StrVal() || target.bindingID != gopurs_runtime.RecordGet(expected, "bindingId").IntVal {
@@ -245,7 +255,7 @@ func (c *vsChecker) expression(moduleName string, scope vsScope, expr gopurs_run
 	}
 }
 
-func (c *vsChecker) alternative(moduleName string, scope vsScope, alternative *Constructor_PureScript_Backend_Optimizer_CoreFn_CaseAlternative[gopurs_runtime.Value]) {
+func (c *vsChecker) alternative(moduleName string, scope *vsScope, alternative *Constructor_PureScript_Backend_Optimizer_CoreFn_CaseAlternative[gopurs_runtime.Value]) {
 	inner := scope
 	for _, binder := range alternative.V0 {
 		inner = c.binder(moduleName, inner, binder)
@@ -266,7 +276,7 @@ func (c *vsChecker) alternative(moduleName string, scope vsScope, alternative *C
 	}
 }
 
-func (c *vsChecker) binder(moduleName string, scope vsScope, binderValue gopurs_runtime.Value) vsScope {
+func (c *vsChecker) binder(moduleName string, scope *vsScope, binderValue gopurs_runtime.Value) *vsScope {
 	switch binderValue.IntVal {
 	case vsTagBinderNull:
 		value := (*Constructor_PureScript_Backend_Optimizer_CoreFn_BinderNull[gopurs_runtime.Value])(binderValue.UnsafePtr)
@@ -332,7 +342,7 @@ func (c *vsChecker) top(bind gopurs_runtime.Value) {
 
 func (c *vsChecker) topBinding(binding *Constructor_PureScript_Backend_Optimizer_CoreFn_Binding[gopurs_runtime.Value]) {
 	c.plain(binding.V0)
-	c.expression(c.moduleName, vsScope{}, binding.V2)
+	c.expression(c.moduleName, nil, binding.V2)
 }
 
 // ValidateSourceUsageModuleImpl mirrors Usage.validateSourceUsageModule.

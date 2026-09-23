@@ -10,7 +10,9 @@ package PureScript_Backend_Optimizer_CoreFn_Json
 
 import (
 	"math"
+	"sort"
 	"strings"
+	"unicode/utf16"
 	"unsafe"
 
 	"gopurs/output/gopurs_runtime"
@@ -317,8 +319,7 @@ type ntRef struct {
 	argsOK  bool
 }
 
-func (t *ntTable) decodeRef(entry gopurs_runtime.Value) ntRef {
-	raw := ntNative(entry)
+func (t *ntTable) decodeRef(raw any) ntRef {
 	if s, ok := raw.(string); ok {
 		switch s {
 		case "Int":
@@ -772,21 +773,28 @@ func (t *ntTable) settle() {
 // DecodeTypeTableImpl has the same observable behaviour as the generated
 // CoreFn.Json.decodeTypeTable: a JsonDecode (Array ExprType) Either value.
 func DecodeTypeTableImpl(json gopurs_runtime.Value) gopurs_runtime.Value {
-	var entries []gopurs_runtime.Value
-	switch {
-	case json.Type == gopurs_runtime.TypeArray && json.UnsafePtr != nil:
-		entries = *(*[]gopurs_runtime.Value)(json.UnsafePtr)
-	case json.Type == gopurs_runtime.TypeAny && json.UnsafePtr != nil:
-		raw := *(*any)(json.UnsafePtr)
-		if arr, ok := raw.([]any); ok {
-			entries = make([]gopurs_runtime.Value, len(arr))
-			for i := range arr {
-				entries[i] = gopurs_runtime.Box(arr[i])
-			}
+	if json.Type == gopurs_runtime.TypeAny && json.UnsafePtr != nil {
+		if arr, ok := (*(*any)(json.UnsafePtr)).([]any); ok {
+			return decodeTypeTableNative(arr)
 		}
 	}
-	if entries == nil {
-		return ntLeft(ntTypeMismatch("Failed decode"))
+	if json.Type != gopurs_runtime.TypeArray || json.UnsafePtr == nil {
+		return ntLeft(ntTypeMismatch("Array"))
+	}
+	values := *(*[]gopurs_runtime.Value)(json.UnsafePtr)
+	entries := make([]any, len(values))
+	for i := range values {
+		entries[i] = ntNative(values[i])
+	}
+	return decodeTypeTableNative(entries)
+}
+
+// decodeTypeTableNative resolves an already-unwrapped table: native JSON
+// entries from the module decoder are used directly, without boxing them.
+func decodeTypeTableNative(raw any) gopurs_runtime.Value {
+	entries, ok := raw.([]any)
+	if !ok {
+		return ntLeft(ntTypeMismatch("Array"))
 	}
 	count := len(entries)
 	table := &ntTable{
@@ -896,7 +904,7 @@ func ndNumber(raw any) (float64, *ndFailure) {
 	case int64:
 		return float64(value), nil
 	}
-	return 0, ndPublic("Failed decode")
+	return 0, ndPublic("Number")
 }
 
 // ndInt mirrors decodeInt: decodeNumber followed by Int.fromNumber.
@@ -921,21 +929,21 @@ func ndString(raw any) (string, *ndFailure) {
 	if value, ok := raw.(string); ok {
 		return value, nil
 	}
-	return "", ndPublic("Failed decode")
+	return "", ndPublic("String")
 }
 
 func ndBoolean(raw any) (bool, *ndFailure) {
 	if value, ok := raw.(bool); ok {
 		return value, nil
 	}
-	return false, ndPublic("Failed decode")
+	return false, ndPublic("Boolean")
 }
 
 func ndObject(raw any) (map[string]any, *ndFailure) {
 	if value, ok := raw.(map[string]any); ok {
 		return value, nil
 	}
-	return nil, ndPublic("Failed decode")
+	return nil, ndPublic("Object")
 }
 
 func ndReify(value any) any {
@@ -957,7 +965,7 @@ func ndArray(raw any) ([]any, *ndFailure) {
 		}
 		return out, nil
 	}
-	return nil, ndPublic("Failed decode")
+	return nil, ndPublic("Array")
 }
 
 func ndArrayOf(raw any, decode ndElementDecoder) ([]gopurs_runtime.Value, *ndFailure) {
@@ -999,7 +1007,7 @@ func ndOptionalField(obj map[string]any, key string, decode ndElementDecoder) (g
 	}
 	value, failure := decode(raw)
 	if failure != nil {
-		return gopurs_runtime.Value{}, failure
+		return gopurs_runtime.Value{}, ndAtKey(key, failure)
 	}
 	return ntJust(value), nil
 }
@@ -1223,4 +1231,882 @@ func DecodeAnnWithUsageImpl(fallback gopurs_runtime.Value, moduleName gopurs_run
 	ann := gopurs_runtime.RecordDict4("meta", "sourceUsage", "span", "type",
 		meta, sourceUsage, Get_PureScript_Backend_Optimizer_CoreFn_emptySpan(), typeValue)
 	return ntRight(ann)
+}
+
+// ---------------------------------------------------------------------------
+// Native CoreFn module decoder (decodeModule and all its helpers).
+//
+// The PureScript decoder stays the JavaScript implementation (through the
+// fallback argument) and the reference for the canonical representation. Cold
+// helpers whose generated specialisation is intricate (source spans, the
+// foreign Map) are called through their generated functions.
+// ---------------------------------------------------------------------------
+
+const (
+	cndTagJust              = 930809136
+	cndTagLeft              = 3711209382
+	cndTagRight             = 2465973597
+	cndTagTuple             = 2339352186
+	cndTagQualified         = 2183844549
+	cndTagReExport          = 243426072
+	cndTagNonRec            = 776125136
+	cndTagRec               = 2111926015
+	cndTagBinding           = 74370570
+	cndTagExprVar           = 2055675025
+	cndTagExprLit           = 232770309
+	cndTagExprConstructor   = 697214492
+	cndTagExprAccessor      = 3638357773
+	cndTagExprUpdate        = 2514985317
+	cndTagExprAbs           = 2721098116
+	cndTagExprApp           = 519619125
+	cndTagExprCase          = 2509734720
+	cndTagExprLet           = 2588226569
+	cndTagExprTypeApp       = 3654600589
+	cndTagCaseAlternative   = 4007425008
+	cndTagUnconditional     = 2417754510
+	cndTagGuarded           = 1315856655
+	cndTagGuard             = 1255105998
+	cndTagBinderNull        = 3395565766
+	cndTagBinderVar         = 1586641112
+	cndTagBinderNamed       = 1365461886
+	cndTagBinderConstructor = 1517657301
+	cndTagBinderLit         = 1587391820
+	cndTagLitInt            = 2360006889
+	cndTagLitNumber         = 2070212633
+	cndTagLitString         = 4269186735
+	cndTagLitChar           = 4076406626
+	cndTagLitBoolean        = 3580262718
+	cndTagLitArray          = 2075623491
+	cndTagLitRecord         = 3197411319
+	cndTagProp              = 1651896758
+	cndTagLineComment       = 3900658198
+	cndTagBlockComment      = 4163130993
+	cndTagTypeMismatch      = 2887704423
+	cndTagAtIndex           = 1044667600
+)
+
+type cndFailure struct {
+	err gopurs_runtime.Value
+}
+
+func cndFail(message string) {
+	panic(cndFailure{err: ntTypeMismatch(message)})
+}
+
+func cndFailValue(err gopurs_runtime.Value) {
+	panic(cndFailure{err: err})
+}
+
+func cndTry(run func() gopurs_runtime.Value) (result gopurs_runtime.Value, failure *cndFailure) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if captured, ok := recovered.(cndFailure); ok {
+				failure = &captured
+				return
+			}
+			panic(recovered)
+		}
+	}()
+	return run(), nil
+}
+
+func cndTryString(run func() string) (result string, failure *cndFailure) {
+	if value, captured := cndTry(func() gopurs_runtime.Value { return gopurs_runtime.Str(run()) }); captured != nil {
+		return "", captured
+	} else {
+		return value.StrVal(), nil
+	}
+}
+
+func cndNothing() gopurs_runtime.Value {
+	return gopurs_runtime.Value{Type: 9, IntVal: cndTagJust}
+}
+
+func cndJust(value gopurs_runtime.Value) gopurs_runtime.Value {
+	return gopurs_runtime.Value{Type: 9, IntVal: cndTagJust, UnsafePtr: unsafe.Pointer(&Constructor_Data_Maybe_Just[gopurs_runtime.Value]{1, value})}
+}
+
+func cndIsJust(value gopurs_runtime.Value) bool {
+	return value.Type == 9 && value.IntVal == cndTagJust && value.UnsafePtr != nil
+}
+
+func cndFromJust(value gopurs_runtime.Value) gopurs_runtime.Value {
+	return (*Constructor_Data_Maybe_Just[gopurs_runtime.Value])(value.UnsafePtr).V0
+}
+
+func cndLeftPayload(value gopurs_runtime.Value) gopurs_runtime.Value {
+	return (*Constructor_Data_Either_Left[gopurs_runtime.Value, gopurs_runtime.Value])(value.UnsafePtr).V0
+}
+
+func cndIsLeft(value gopurs_runtime.Value) bool {
+	return value.Type == 9 && value.IntVal == cndTagLeft && value.UnsafePtr != nil
+}
+
+func cndLeft(err gopurs_runtime.Value) gopurs_runtime.Value {
+	return gopurs_runtime.Value{Type: 9, IntVal: cndTagLeft, UnsafePtr: unsafe.Pointer(&Constructor_Data_Either_Left[gopurs_runtime.Value, gopurs_runtime.Value]{1, err})}
+}
+
+func cndRight(value gopurs_runtime.Value) gopurs_runtime.Value {
+	return gopurs_runtime.Value{Type: 9, IntVal: cndTagRight, UnsafePtr: unsafe.Pointer(&Constructor_Data_Either_Right[gopurs_runtime.Value, gopurs_runtime.Value]{1, value})}
+}
+
+func cndArray(values []gopurs_runtime.Value) gopurs_runtime.Value {
+	return gopurs_runtime.Array(values)
+}
+
+func cndValues(value gopurs_runtime.Value) []gopurs_runtime.Value {
+	if value.Type == gopurs_runtime.TypeArray && value.UnsafePtr != nil {
+		return *(*[]gopurs_runtime.Value)(value.UnsafePtr)
+	}
+	return nil
+}
+
+func cndTuple(first, second gopurs_runtime.Value) gopurs_runtime.Value {
+	return gopurs_runtime.Value{Type: 9, IntVal: cndTagTuple, UnsafePtr: unsafe.Pointer(&Constructor_Data_Tuple_Tuple[gopurs_runtime.Value, gopurs_runtime.Value]{1, first, second})}
+}
+
+func cndStringArray(values []string) gopurs_runtime.Value {
+	out := make([]gopurs_runtime.Value, len(values))
+	for i, value := range values {
+		out[i] = gopurs_runtime.Str(value)
+	}
+	return gopurs_runtime.Array(out)
+}
+
+func cndStrings(value gopurs_runtime.Value) []string {
+	items := cndValues(value)
+	out := make([]string, len(items))
+	for i, item := range items {
+		out[i] = item.StrVal()
+	}
+	return out
+}
+
+// ---- JSON accessors with the PureScript error messages ----
+
+func cndString(raw any) string {
+	if value, ok := ntNative(raw).(string); ok {
+		return value
+	}
+	cndFail("String")
+	return ""
+}
+
+func cndNumber(raw any) float64 {
+	switch value := ntNative(raw).(type) {
+	case float64:
+		return value
+	case int64:
+		return float64(value)
+	}
+	cndFail("Number")
+	return 0
+}
+
+func cndBoolean(raw any) bool {
+	if value, ok := ntNative(raw).(bool); ok {
+		return value
+	}
+	cndFail("Boolean")
+	return false
+}
+
+func cndInt(raw any) int64 {
+	number := cndNumber(raw)
+	value := int64(number)
+	if float64(value) != number || value < -2147483648 || value > 2147483647 {
+		cndFail("Int")
+	}
+	return value
+}
+
+func cndObject(raw any) map[string]any {
+	if value, ok := ntNative(raw).(map[string]any); ok {
+		return value
+	}
+	cndFail("Object")
+	return nil
+}
+
+func cndElements(raw any) []any {
+	switch value := ntNative(raw).(type) {
+	case []any:
+		return value
+	case []gopurs_runtime.Value:
+		out := make([]any, len(value))
+		for i := range value {
+			out[i] = ntNative(value[i])
+		}
+		return out
+	}
+	cndFail("Array")
+	return nil
+}
+
+func cndIsNull(raw any) bool {
+	return ntNative(raw) == nil
+}
+
+// ---- getField / getFieldOptional' / decodeArray ----
+
+func cndFieldOf(obj map[string]any, key string, decode func(any) gopurs_runtime.Value) gopurs_runtime.Value {
+	raw, present := obj[key]
+	if !present {
+		cndFailValue(ntAtKey(key, ntMissingValue()))
+	}
+	value, failure := cndTry(func() gopurs_runtime.Value { return decode(raw) })
+	if failure != nil {
+		cndFailValue(ntAtKey(key, failure.err))
+	}
+	return value
+}
+
+func cndOptionalFieldOf(obj map[string]any, key string, decode func(any) gopurs_runtime.Value) gopurs_runtime.Value {
+	raw, present := obj[key]
+	if !present || cndIsNull(raw) {
+		return cndNothing()
+	}
+	value, failure := cndTry(func() gopurs_runtime.Value { return decode(raw) })
+	if failure != nil {
+		cndFailValue(ntAtKey(key, failure.err))
+	}
+	return cndJust(value)
+}
+
+func cndArrayOfField(obj map[string]any, key string, decode func(any) gopurs_runtime.Value) gopurs_runtime.Value {
+	return cndFieldOf(obj, key, func(raw any) gopurs_runtime.Value {
+		return cndArrayDecode(raw, decode)
+	})
+}
+
+// cndArrayDecode mirrors decodeArray: first error wins, wrapped in AtIndex.
+func cndArrayDecode(raw any, decode func(any) gopurs_runtime.Value) gopurs_runtime.Value {
+	elements := cndElements(raw)
+	out := make([]gopurs_runtime.Value, 0, len(elements))
+	for index, element := range elements {
+		value, failure := cndTry(func() gopurs_runtime.Value { return decode(element) })
+		if failure != nil {
+			cndFailValue(gopurs_runtime.Value{Type: 9, IntVal: cndTagAtIndex, UnsafePtr: unsafe.Pointer(&Constructor_Data_Argonaut_Decode_Error_AtIndex{1, int64(index), failure.err})})
+		}
+		out = append(out, value)
+	}
+	return gopurs_runtime.Array(out)
+}
+
+// cndAlt mirrors alt: try the first decoder, otherwise the second.
+func cndAlt(first func() gopurs_runtime.Value, second func() gopurs_runtime.Value) gopurs_runtime.Value {
+	if value, failure := cndTry(first); failure == nil {
+		return value
+	}
+	return second()
+}
+
+// ---- leaf decoders ----
+
+func cndModuleName(raw any) string {
+	values := cndValues(cndArrayDecode(raw, cndStringValue))
+	parts := make([]string, len(values))
+	for i, value := range values {
+		parts[i] = value.StrVal()
+	}
+	return strings.Join(parts, ".")
+}
+
+func cndModuleNameValue(raw any) gopurs_runtime.Value {
+	return gopurs_runtime.Str(cndModuleName(raw))
+}
+
+func cndIdent(raw any) gopurs_runtime.Value {
+	return gopurs_runtime.Str(cndString(raw))
+}
+
+func cndQualified(raw any, nameDecode func(any) gopurs_runtime.Value) gopurs_runtime.Value {
+	obj := cndObject(raw)
+	var maybe *Constructor_Data_Maybe_Just[string]
+	if rawModule, present := obj["moduleName"]; present && !cndIsNull(rawModule) {
+		name, failure := cndTryString(func() string { return cndModuleName(rawModule) })
+		if failure != nil {
+			cndFailValue(failure.err)
+		}
+		maybe = &Constructor_Data_Maybe_Just[string]{1, name}
+	}
+	rawIdentifier, present := obj["identifier"]
+	if !present {
+		cndFailValue(ntAtKey("identifier", ntMissingValue()))
+	}
+	identifier, failure := cndTryString(func() string { return nameDecode(rawIdentifier).StrVal() })
+	if failure != nil {
+		cndFailValue(ntAtKey("identifier", failure.err))
+	}
+	return gopurs_runtime.Value{Type: 9, IntVal: cndTagQualified, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_Qualified[string]{1, maybe, identifier})}
+}
+
+func cndStringLiteralValue(raw any) gopurs_runtime.Value {
+	if value, ok := ntNative(raw).(string); ok {
+		return gopurs_runtime.Str(value)
+	}
+	// map fromCodePointArray (decodeCodePointArray json), otherwise StringLiteral.
+	if value, failure := cndTry(func() gopurs_runtime.Value {
+		var builder strings.Builder
+		for index, element := range cndElements(raw) {
+			if _, failure := cndTry(func() gopurs_runtime.Value {
+				codePoint := cndInt(element)
+				if codePoint < 0 || codePoint > 0x10FFFF {
+					cndFail("CodePoint")
+				}
+				builder.WriteRune(rune(codePoint))
+				return gopurs_runtime.Value{}
+			}); failure != nil {
+				cndFailValue(gopurs_runtime.Value{Type: 9, IntVal: cndTagAtIndex, UnsafePtr: unsafe.Pointer(&Constructor_Data_Argonaut_Decode_Error_AtIndex{1, int64(index), failure.err})})
+			}
+		}
+		return gopurs_runtime.Str(builder.String())
+	}); failure == nil {
+		return value
+	}
+	cndFail("StringLiteral")
+	return gopurs_runtime.Value{}
+}
+
+func cndStringValue(raw any) gopurs_runtime.Value {
+	return gopurs_runtime.Str(cndString(raw))
+}
+
+func cndCharValue(raw any) gopurs_runtime.Value {
+	text := cndString(raw)
+	codeUnits := utf16.Encode([]rune(text))
+	if len(codeUnits) != 1 {
+		cndFail("Char")
+	}
+	return gopurs_runtime.Str(text)
+}
+
+func cndBooleanValue(raw any) gopurs_runtime.Value {
+	return gopurs_runtime.Bool(cndBoolean(raw))
+}
+
+func cndNumberValue(raw any) gopurs_runtime.Value {
+	return gopurs_runtime.Float(cndNumber(raw))
+}
+
+func cndIntValue(raw any) gopurs_runtime.Value {
+	return gopurs_runtime.Int(cndInt(raw))
+}
+
+// ---- annotations ----
+
+func cndEmptySpan() gopurs_runtime.Value {
+	return Get_PureScript_Backend_Optimizer_CoreFn_emptySpan()
+}
+
+func cndMetaValue(raw any) gopurs_runtime.Value {
+	value, failure := ndMeta(raw)
+	if failure != nil {
+		cndFailValue(failure.err)
+	}
+	return value
+}
+
+func cndTypeField(typeTable []gopurs_runtime.Value, obj map[string]any) gopurs_runtime.Value {
+	rawType, present := obj["type"]
+	if !present || cndIsNull(rawType) {
+		return cndNothing()
+	}
+	typeID := cndInt(rawType)
+	if typeID >= 0 && typeID < int64(len(typeTable)) {
+		return cndJust(typeTable[typeID])
+	}
+	return cndNothing()
+}
+
+func cndAnn(typeTable []gopurs_runtime.Value, raw any) gopurs_runtime.Value {
+	obj := cndObject(raw)
+	meta := cndOptionalFieldOf(obj, "meta", cndMetaValue)
+	typeValue := cndTypeField(typeTable, obj)
+	return gopurs_runtime.RecordDict4("meta", "sourceUsage", "span", "type",
+		meta, cndNothing(), cndEmptySpan(), typeValue)
+}
+
+func cndAnnWithUsage(moduleName string, typeTable []gopurs_runtime.Value, raw any) gopurs_runtime.Value {
+	obj := cndObject(raw)
+	meta := cndOptionalFieldOf(obj, "meta", cndMetaValue)
+	typeValue := cndTypeField(typeTable, obj)
+	usage, failure := ndSourceUsage(moduleName, obj)
+	if failure != nil {
+		cndFailValue(failure.err)
+	}
+	return gopurs_runtime.RecordDict4("meta", "sourceUsage", "span", "type",
+		meta, usage, cndEmptySpan(), typeValue)
+}
+
+// Coupling: this calls the generated PureScript decodeSourceSpan and converts
+// its specialised result into the canonical records. The source position JSON
+// is decoded through the Argonaut DecodeJson (Tuple Int Int) instance, and
+// reproducing that instance natively is possible but not worth the risk for a
+// cold path (two positions per module). The generated name is stable for a
+// given PBO version; a rename fails the build loudly, never silently.
+func cndSourceSpan(path string, raw any) gopurs_runtime.Value {
+	jsonValue := gopurs_runtime.Box(ntNative(raw))
+	result := Call_PureScript_Backend_Optimizer_CoreFn_Json_decodeSourceSpan(path, jsonValue)
+	if !result.V2 {
+		cndFailValue(result.V0)
+	}
+	position := func(column, line int64) gopurs_runtime.Value {
+		return gopurs_runtime.RecordDict2("column", "line", gopurs_runtime.Int(column), gopurs_runtime.Int(line))
+	}
+	return gopurs_runtime.RecordDict3("end", "path", "start",
+		position(result.V1.end.column, result.V1.end.line),
+		gopurs_runtime.Str(result.V1.path),
+		position(result.V1.start.column, result.V1.start.line))
+}
+
+// ---- expressions ----
+
+type cndAnnDecoder func(any) gopurs_runtime.Value
+
+func cndExpr(typeTable []gopurs_runtime.Value, decAnn cndAnnDecoder, raw any) gopurs_runtime.Value {
+	obj := cndObject(raw)
+	ann := cndFieldOf(obj, "annotation", decAnn)
+	kind := cndString(cndFieldOf(obj, "type", cndStringValue))
+	expr := func() gopurs_runtime.Value {
+		switch kind {
+		case "Var":
+			qualified := cndFieldOf(obj, "value", func(value any) gopurs_runtime.Value {
+				return cndQualified(value, cndIdent)
+			})
+			return gopurs_runtime.Value{Type: 9, IntVal: cndTagExprVar, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_ExprVar[gopurs_runtime.Value]{1, ann, (*Constructor_PureScript_Backend_Optimizer_CoreFn_Qualified[string])(qualified.UnsafePtr)})}
+		case "Literal":
+			literal := cndFieldOf(obj, "value", func(value any) gopurs_runtime.Value {
+				return cndLiteral(func(inner any) gopurs_runtime.Value { return cndExpr(typeTable, decAnn, inner) }, value)
+			})
+			return gopurs_runtime.Value{Type: 9, IntVal: cndTagExprLit, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_ExprLit[gopurs_runtime.Value]{1, ann, literal})}
+		case "Constructor":
+			tyn := cndFieldOf(obj, "typeName", cndStringValue)
+			con := cndAlt(func() gopurs_runtime.Value { return cndFieldOf(obj, "name", cndIdent) },
+				func() gopurs_runtime.Value { return cndFieldOf(obj, "constructorName", cndIdent) })
+			fields := cndAlt(
+				func() gopurs_runtime.Value { return cndArrayOfField(obj, "fields", cndStringLiteralValue) },
+				func() gopurs_runtime.Value { return cndArrayOfField(obj, "fieldNames", cndStringLiteralValue) })
+			return gopurs_runtime.Value{Type: 9, IntVal: cndTagExprConstructor, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_ExprConstructor[gopurs_runtime.Value]{1, ann, tyn.StrVal(), con.StrVal(), cndStrings(fields)})}
+		case "Accessor":
+			inner := cndFieldOf(obj, "expression", func(value any) gopurs_runtime.Value { return cndExpr(typeTable, decAnn, value) })
+			field := cndFieldOf(obj, "fieldName", cndStringLiteralValue)
+			return gopurs_runtime.Value{Type: 9, IntVal: cndTagExprAccessor, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_ExprAccessor[gopurs_runtime.Value]{1, ann, inner, field.StrVal()})}
+		case "ObjectUpdate":
+			inner := cndFieldOf(obj, "expression", func(value any) gopurs_runtime.Value { return cndExpr(typeTable, decAnn, value) })
+			updates := cndFieldOf(obj, "updates", func(value any) gopurs_runtime.Value {
+				return cndRecord(value, func(inner any) gopurs_runtime.Value { return cndExpr(typeTable, decAnn, inner) })
+			})
+			return gopurs_runtime.Value{Type: 9, IntVal: cndTagExprUpdate, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_ExprUpdate[gopurs_runtime.Value]{1, ann, inner, cndProps(updates)})}
+		case "Abs":
+			argument := cndFieldOf(obj, "argument", cndIdent)
+			body := cndFieldOf(obj, "body", func(value any) gopurs_runtime.Value { return cndExpr(typeTable, decAnn, value) })
+			return gopurs_runtime.Value{Type: 9, IntVal: cndTagExprAbs, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_ExprAbs[gopurs_runtime.Value]{1, ann, argument.StrVal(), body})}
+		case "App":
+			fn := cndFieldOf(obj, "abstraction", func(value any) gopurs_runtime.Value { return cndExpr(typeTable, decAnn, value) })
+			arg := cndFieldOf(obj, "argument", func(value any) gopurs_runtime.Value { return cndExpr(typeTable, decAnn, value) })
+			return gopurs_runtime.Value{Type: 9, IntVal: cndTagExprApp, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_ExprApp[gopurs_runtime.Value]{1, ann, fn, arg})}
+		case "TypeApp":
+			inner := cndFieldOf(obj, "expression", func(value any) gopurs_runtime.Value { return cndExpr(typeTable, decAnn, value) })
+			argument := cndFieldOf(obj, "typeArgument", cndIntValue)
+			id := argument.IntVal
+			if id < 0 || id >= int64(len(typeTable)) {
+				cndFail("ExprTypeApp")
+			}
+			return gopurs_runtime.Value{Type: 9, IntVal: cndTagExprTypeApp, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_ExprTypeApp[gopurs_runtime.Value]{1, ann, inner, typeTable[id]})}
+		case "Case":
+			values := cndArrayOfField(obj, "caseExpressions", func(value any) gopurs_runtime.Value { return cndExpr(typeTable, decAnn, value) })
+			alternatives := cndArrayOfField(obj, "caseAlternatives", func(value any) gopurs_runtime.Value { return cndCaseAlternative(typeTable, decAnn, value) })
+			return gopurs_runtime.Value{Type: 9, IntVal: cndTagExprCase, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_ExprCase[gopurs_runtime.Value]{1, ann, cndValues(values), cndAlternatives(alternatives)})}
+		case "Let":
+			binds := cndArrayOfField(obj, "binds", func(value any) gopurs_runtime.Value { return cndBind(typeTable, decAnn, value) })
+			body := cndFieldOf(obj, "expression", func(value any) gopurs_runtime.Value { return cndExpr(typeTable, decAnn, value) })
+			return gopurs_runtime.Value{Type: 9, IntVal: cndTagExprLet, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_ExprLet[gopurs_runtime.Value]{1, ann, cndValues(binds), body})}
+		}
+		cndFail("Expr")
+		return gopurs_runtime.Value{}
+	}()
+	return expr
+}
+
+func cndAlternatives(value gopurs_runtime.Value) []*Constructor_PureScript_Backend_Optimizer_CoreFn_CaseAlternative[gopurs_runtime.Value] {
+	items := cndValues(value)
+	out := make([]*Constructor_PureScript_Backend_Optimizer_CoreFn_CaseAlternative[gopurs_runtime.Value], len(items))
+	for i, item := range items {
+		out[i] = (*Constructor_PureScript_Backend_Optimizer_CoreFn_CaseAlternative[gopurs_runtime.Value])(item.UnsafePtr)
+	}
+	return out
+}
+
+func cndProps(value gopurs_runtime.Value) []*Constructor_PureScript_Backend_Optimizer_CoreFn_Prop[gopurs_runtime.Value] {
+	items := cndValues(value)
+	out := make([]*Constructor_PureScript_Backend_Optimizer_CoreFn_Prop[gopurs_runtime.Value], len(items))
+	for i, item := range items {
+		out[i] = (*Constructor_PureScript_Backend_Optimizer_CoreFn_Prop[gopurs_runtime.Value])(item.UnsafePtr)
+	}
+	return out
+}
+
+func cndCaseAlternative(typeTable []gopurs_runtime.Value, decAnn cndAnnDecoder, raw any) gopurs_runtime.Value {
+	obj := cndObject(raw)
+	binders := cndArrayOfField(obj, "binders", func(value any) gopurs_runtime.Value { return cndBinder(decAnn, value) })
+	guarded := cndFieldOf(obj, "isGuarded", func(value any) gopurs_runtime.Value { return cndBooleanValue(value) })
+	var result gopurs_runtime.Value
+	if guarded.BoolVal() {
+		expressions := cndArrayOfField(obj, "expressions", func(value any) gopurs_runtime.Value { return cndGuard(typeTable, decAnn, value) })
+		guards := cndValues(expressions)
+		pointers := make([]*Constructor_PureScript_Backend_Optimizer_CoreFn_Guard[gopurs_runtime.Value], len(guards))
+		for i, guard := range guards {
+			pointers[i] = (*Constructor_PureScript_Backend_Optimizer_CoreFn_Guard[gopurs_runtime.Value])(guard.UnsafePtr)
+		}
+		result = gopurs_runtime.Value{Type: 9, IntVal: cndTagGuarded, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_Guarded[gopurs_runtime.Value]{1, pointers})}
+	} else {
+		expression := cndFieldOf(obj, "expression", func(value any) gopurs_runtime.Value { return cndExpr(typeTable, decAnn, value) })
+		result = gopurs_runtime.Value{Type: 9, IntVal: cndTagUnconditional, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_Unconditional[gopurs_runtime.Value]{1, expression})}
+	}
+	return gopurs_runtime.Value{Type: 9, IntVal: cndTagCaseAlternative, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_CaseAlternative[gopurs_runtime.Value]{1, cndValues(binders), result})}
+}
+
+func cndGuard(typeTable []gopurs_runtime.Value, decAnn cndAnnDecoder, raw any) gopurs_runtime.Value {
+	obj := cndObject(raw)
+	guard := cndFieldOf(obj, "guard", func(value any) gopurs_runtime.Value { return cndExpr(typeTable, decAnn, value) })
+	expression := cndFieldOf(obj, "expression", func(value any) gopurs_runtime.Value { return cndExpr(typeTable, decAnn, value) })
+	return gopurs_runtime.Value{Type: 9, IntVal: cndTagGuard, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_Guard[gopurs_runtime.Value]{1, guard, expression})}
+}
+
+// ---- binders and literals ----
+
+func cndBinder(decAnn cndAnnDecoder, raw any) gopurs_runtime.Value {
+	obj := cndObject(raw)
+	ann := cndFieldOf(obj, "annotation", decAnn)
+	kind := cndString(cndFieldOf(obj, "binderType", cndStringValue))
+	switch kind {
+	case "NullBinder":
+		return gopurs_runtime.Value{Type: 9, IntVal: cndTagBinderNull, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_BinderNull[gopurs_runtime.Value]{1, ann})}
+	case "VarBinder":
+		identifier := cndFieldOf(obj, "identifier", cndIdent)
+		return gopurs_runtime.Value{Type: 9, IntVal: cndTagBinderVar, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_BinderVar[gopurs_runtime.Value]{1, ann, identifier.StrVal()})}
+	case "LiteralBinder":
+		literal := cndFieldOf(obj, "literal", func(value any) gopurs_runtime.Value {
+			return cndLiteral(func(inner any) gopurs_runtime.Value { return cndBinder(decAnn, inner) }, value)
+		})
+		return gopurs_runtime.Value{Type: 9, IntVal: cndTagBinderLit, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_BinderLit[gopurs_runtime.Value]{1, ann, literal})}
+	case "ConstructorBinder":
+		tyn := cndFieldOf(obj, "typeName", func(value any) gopurs_runtime.Value {
+			return cndQualified(value, func(inner any) gopurs_runtime.Value { return gopurs_runtime.Str(cndString(inner)) })
+		})
+		con := cndAlt(
+			func() gopurs_runtime.Value {
+				return cndFieldOf(obj, "name", func(value any) gopurs_runtime.Value {
+					return cndQualified(value, cndIdent)
+				})
+			},
+			func() gopurs_runtime.Value {
+				return cndFieldOf(obj, "constructorName", func(value any) gopurs_runtime.Value {
+					return cndQualified(value, cndIdent)
+				})
+			})
+		binders := cndArrayOfField(obj, "binders", func(value any) gopurs_runtime.Value { return cndBinder(decAnn, value) })
+		return gopurs_runtime.Value{Type: 9, IntVal: cndTagBinderConstructor, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_BinderConstructor[gopurs_runtime.Value]{1, ann, (*Constructor_PureScript_Backend_Optimizer_CoreFn_Qualified[string])(tyn.UnsafePtr), (*Constructor_PureScript_Backend_Optimizer_CoreFn_Qualified[string])(con.UnsafePtr), cndValues(binders)})}
+	case "NamedBinder":
+		identifier := cndFieldOf(obj, "identifier", cndIdent)
+		binder := cndFieldOf(obj, "binder", func(value any) gopurs_runtime.Value { return cndBinder(decAnn, value) })
+		return gopurs_runtime.Value{Type: 9, IntVal: cndTagBinderNamed, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_BinderNamed[gopurs_runtime.Value]{1, ann, identifier.StrVal(), binder})}
+	}
+	cndFail("Binder")
+	return gopurs_runtime.Value{}
+}
+
+func cndLiteral(dec func(any) gopurs_runtime.Value, raw any) gopurs_runtime.Value {
+	obj := cndObject(raw)
+	kind := cndString(cndFieldOf(obj, "literalType", cndStringValue))
+	switch kind {
+	case "IntLiteral":
+		value := cndFieldOf(obj, "value", cndIntValue)
+		return gopurs_runtime.Value{Type: 9, IntVal: cndTagLitInt, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_LitInt[gopurs_runtime.Value]{1, value.IntVal})}
+	case "NumberLiteral":
+		value := cndFieldOf(obj, "value", cndNumberValue)
+		return gopurs_runtime.Value{Type: 9, IntVal: cndTagLitNumber, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_LitNumber[gopurs_runtime.Value]{1, float64(value.FloatVal())})}
+	case "StringLiteral":
+		value := cndFieldOf(obj, "value", cndStringLiteralValue)
+		return gopurs_runtime.Value{Type: 9, IntVal: cndTagLitString, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_LitString[gopurs_runtime.Value]{1, value.StrVal()})}
+	case "CharLiteral":
+		value := cndFieldOf(obj, "value", cndCharValue)
+		return gopurs_runtime.Value{Type: 9, IntVal: cndTagLitChar, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_LitChar[gopurs_runtime.Value]{1, value.StrVal()})}
+	case "BooleanLiteral":
+		value := cndFieldOf(obj, "value", cndBooleanValue)
+		return gopurs_runtime.Value{Type: 9, IntVal: cndTagLitBoolean, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_LitBoolean[gopurs_runtime.Value]{1, value.BoolVal()})}
+	case "ArrayLiteral":
+		value := cndFieldOf(obj, "value", func(inner any) gopurs_runtime.Value { return cndArrayDecode(inner, dec) })
+		return gopurs_runtime.Value{Type: 9, IntVal: cndTagLitArray, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_LitArray[gopurs_runtime.Value]{1, cndValues(value)})}
+	case "ObjectLiteral":
+		value := cndFieldOf(obj, "value", func(inner any) gopurs_runtime.Value { return cndRecord(inner, dec) })
+		return gopurs_runtime.Value{Type: 9, IntVal: cndTagLitRecord, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_LitRecord[gopurs_runtime.Value]{1, cndProps(value)})}
+	}
+	cndFail("Literal")
+	return gopurs_runtime.Value{}
+}
+
+// cndRecord mirrors decodeRecord = decodeArray <<< decodeProp.
+func cndRecord(raw any, dec func(any) gopurs_runtime.Value) gopurs_runtime.Value {
+	return cndArrayDecode(raw, func(element any) gopurs_runtime.Value {
+		elements := cndElements(element)
+		if len(elements) != 2 {
+			cndFail("Tuple")
+		}
+		key := cndStringLiteralValue(elements[0])
+		value := dec(elements[1])
+		return gopurs_runtime.Value{Type: 9, IntVal: cndTagProp, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_Prop[gopurs_runtime.Value]{1, key.StrVal(), value})}
+	})
+}
+
+func cndComment(raw any) gopurs_runtime.Value {
+	obj := cndObject(raw)
+	if value, failure := cndTry(func() gopurs_runtime.Value { return cndFieldOf(obj, "LineComment", cndStringValue) }); failure == nil {
+		return gopurs_runtime.Value{Type: 9, IntVal: cndTagLineComment, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_LineComment{1, value.StrVal()})}
+	}
+	value := cndFieldOf(obj, "BlockComment", cndStringValue)
+	return gopurs_runtime.Value{Type: 9, IntVal: cndTagBlockComment, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_BlockComment{1, value.StrVal()})}
+}
+
+// ---- binds and module parts ----
+
+func cndBind(typeTable []gopurs_runtime.Value, decAnn cndAnnDecoder, raw any) gopurs_runtime.Value {
+	obj := cndObject(raw)
+	kind := cndString(cndFieldOf(obj, "bindType", cndStringValue))
+	switch kind {
+	case "NonRec":
+		binding := cndBinding(typeTable, decAnn, obj)
+		return gopurs_runtime.Value{Type: 9, IntVal: cndTagNonRec, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_NonRec[gopurs_runtime.Value]{1, cndBindingPointer(binding)})}
+	case "Rec":
+		binds := cndArrayOfField(obj, "binds", func(value any) gopurs_runtime.Value {
+			return cndBinding(typeTable, decAnn, cndObject(value))
+		})
+		bindings := make([]*Constructor_PureScript_Backend_Optimizer_CoreFn_Binding[gopurs_runtime.Value], 0, len(cndValues(binds)))
+		for _, binding := range cndValues(binds) {
+			bindings = append(bindings, cndBindingPointer(binding))
+		}
+		return gopurs_runtime.Value{Type: 9, IntVal: cndTagRec, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_Rec[gopurs_runtime.Value]{1, bindings})}
+	}
+	cndFail("Bind")
+	return gopurs_runtime.Value{}
+}
+
+func cndBindingPointer(value gopurs_runtime.Value) *Constructor_PureScript_Backend_Optimizer_CoreFn_Binding[gopurs_runtime.Value] {
+	return (*Constructor_PureScript_Backend_Optimizer_CoreFn_Binding[gopurs_runtime.Value])(value.UnsafePtr)
+}
+
+func cndBinding(typeTable []gopurs_runtime.Value, decAnn cndAnnDecoder, obj map[string]any) gopurs_runtime.Value {
+	ann := cndFieldOf(obj, "annotation", decAnn)
+	identifier := cndFieldOf(obj, "identifier", cndIdent)
+	expression := cndFieldOf(obj, "expression", func(value any) gopurs_runtime.Value { return cndExpr(typeTable, decAnn, value) })
+	return gopurs_runtime.Value{Type: 9, IntVal: cndTagBinding, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_Binding[gopurs_runtime.Value]{1, ann, identifier.StrVal(), expression})}
+}
+
+func cndImport(decAnn cndAnnDecoder, raw any) gopurs_runtime.Value {
+	obj := cndObject(raw)
+	ann := cndFieldOf(obj, "annotation", decAnn)
+	name := cndFieldOf(obj, "moduleName", cndModuleNameValue)
+	return gopurs_runtime.Value{Type: 9, IntVal: 2024897590, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_Import[gopurs_runtime.Value]{1, ann, name.StrVal()})}
+}
+
+func cndReExports(raw any) gopurs_runtime.Value {
+	obj := cndObject(raw)
+	keys := make([]string, 0, len(obj))
+	for key := range obj {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]gopurs_runtime.Value, 0)
+	for _, moduleName := range keys {
+		// decodeReExports decodes each value directly with decodeArray; there is
+		// no getField wrapper, so failures are not tagged with the key.
+		idents := cndArrayDecode(ntNative(obj[moduleName]), cndIdent)
+		for _, ident := range cndValues(idents) {
+			out = append(out, gopurs_runtime.Value{Type: 9, IntVal: cndTagReExport, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_ReExport{1, moduleName, ident.StrVal()})})
+		}
+	}
+	return gopurs_runtime.Array(out)
+}
+
+func cndDataConstructor(typeTable []gopurs_runtime.Value, raw any) gopurs_runtime.Value {
+	obj := cndObject(raw)
+	name := cndAlt(
+		func() gopurs_runtime.Value { return cndFieldOf(obj, "name", cndStringValue) },
+		func() gopurs_runtime.Value { return cndFieldOf(obj, "constructorName", cndStringValue) })
+	fieldIDs := cndAlt(
+		func() gopurs_runtime.Value { return cndArrayOfField(obj, "fields", cndIntValue) },
+		func() gopurs_runtime.Value { return cndArrayOfField(obj, "fieldTypes", cndIntValue) })
+	fields := make([]gopurs_runtime.Value, 0, len(cndValues(fieldIDs)))
+	for _, fieldID := range cndValues(fieldIDs) {
+		id := fieldID.IntVal
+		if id < 0 || id >= int64(len(typeTable)) {
+			cndFail("ConstructorField")
+		}
+		fields = append(fields, typeTable[id])
+	}
+	return gopurs_runtime.RecordDict2("fields", "name", gopurs_runtime.Array(fields), gopurs_runtime.Str(name.StrVal()))
+}
+
+func cndDataDecl(typeTable []gopurs_runtime.Value, raw any) gopurs_runtime.Value {
+	obj := cndObject(raw)
+	name := cndAlt(
+		func() gopurs_runtime.Value { return cndFieldOf(obj, "name", cndStringValue) },
+		func() gopurs_runtime.Value { return cndFieldOf(obj, "typeName", cndStringValue) })
+	mbVars := cndAlt(
+		func() gopurs_runtime.Value {
+			return cndOptionalFieldOf(obj, "vars", func(value any) gopurs_runtime.Value { return cndArrayDecode(value, cndStringValue) })
+		},
+		func() gopurs_runtime.Value {
+			return cndOptionalFieldOf(obj, "typeVars", func(value any) gopurs_runtime.Value { return cndArrayDecode(value, cndStringValue) })
+		})
+	constructors := cndArrayOfField(obj, "constructors", func(value any) gopurs_runtime.Value { return cndDataConstructor(typeTable, value) })
+	vars := gopurs_runtime.Array(nil)
+	if cndIsJust(mbVars) {
+		vars = cndFromJust(mbVars)
+	}
+	return gopurs_runtime.RecordDict3("constructors", "name", "vars",
+		constructors, gopurs_runtime.Str(name.StrVal()), vars)
+}
+
+func cndClassDecl(typeTable []gopurs_runtime.Value, raw any) gopurs_runtime.Value {
+	obj := cndObject(raw)
+	name := cndFieldOf(obj, "name", cndStringValue)
+	mbVars := cndOptionalFieldOf(obj, "vars", func(value any) gopurs_runtime.Value { return cndArrayDecode(value, cndStringValue) })
+	var vars gopurs_runtime.Value
+	if cndIsJust(mbVars) {
+		vars = cndFromJust(mbVars)
+	} else {
+		vars = gopurs_runtime.Array(nil)
+	}
+	superclasses := cndArrayOfField(obj, "superclasses", func(value any) gopurs_runtime.Value { return cndConstraint(typeTable, value) })
+	methods := cndArrayOfField(obj, "methods", func(value any) gopurs_runtime.Value { return cndMethod(typeTable, value) })
+	return gopurs_runtime.RecordDict4("methods", "name", "superclasses", "vars",
+		methods, gopurs_runtime.Str(name.StrVal()), superclasses, vars)
+}
+
+func cndMethod(typeTable []gopurs_runtime.Value, raw any) gopurs_runtime.Value {
+	obj := cndObject(raw)
+	name := cndFieldOf(obj, "name", cndStringValue)
+	typeID := cndFieldOf(obj, "type", cndIntValue)
+	id := typeID.IntVal
+	if id < 0 || id >= int64(len(typeTable)) {
+		cndFail("MethodType")
+	}
+	return cndTuple(name, typeTable[id])
+}
+
+func cndConstraint(typeTable []gopurs_runtime.Value, raw any) gopurs_runtime.Value {
+	obj := cndObject(raw)
+	fqn := cndArrayOfField(obj, "fqn", cndStringValue)
+	argIDs := cndArrayOfField(obj, "args", cndIntValue)
+	args := make([]gopurs_runtime.Value, 0, len(cndValues(argIDs)))
+	for _, argID := range cndValues(argIDs) {
+		id := argID.IntVal
+		if id < 0 || id >= int64(len(typeTable)) {
+			cndFail("ConstraintArg")
+		}
+		args = append(args, typeTable[id])
+	}
+	return cndTuple(fqn, gopurs_runtime.Array(args))
+}
+
+// ---- module ----
+
+func cndModulePrime(moduleName string, obj map[string]any, path string) gopurs_runtime.Value {
+	typeTable := []gopurs_runtime.Value{}
+	if rawTypeTable, present := obj["typeTable"]; present && !cndIsNull(rawTypeTable) {
+		decoded := decodeTypeTableNative(ntNative(rawTypeTable))
+		if cndIsLeft(decoded) {
+			cndFailValue(ntAtKey("typeTable", cndLeftPayload(decoded)))
+		}
+		typeTable = cndValues((*Constructor_Data_Either_Right[gopurs_runtime.Value, gopurs_runtime.Value])(decoded.UnsafePtr).V0)
+	}
+	decAnn := func(raw any) gopurs_runtime.Value { return cndAnnWithUsage(moduleName, typeTable, raw) }
+	span := cndFieldOf(obj, "sourceSpan", func(value any) gopurs_runtime.Value { return cndSourceSpan(path, value) })
+	imports := cndArrayOfField(obj, "imports", func(value any) gopurs_runtime.Value { return cndImport(decAnn, value) })
+	exports := cndArrayOfField(obj, "exports", cndIdent)
+	reExports := cndFieldOf(obj, "reExports", cndReExports)
+	mbDataDecls := cndOptionalFieldOf(obj, "dataDecls", func(value any) gopurs_runtime.Value {
+		return cndArrayDecode(value, func(inner any) gopurs_runtime.Value { return cndDataDecl(typeTable, inner) })
+	})
+	var dataDecls []gopurs_runtime.Value
+	if cndIsJust(mbDataDecls) {
+		dataDecls = cndValues(cndFromJust(mbDataDecls))
+	}
+	mbClassDecls := cndOptionalFieldOf(obj, "classDecls", func(value any) gopurs_runtime.Value {
+		return cndArrayDecode(value, func(inner any) gopurs_runtime.Value { return cndClassDecl(typeTable, inner) })
+	})
+	var classDecls []gopurs_runtime.Value
+	if cndIsJust(mbClassDecls) {
+		classDecls = cndValues(cndFromJust(mbClassDecls))
+	}
+	decls := cndArrayOfField(obj, "decls", func(value any) gopurs_runtime.Value { return cndBind(typeTable, decAnn, value) })
+	foreignArr := cndArrayOfField(obj, "foreign", cndIdent)
+	var foreignAnnotations map[string]any
+	if rawAnnotations, present := obj["foreignAnnotations"]; present && !cndIsNull(rawAnnotations) {
+		if _, failure := cndTry(func() gopurs_runtime.Value {
+			foreignAnnotations = cndObject(rawAnnotations)
+			return gopurs_runtime.Value{}
+		}); failure != nil {
+			cndFailValue(ntAtKey("foreignAnnotations", failure.err))
+		}
+	}
+	foreignList := make([]gopurs_runtime.Value, 0, len(cndValues(foreignArr)))
+	for _, ident := range cndValues(foreignArr) {
+		typeValue := cndNothing()
+		if foreignAnnotations != nil {
+			if rawAnn, ok := foreignAnnotations[ident.StrVal()]; ok {
+				ann := cndAnn(typeTable, rawAnn)
+				typeValue = gopurs_runtime.RecordGet(ann, "type")
+			}
+		}
+		foreignList = append(foreignList, cndTuple(gopurs_runtime.Str(ident.StrVal()), typeValue))
+	}
+	// Coupling: the foreign annotations map is built by the generated
+	// specialised Map.fromFoldable (the Map is an opaque native structure).
+	// Calling the Map FFI insert path directly would require the Ord String
+	// comparator as a Value; the generated helper is stable for a given PBO
+	// version and a rename fails the build loudly.
+	foreignMap := Call_Data_Map_Internal_fromFoldable__1911179134(gopurs_runtime.Array(foreignList))
+	comments := cndArrayOfField(obj, "comments", cndComment)
+	return gopurs_runtime.RecordDict(
+		[]string{"classDecls", "comments", "dataDecls", "decls", "exports", "foreign", "imports", "name", "path", "reExports", "span"},
+		[]gopurs_runtime.Value{
+			gopurs_runtime.Array(classDecls),
+			comments,
+			gopurs_runtime.Array(dataDecls),
+			decls,
+			exports,
+			foreignMap,
+			imports,
+			gopurs_runtime.Str(moduleName),
+			gopurs_runtime.Str(path),
+			reExports,
+			span,
+		})
+}
+
+// DecodeModuleImpl mirrors CoreFn.Json.decodeModule. The PureScript fallback
+// argument is only used by the JavaScript backend.
+func DecodeModuleImpl(fallback gopurs_runtime.Value, validate gopurs_runtime.Value, json gopurs_runtime.Value) (result gopurs_runtime.Value) {
+	_ = fallback
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if failure, ok := recovered.(cndFailure); ok {
+				result = cndLeft(failure.err)
+				return
+			}
+			panic(recovered)
+		}
+	}()
+	obj := cndObject(json)
+	name := cndFieldOf(obj, "moduleName", cndModuleNameValue)
+	path := cndFieldOf(obj, "modulePath", cndStringValue)
+	module := cndModulePrime(name.StrVal(), obj, path.StrVal())
+	validation := gopurs_runtime.Apply(validate, module)
+	if cndIsLeft(validation) {
+		cndFailValue(cndLeftPayload(validation))
+	}
+	return cndRight(module)
 }

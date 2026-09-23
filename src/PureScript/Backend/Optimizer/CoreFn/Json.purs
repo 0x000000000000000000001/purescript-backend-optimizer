@@ -254,7 +254,15 @@ decodeClassDecl tt json = do
   pure { name, vars, superclasses, methods }
 
 decodeModule :: Json -> JsonDecode (Module Ann)
-decodeModule json = do
+decodeModule json = decodeModuleImpl decodeModulePS validateSourceUsageModule json
+
+-- The Go backend decodes the whole module natively. The JavaScript backend
+-- calls the PureScript implementation passed as the first argument, so the JS
+-- bundle keeps the exact previous behaviour.
+foreign import decodeModuleImpl :: (Json -> JsonDecode (Module Ann)) -> (Module Ann -> Either JsonDecodeError Unit) -> Json -> JsonDecode (Module Ann)
+
+decodeModulePS :: Json -> JsonDecode (Module Ann)
+decodeModulePS json = do
   obj <- decodeJObject json
   name <- getField decodeModuleName obj "moduleName"
   mod <- decodeModule' (decodeAnnWithUsage name) json

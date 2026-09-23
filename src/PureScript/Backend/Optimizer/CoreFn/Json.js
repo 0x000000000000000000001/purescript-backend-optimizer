@@ -15,3 +15,7 @@ export const decodeArrayImpl = fallback => decoder => arr => fallback(decoder)(a
 // the Go backend decodes annotations natively.
 export const decodeAnnWithUsageImpl = fallback => moduleName => typeTable => path => json =>
   fallback(moduleName)(typeTable)(path)(json);
+
+// JavaScript calls the PureScript module decoder supplied by the caller; the
+// Go backend decodes the whole module natively and validates natively.
+export const decodeModuleImpl = fallback => validate => json => fallback(json);
