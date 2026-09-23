@@ -140,6 +140,15 @@ decodeTypeRef j = case decodeString j of
       Right "Any" -> Right (StaticRef Any)
       _ -> Left (TypeMismatch "ExprType")
 
+-- JavaScript entry point for the native decoder boundary: the Go backend
+-- resolves the table directly, while the JS bundle keeps this validated
+-- algorithm.
+decodeTypeTablePS :: Array Json -> Either JsonDecodeError (Array ExprType)
+decodeTypeTablePS typeTableJson =
+  case ST.run (decodeTypeTableST typeTableJson) of
+    Left err -> Left err
+    Right val -> Right val
+
 decodeTypeTableST :: forall r. Array Json -> ST.ST r (Either JsonDecodeError (Array ExprType))
 decodeTypeTableST typeTableJson = do
   resArray <- STArray.thaw (Array.replicate (Array.length typeTableJson) Nothing)

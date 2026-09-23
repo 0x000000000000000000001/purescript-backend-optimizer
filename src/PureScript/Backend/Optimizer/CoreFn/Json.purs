@@ -121,9 +121,11 @@ decodeMeta json = do
 decodeTypeTable :: Json -> JsonDecode (Array ExprType)
 decodeTypeTable json = do
   typeTableJson <- decodeJArray json
-  case ST.run (decodeTypeTableST typeTableJson) of
-    Left err -> Left err
-    Right val -> Right val
+  decodeTypeTableImpl typeTableJson
+
+-- The Go backend resolves the table without ST or Maybe/Either plumbing. The
+-- JavaScript implementation keeps the validated PureScript algorithm.
+foreign import decodeTypeTableImpl :: Array Json -> Either JsonDecodeError (Array ExprType)
 
 
 decodeMethod :: Array ExprType -> Json -> JsonDecode (Tuple String ExprType)
@@ -159,7 +161,15 @@ decodeAnn typeTable _path json = do
 -- A standalone annotation has no module provenance. Only
 -- decodeModule can attach usable source facts; the public decodeAnn stays safe.
 decodeAnnWithUsage :: ModuleName -> Array ExprType -> String -> Json -> JsonDecode Ann
-decodeAnnWithUsage moduleName typeTable path json = do
+decodeAnnWithUsage moduleName typeTable path json = decodeAnnWithUsageImpl decodeAnnWithUsagePS moduleName typeTable path json
+
+-- The Go backend decodes annotations natively. The JavaScript backend calls
+-- the PureScript implementation passed as the first argument, so the JS bundle
+-- keeps the exact previous behaviour.
+foreign import decodeAnnWithUsageImpl :: (ModuleName -> Array ExprType -> String -> Json -> JsonDecode Ann) -> ModuleName -> Array ExprType -> String -> Json -> JsonDecode Ann
+
+decodeAnnWithUsagePS :: ModuleName -> Array ExprType -> String -> Json -> JsonDecode Ann
+decodeAnnWithUsagePS moduleName typeTable path json = do
   Ann ann <- decodeAnn typeTable path json
   sourceUsage <- decodeSourceUsage moduleName json
   pure $ Ann (ann { sourceUsage = sourceUsage })
@@ -452,7 +462,15 @@ decodeArray :: forall a. (Json -> JsonDecode a) -> Json -> JsonDecode (Array a)
 decodeArray decoder json = case decodeJArray json of
   Left err ->
     Left err
-  Right arr -> ST.run Prelude.do
+  Right arr -> decodeArrayImpl decodeArrayPS decoder arr
+
+-- The Go backend runs the element loop directly. The JavaScript backend calls
+-- the validated PureScript loop passed as the first argument, so the JS bundle
+-- keeps the exact previous behaviour.
+foreign import decodeArrayImpl :: forall a. ((Json -> JsonDecode a) -> Array Json -> JsonDecode (Array a)) -> (Json -> JsonDecode a) -> Array Json -> JsonDecode (Array a)
+
+decodeArrayPS :: forall a. (Json -> JsonDecode a) -> Array Json -> JsonDecode (Array a)
+decodeArrayPS decoder arr = ST.run Prelude.do
     out <- STArray.new
     ix <- STRef.new 0
     con <- STRef.new true

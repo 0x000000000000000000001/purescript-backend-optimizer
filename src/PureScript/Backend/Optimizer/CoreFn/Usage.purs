@@ -39,7 +39,15 @@ failUsage :: forall a. String -> Validate a
 failUsage = throwError <<< TypeMismatch
 
 validateSourceUsageModule :: Module Ann -> Either JsonDecodeError Unit
-validateSourceUsageModule (Module mod) = flip evalStateT Set.empty $ do
+validateSourceUsageModule mod = validateSourceUsageModuleImpl validateSourceUsageModulePS mod
+
+-- The Go backend validates the module natively. The JavaScript backend calls
+-- the PureScript implementation passed as the first argument, so the JS bundle
+-- keeps the exact previous behaviour.
+foreign import validateSourceUsageModuleImpl :: (Module Ann -> Either JsonDecodeError Unit) -> Module Ann -> Either JsonDecodeError Unit
+
+validateSourceUsageModulePS :: Module Ann -> Either JsonDecodeError Unit
+validateSourceUsageModulePS (Module mod) = flip evalStateT Set.empty $ do
   traverse_ (\(Import ann _) -> plain ann) mod.imports
   traverse_ top mod.decls
   where
