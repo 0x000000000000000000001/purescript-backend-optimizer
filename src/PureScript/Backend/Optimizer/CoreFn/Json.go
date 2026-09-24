@@ -169,7 +169,7 @@ func ntIsNull(input any) (bool, bool) {
 		return false, true
 	case []any:
 		return false, true
-	case map[string]any:
+	case map[string]any, gopurs_runtime.JSONObject:
 		return false, true
 	}
 	return false, false
@@ -191,8 +191,13 @@ func ntInt(input any) (int64, gopurs_runtime.Value, bool) {
 	return n, gopurs_runtime.Value{}, true
 }
 
-func ntStringField(obj map[string]any, key string) (string, gopurs_runtime.Value, bool) {
-	raw, ok := obj[key]
+// Borrow compact parsed objects and ordinary Foreign.Object maps uniformly.
+type ntObject = gopurs_runtime.JSONObjectView
+
+func ntObjectOf(raw any) (ntObject, bool) { return gopurs_runtime.ReadJSONObject(raw) }
+
+func ntStringField(obj ntObject, key string) (string, gopurs_runtime.Value, bool) {
+	raw, ok := obj.Lookup(key)
 	if !ok {
 		return "", ntAtKey(key, ntMissingValue()), false
 	}
@@ -203,8 +208,8 @@ func ntStringField(obj map[string]any, key string) (string, gopurs_runtime.Value
 	return value, gopurs_runtime.Value{}, true
 }
 
-func ntIntField(obj map[string]any, key string) (int64, gopurs_runtime.Value, bool) {
-	raw, ok := obj[key]
+func ntIntField(obj ntObject, key string) (int64, gopurs_runtime.Value, bool) {
+	raw, ok := obj.Lookup(key)
 	if !ok {
 		return 0, ntAtKey(key, ntMissingValue()), false
 	}
@@ -215,8 +220,8 @@ func ntIntField(obj map[string]any, key string) (int64, gopurs_runtime.Value, bo
 	return value, gopurs_runtime.Value{}, true
 }
 
-func ntStringArrayField(obj map[string]any, key string) ([]string, gopurs_runtime.Value, bool) {
-	raw, ok := obj[key]
+func ntStringArrayField(obj ntObject, key string) ([]string, gopurs_runtime.Value, bool) {
+	raw, ok := obj.Lookup(key)
 	if !ok {
 		return nil, ntAtKey(key, ntMissingValue()), false
 	}
@@ -235,8 +240,8 @@ func ntStringArrayField(obj map[string]any, key string) ([]string, gopurs_runtim
 	return out, gopurs_runtime.Value{}, true
 }
 
-func ntIntArrayField(obj map[string]any, key string) ([]int64, gopurs_runtime.Value, bool) {
-	raw, ok := obj[key]
+func ntIntArrayField(obj ntObject, key string) ([]int64, gopurs_runtime.Value, bool) {
+	raw, ok := obj.Lookup(key)
 	if !ok {
 		return nil, ntAtKey(key, ntMissingValue()), false
 	}
@@ -340,14 +345,14 @@ func (t *ntTable) decodeRef(raw any) ntRef {
 			return ntRef{err: ntTypeMismatch("ExprType")}
 		}
 	}
-	obj, ok := raw.(map[string]any)
+	obj, ok := ntObjectOf(raw)
 	if !ok {
 		return ntRef{err: ntTypeMismatch("ExprType")}
 	}
-	typRaw, hasType := obj["type"]
+	typRaw, hasType := obj.Lookup("type")
 	typ, typOK := ntNative(typRaw).(string)
 	if !hasType || !typOK {
-		if tvRaw, ok := obj["TypeVar"]; ok {
+		if tvRaw, ok := obj.Lookup("TypeVar"); ok {
 			if name, ok := ntNative(tvRaw).(string); ok {
 				return ntRef{ok: true, kind: ntRefStatic, value: ntTypeVar(name)}
 			}
@@ -406,7 +411,7 @@ func (t *ntTable) decodeRef(raw any) ntRef {
 			return ntRef{err: err}
 		}
 		ref := ntRef{ok: true, kind: ntRefRow, fields: fields, tailKind: ntTailNone}
-		if tailRaw, present := obj["tail"]; present {
+		if tailRaw, present := obj.Lookup("tail"); present {
 			if isNull, known := ntIsNull(tailRaw); !known {
 				return ntRef{err: ntAtKey("tail", ntTypeMismatch("Failed decode"))}
 			} else if !isNull {
@@ -437,7 +442,7 @@ func (t *ntTable) decodeRef(raw any) ntRef {
 			return ntRef{err: err}
 		}
 		ref := ntRef{ok: true, kind: ntRefConstrained, constraints: constraints}
-		bodyRaw, present := obj["body"]
+		bodyRaw, present := obj.Lookup("body")
 		if !present {
 			ref.bodyKind = ntBodyError
 			ref.bodyErr = ntAtKey("body", ntMissingValue())
@@ -476,8 +481,8 @@ func (t *ntTable) decodeRef(raw any) ntRef {
 	}
 }
 
-func ntDecodeFields(obj map[string]any) ([]ntFieldRef, gopurs_runtime.Value, bool) {
-	raw, ok := obj["fields"]
+func ntDecodeFields(obj ntObject) ([]ntFieldRef, gopurs_runtime.Value, bool) {
+	raw, ok := obj.Lookup("fields")
 	if !ok {
 		return nil, ntAtKey("fields", ntMissingValue()), false
 	}
@@ -487,7 +492,7 @@ func ntDecodeFields(obj map[string]any) ([]ntFieldRef, gopurs_runtime.Value, boo
 	}
 	out := make([]ntFieldRef, len(arr))
 	for i, element := range arr {
-		field, ok := ntNative(element).(map[string]any)
+		field, ok := ntObjectOf(ntNative(element))
 		if !ok {
 			return nil, ntAtKey("fields", ntTypeMismatch("Failed decode")), false
 		}
@@ -504,8 +509,8 @@ func ntDecodeFields(obj map[string]any) ([]ntFieldRef, gopurs_runtime.Value, boo
 	return out, gopurs_runtime.Value{}, true
 }
 
-func ntDecodeConstraints(obj map[string]any) ([]ntConstraintRef, gopurs_runtime.Value, bool) {
-	raw, ok := obj["constraints"]
+func ntDecodeConstraints(obj ntObject) ([]ntConstraintRef, gopurs_runtime.Value, bool) {
+	raw, ok := obj.Lookup("constraints")
 	if !ok {
 		return nil, ntAtKey("constraints", ntMissingValue()), false
 	}
@@ -515,7 +520,7 @@ func ntDecodeConstraints(obj map[string]any) ([]ntConstraintRef, gopurs_runtime.
 	}
 	out := make([]ntConstraintRef, len(arr))
 	for i, element := range arr {
-		constraint, ok := ntNative(element).(map[string]any)
+		constraint, ok := ntObjectOf(ntNative(element))
 		if !ok {
 			return nil, ntAtKey("constraints", ntTypeMismatch("Failed decode")), false
 		}
@@ -939,11 +944,11 @@ func ndBoolean(raw any) (bool, *ndFailure) {
 	return false, ndPublic("Boolean")
 }
 
-func ndObject(raw any) (map[string]any, *ndFailure) {
-	if value, ok := raw.(map[string]any); ok {
+func ndObject(raw any) (ntObject, *ndFailure) {
+	if value, ok := ntObjectOf(raw); ok {
 		return value, nil
 	}
-	return nil, ndPublic("Object")
+	return ntObject{}, ndPublic("Object")
 }
 
 func ndReify(value any) any {
@@ -986,8 +991,8 @@ func ndArrayOf(raw any, decode ndElementDecoder) ([]gopurs_runtime.Value, *ndFai
 
 // ndField mirrors getField: an absent key is MissingValue, a failure is wrapped
 // in AtKey.
-func ndField(obj map[string]any, key string, decode ndElementDecoder) (gopurs_runtime.Value, *ndFailure) {
-	raw, present := obj[key]
+func ndField(obj ntObject, key string, decode ndElementDecoder) (gopurs_runtime.Value, *ndFailure) {
+	raw, present := obj.Lookup(key)
 	if !present {
 		return gopurs_runtime.Value{}, &ndFailure{err: ntAtKey(key, ntMissingValue())}
 	}
@@ -1000,8 +1005,8 @@ func ndField(obj map[string]any, key string, decode ndElementDecoder) (gopurs_ru
 
 // ndOptionalField mirrors getFieldOptional': absent or null is Nothing and
 // decoding failures are not wrapped.
-func ndOptionalField(obj map[string]any, key string, decode ndElementDecoder) (gopurs_runtime.Value, *ndFailure) {
-	raw, present := obj[key]
+func ndOptionalField(obj ntObject, key string, decode ndElementDecoder) (gopurs_runtime.Value, *ndFailure) {
+	raw, present := obj.Lookup(key)
 	if !present || ndNullable(ndReify(raw)) {
 		return ndNothing(), nil
 	}
@@ -1049,7 +1054,7 @@ func ndMeta(raw any) (gopurs_runtime.Value, *ndFailure) {
 		if failure != nil {
 			return gopurs_runtime.Value{}, failure
 		}
-		rawIdentifiers, present := obj["identifiers"]
+		rawIdentifiers, present := obj.Lookup("identifiers")
 		if !present {
 			return gopurs_runtime.Value{}, &ndFailure{err: ntAtKey("identifiers", ntMissingValue())}
 		}
@@ -1177,7 +1182,7 @@ func ndVariableUse(moduleName string, raw any) (gopurs_runtime.Value, *ndFailure
 }
 
 // ndSourceUsage mirrors decodeSourceUsage.
-func ndSourceUsage(moduleName string, obj map[string]any) (gopurs_runtime.Value, *ndFailure) {
+func ndSourceUsage(moduleName string, obj ntObject) (gopurs_runtime.Value, *ndFailure) {
 	bindingUsage, failure := ndOptionalField(obj, "bindingUsage", func(value any) (gopurs_runtime.Value, *ndFailure) {
 		return ndBindingUsage(moduleName, value)
 	})
@@ -1211,7 +1216,7 @@ func DecodeAnnWithUsageImpl(fallback gopurs_runtime.Value, moduleName gopurs_run
 		return ntLeft(failure.err)
 	}
 	typeValue := ndNothing()
-	rawType, present := obj["type"]
+	rawType, present := obj.Lookup("type")
 	if present && !ndNullable(ndReify(rawType)) {
 		typeID, failure := ndInt(ndReify(rawType))
 		if failure != nil {
@@ -1420,12 +1425,12 @@ func cndInt(raw any) int64 {
 	return value
 }
 
-func cndObject(raw any) map[string]any {
-	if value, ok := ntNative(raw).(map[string]any); ok {
+func cndObject(raw any) ntObject {
+	if value, ok := ntObjectOf(ntNative(raw)); ok {
 		return value
 	}
 	cndFail("Object")
-	return nil
+	return ntObject{}
 }
 
 func cndElements(raw any) []any {
@@ -1449,8 +1454,8 @@ func cndIsNull(raw any) bool {
 
 // ---- getField / getFieldOptional' / decodeArray ----
 
-func cndFieldOf(obj map[string]any, key string, decode func(any) gopurs_runtime.Value) gopurs_runtime.Value {
-	raw, present := obj[key]
+func cndFieldOf(obj ntObject, key string, decode func(any) gopurs_runtime.Value) gopurs_runtime.Value {
+	raw, present := obj.Lookup(key)
 	if !present {
 		cndFailValue(ntAtKey(key, ntMissingValue()))
 	}
@@ -1461,8 +1466,8 @@ func cndFieldOf(obj map[string]any, key string, decode func(any) gopurs_runtime.
 	return value
 }
 
-func cndOptionalFieldOf(obj map[string]any, key string, decode func(any) gopurs_runtime.Value) gopurs_runtime.Value {
-	raw, present := obj[key]
+func cndOptionalFieldOf(obj ntObject, key string, decode func(any) gopurs_runtime.Value) gopurs_runtime.Value {
+	raw, present := obj.Lookup(key)
 	if !present || cndIsNull(raw) {
 		return cndNothing()
 	}
@@ -1473,7 +1478,7 @@ func cndOptionalFieldOf(obj map[string]any, key string, decode func(any) gopurs_
 	return cndJust(value)
 }
 
-func cndArrayOfField(obj map[string]any, key string, decode func(any) gopurs_runtime.Value) gopurs_runtime.Value {
+func cndArrayOfField(obj ntObject, key string, decode func(any) gopurs_runtime.Value) gopurs_runtime.Value {
 	return cndFieldOf(obj, key, func(raw any) gopurs_runtime.Value {
 		return cndArrayDecode(raw, decode)
 	})
@@ -1523,14 +1528,14 @@ func cndIdent(raw any) gopurs_runtime.Value {
 func cndQualified(raw any, nameDecode func(any) gopurs_runtime.Value) gopurs_runtime.Value {
 	obj := cndObject(raw)
 	var maybe *Constructor_Data_Maybe_Just[string]
-	if rawModule, present := obj["moduleName"]; present && !cndIsNull(rawModule) {
+	if rawModule, present := obj.Lookup("moduleName"); present && !cndIsNull(rawModule) {
 		name, failure := cndTryString(func() string { return cndModuleName(rawModule) })
 		if failure != nil {
 			cndFailValue(failure.err)
 		}
 		maybe = &Constructor_Data_Maybe_Just[string]{1, name}
 	}
-	rawIdentifier, present := obj["identifier"]
+	rawIdentifier, present := obj.Lookup("identifier")
 	if !present {
 		cndFailValue(ntAtKey("identifier", ntMissingValue()))
 	}
@@ -1607,8 +1612,8 @@ func cndMetaValue(raw any) gopurs_runtime.Value {
 	return value
 }
 
-func cndTypeField(typeTable []gopurs_runtime.Value, obj map[string]any) gopurs_runtime.Value {
-	rawType, present := obj["type"]
+func cndTypeField(typeTable []gopurs_runtime.Value, obj ntObject) gopurs_runtime.Value {
+	rawType, present := obj.Lookup("type")
 	if !present || cndIsNull(rawType) {
 		return cndNothing()
 	}
@@ -1896,7 +1901,7 @@ func cndBindingPointer(value gopurs_runtime.Value) *Constructor_PureScript_Backe
 	return (*Constructor_PureScript_Backend_Optimizer_CoreFn_Binding[gopurs_runtime.Value])(value.UnsafePtr)
 }
 
-func cndBinding(typeTable []gopurs_runtime.Value, decAnn cndAnnDecoder, obj map[string]any) gopurs_runtime.Value {
+func cndBinding(typeTable []gopurs_runtime.Value, decAnn cndAnnDecoder, obj ntObject) gopurs_runtime.Value {
 	ann := cndFieldOf(obj, "annotation", decAnn)
 	identifier := cndFieldOf(obj, "identifier", cndIdent)
 	expression := cndFieldOf(obj, "expression", func(value any) gopurs_runtime.Value { return cndExpr(typeTable, decAnn, value) })
@@ -1912,16 +1917,14 @@ func cndImport(decAnn cndAnnDecoder, raw any) gopurs_runtime.Value {
 
 func cndReExports(raw any) gopurs_runtime.Value {
 	obj := cndObject(raw)
-	keys := make([]string, 0, len(obj))
-	for key := range obj {
-		keys = append(keys, key)
-	}
+	keys := obj.Keys()
 	sort.Strings(keys)
 	out := make([]gopurs_runtime.Value, 0)
 	for _, moduleName := range keys {
 		// decodeReExports decodes each value directly with decodeArray; there is
 		// no getField wrapper, so failures are not tagged with the key.
-		idents := cndArrayDecode(ntNative(obj[moduleName]), cndIdent)
+		rawIdents, _ := obj.Lookup(moduleName)
+		idents := cndArrayDecode(ntNative(rawIdents), cndIdent)
 		for _, ident := range cndValues(idents) {
 			out = append(out, gopurs_runtime.Value{Type: 9, IntVal: cndTagReExport, UnsafePtr: unsafe.Pointer(&Constructor_PureScript_Backend_Optimizer_CoreFn_ReExport{1, moduleName, ident.StrVal()})})
 		}
@@ -2013,9 +2016,9 @@ func cndConstraint(typeTable []gopurs_runtime.Value, raw any) gopurs_runtime.Val
 
 // ---- module ----
 
-func cndModulePrime(moduleName string, obj map[string]any, path string) gopurs_runtime.Value {
+func cndModulePrime(moduleName string, obj ntObject, path string) gopurs_runtime.Value {
 	typeTable := []gopurs_runtime.Value{}
-	if rawTypeTable, present := obj["typeTable"]; present && !cndIsNull(rawTypeTable) {
+	if rawTypeTable, present := obj.Lookup("typeTable"); present && !cndIsNull(rawTypeTable) {
 		decoded := decodeTypeTableNative(ntNative(rawTypeTable))
 		if cndIsLeft(decoded) {
 			cndFailValue(ntAtKey("typeTable", cndLeftPayload(decoded)))
@@ -2043,8 +2046,8 @@ func cndModulePrime(moduleName string, obj map[string]any, path string) gopurs_r
 	}
 	decls := cndArrayOfField(obj, "decls", func(value any) gopurs_runtime.Value { return cndBind(typeTable, decAnn, value) })
 	foreignArr := cndArrayOfField(obj, "foreign", cndIdent)
-	var foreignAnnotations map[string]any
-	if rawAnnotations, present := obj["foreignAnnotations"]; present && !cndIsNull(rawAnnotations) {
+	var foreignAnnotations ntObject
+	if rawAnnotations, present := obj.Lookup("foreignAnnotations"); present && !cndIsNull(rawAnnotations) {
 		if _, failure := cndTry(func() gopurs_runtime.Value {
 			foreignAnnotations = cndObject(rawAnnotations)
 			return gopurs_runtime.Value{}
@@ -2055,11 +2058,9 @@ func cndModulePrime(moduleName string, obj map[string]any, path string) gopurs_r
 	foreignList := make([]gopurs_runtime.Value, 0, len(cndValues(foreignArr)))
 	for _, ident := range cndValues(foreignArr) {
 		typeValue := cndNothing()
-		if foreignAnnotations != nil {
-			if rawAnn, ok := foreignAnnotations[ident.StrVal()]; ok {
-				ann := cndAnn(typeTable, rawAnn)
-				typeValue = gopurs_runtime.RecordGet(ann, "type")
-			}
+		if rawAnn, ok := foreignAnnotations.Lookup(ident.StrVal()); ok {
+			ann := cndAnn(typeTable, rawAnn)
+			typeValue = gopurs_runtime.RecordGet(ann, "type")
 		}
 		foreignList = append(foreignList, cndTuple(gopurs_runtime.Str(ident.StrVal()), typeValue))
 	}
