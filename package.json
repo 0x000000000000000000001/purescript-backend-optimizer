@@ -6,6 +6,7 @@
     "build": "spago build",
     "test": "spago test -p backend-es",
     "test:typeapp": "node test/typeapp.mjs",
+    "test:class-scope": "node test/class-member-scope.mjs",
     "format": "purs-tidy format-in-place src backend-es/src backend-es/test/*.purs",
     "format:check": "purs-tidy check src backend-es/src backend-es/test/*.purs"
   },
