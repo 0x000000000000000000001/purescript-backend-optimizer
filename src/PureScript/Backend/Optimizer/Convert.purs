@@ -601,6 +601,14 @@ toBackendExprWithType mbTy expr = do
     _ -> case exprAnn expr of
       Ann ann -> ann.type
 
+  -- The TAST fork records value-level instantiations as compiler-injected
+  -- VisibleTypeApp nodes, including on newtype and class dictionary
+  -- constructors. Stock CoreFn applies such constructors directly, so the
+  -- newtype erasure below must look through the wrappers.
+  stripTypeApps = case _ of
+    ExprTypeApp _ inner _ -> stripTypeApps inner
+    inner -> inner
+
   go = case _ of
     ExprVar _ qi -> do
       { currentModule, toLevel } <- ask
@@ -634,7 +642,7 @@ toBackendExprWithType mbTy expr = do
       lvl <- currentLevel
       make $ Abs (NonEmptyArray.singleton (Tuple (Just arg) lvl)) (intro [ arg ] lvl (toBackendExpr body))
     ExprApp _ a b
-      | ExprVar (Ann { meta: Just IsNewtype }) id <- a -> do
+      | ExprVar (Ann { meta: Just IsNewtype }) id <- stripTypeApps a -> do
           toBackendExpr b
       | otherwise ->
           make $ App (toBackendExpr a) (NonEmptyArray.singleton (toBackendExpr b))

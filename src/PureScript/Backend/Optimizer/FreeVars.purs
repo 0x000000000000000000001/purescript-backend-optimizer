@@ -14,7 +14,7 @@ import Data.String as String
 import Data.Tuple (Tuple(..))
 import PureScript.Backend.Optimizer.Codegen.Tco (TcoExpr(..))
 import PureScript.Backend.Optimizer.CoreFn (ExprType, Ident(..), Literal(..), Prop(..), propValue)
-import PureScript.Backend.Optimizer.Syntax (BackendOperator(..), BackendSyntax(..), Level(..), Pair(..))
+import PureScript.Backend.Optimizer.Syntax (BackendEffect(..), BackendOperator(..), BackendSyntax(..), Level(..), Pair(..))
 
 sanitizeName :: String -> String
 sanitizeName name =
@@ -111,7 +111,10 @@ freeVars (TcoExpr _ syntax) = case syntax of
   PrimOp op -> case op of
     Op1 _ e -> freeVars e
     Op2 _ e1 e2 -> Set.union (freeVars e1) (freeVars e2)
-  PrimEffect _ -> Set.empty
+  PrimEffect effect -> case effect of
+    EffectRefNew e -> freeVars e
+    EffectRefRead e -> freeVars e
+    EffectRefWrite ref val -> Set.union (freeVars ref) (freeVars val)
   PrimUndefined -> Set.empty
   Fail _ -> Set.empty
   Typed _ a -> freeVars a
@@ -147,6 +150,9 @@ paramTypes (TcoExpr _ expr) = case expr of
   PrimOp op -> case op of
     Op1 _ e -> paramTypes e
     Op2 _ e1 e2 -> Map.union (paramTypes e1) (paramTypes e2)
-  PrimEffect _ -> Map.empty
+  PrimEffect effect -> case effect of
+    EffectRefNew e -> paramTypes e
+    EffectRefRead e -> paramTypes e
+    EffectRefWrite ref val -> Map.union (paramTypes ref) (paramTypes val)
   PrimUndefined -> Map.empty
   Fail _ -> Map.empty
