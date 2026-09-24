@@ -294,34 +294,23 @@ const (
 )
 
 type ntRef struct {
-	kind  uint8
-	ok    bool
-	err   gopurs_runtime.Value
-	value gopurs_runtime.Value
-
-	name  string
-	fqn   []string
-	args  []int64
-	ctor  int64
-	fargs []int64
-	ret   int64
-	el    int64
-	row   int64
-
-	fields   []ntFieldRef
+	kind     uint8
+	ok       bool
 	tailKind uint8
-	tail     int64
-	tailErr  gopurs_runtime.Value
+	bodyKind uint8
+	argsOK   bool
 
-	vars []string
-	body int64
+	// Variant-exclusive payloads share storage. value holds a static type,
+	// a decode failure (!ok), or the deferred args/tail/body failure selected
+	// by the flags above. Their resolution/error precedence remains distinct.
+	value gopurs_runtime.Value
+	name  string
+	names []string // ADT qualified name or ForAll variables
+	args  []int64  // ADT, TypeApp or Func arguments
+	link  int64    // constructor, return, element, row, tail or body reference
 
+	fields      []ntFieldRef
 	constraints []ntConstraintRef
-	bodyKind    uint8
-	bodyErr     gopurs_runtime.Value
-
-	argsErr gopurs_runtime.Value
-	argsOK  bool
 }
 
 func (t *ntTable) decodeRef(raw any) ntRef {
@@ -342,12 +331,12 @@ func (t *ntTable) decodeRef(raw any) ntRef {
 		case "Any":
 			return ntRef{ok: true, kind: ntRefStatic, value: ntStaticValue(ntTagAny)}
 		default:
-			return ntRef{err: ntTypeMismatch("ExprType")}
+			return ntRef{value: ntTypeMismatch("ExprType")}
 		}
 	}
 	obj, ok := ntObjectOf(raw)
 	if !ok {
-		return ntRef{err: ntTypeMismatch("ExprType")}
+		return ntRef{value: ntTypeMismatch("ExprType")}
 	}
 	typRaw, hasType := obj.Lookup("type")
 	typ, typOK := ntNative(typRaw).(string)
@@ -357,71 +346,71 @@ func (t *ntTable) decodeRef(raw any) ntRef {
 				return ntRef{ok: true, kind: ntRefStatic, value: ntTypeVar(name)}
 			}
 		}
-		return ntRef{err: ntAtKey("type", ntMissingValue())}
+		return ntRef{value: ntAtKey("type", ntMissingValue())}
 	}
 	switch typ {
 	case "Adt":
 		fqn, err, ok := ntStringArrayField(obj, "fqn")
 		if !ok {
-			return ntRef{err: err}
+			return ntRef{value: err}
 		}
 		args, err, ok := ntIntArrayField(obj, "args")
 		if !ok {
-			return ntRef{err: err}
+			return ntRef{value: err}
 		}
-		return ntRef{ok: true, kind: ntRefADT, name: strings.Join(fqn, "."), fqn: fqn, args: args}
+		return ntRef{ok: true, kind: ntRefADT, name: strings.Join(fqn, "."), names: fqn, args: args}
 	case "TypeApp":
 		ctor, err, ok := ntIntField(obj, "constructor")
 		if !ok {
-			return ntRef{err: err}
+			return ntRef{value: err}
 		}
 		args, argsErr, argsOK := ntIntArrayField(obj, "args")
-		return ntRef{ok: true, kind: ntRefTypeApp, ctor: ctor, args: args, argsOK: argsOK, argsErr: argsErr}
+		return ntRef{ok: true, kind: ntRefTypeApp, link: ctor, args: args, argsOK: argsOK, value: argsErr}
 	case "Func":
 		args, err, ok := ntIntArrayField(obj, "args")
 		if !ok {
-			return ntRef{err: err}
+			return ntRef{value: err}
 		}
 		ret, err, ok := ntIntField(obj, "ret")
 		if !ok {
-			return ntRef{err: err}
+			return ntRef{value: err}
 		}
-		return ntRef{ok: true, kind: ntRefFunc, fargs: args, ret: ret}
+		return ntRef{ok: true, kind: ntRefFunc, args: args, link: ret}
 	case "Array":
 		el, err, ok := ntIntField(obj, "element")
 		if !ok {
-			return ntRef{err: err}
+			return ntRef{value: err}
 		}
-		return ntRef{ok: true, kind: ntRefArray, el: el}
+		return ntRef{ok: true, kind: ntRefArray, link: el}
 	case "TypeVar":
 		name, err, ok := ntStringField(obj, "name")
 		if !ok {
-			return ntRef{err: err}
+			return ntRef{value: err}
 		}
 		return ntRef{ok: true, kind: ntRefStatic, value: ntTypeVar(name)}
 	case "Record":
 		row, err, ok := ntIntField(obj, "row")
 		if !ok {
-			return ntRef{err: err}
+			return ntRef{value: err}
 		}
-		return ntRef{ok: true, kind: ntRefRecord, row: row}
+		return ntRef{ok: true, kind: ntRefRecord, link: row}
 	case "Row":
 		fields, err, ok := ntDecodeFields(obj)
 		if !ok {
-			return ntRef{err: err}
+			return ntRef{value: err}
 		}
 		ref := ntRef{ok: true, kind: ntRefRow, fields: fields, tailKind: ntTailNone}
 		if tailRaw, present := obj.Lookup("tail"); present {
 			if isNull, known := ntIsNull(tailRaw); !known {
-				return ntRef{err: ntAtKey("tail", ntTypeMismatch("Failed decode"))}
+				return ntRef{value: ntAtKey("tail", ntTypeMismatch("Failed decode"))}
 			} else if !isNull {
 				tail, tailErr, ok := ntInt(tailRaw)
 				if !ok {
 					ref.tailKind = ntTailError
-					ref.tailErr = tailErr
+					ref.value = tailErr
 				} else {
 					ref.tailKind = ntTailJust
-					ref.tail = tail
+					ref.link = tail
 				}
 			}
 		}
@@ -429,37 +418,37 @@ func (t *ntTable) decodeRef(raw any) ntRef {
 	case "ForAll":
 		vars, err, ok := ntStringArrayField(obj, "vars")
 		if !ok {
-			return ntRef{err: err}
+			return ntRef{value: err}
 		}
 		body, err, ok := ntIntField(obj, "body")
 		if !ok {
-			return ntRef{err: err}
+			return ntRef{value: err}
 		}
-		return ntRef{ok: true, kind: ntRefForAll, vars: vars, body: body}
+		return ntRef{ok: true, kind: ntRefForAll, names: vars, link: body}
 	case "ConstrainedType":
 		constraints, err, ok := ntDecodeConstraints(obj)
 		if !ok {
-			return ntRef{err: err}
+			return ntRef{value: err}
 		}
 		ref := ntRef{ok: true, kind: ntRefConstrained, constraints: constraints}
 		bodyRaw, present := obj.Lookup("body")
 		if !present {
 			ref.bodyKind = ntBodyError
-			ref.bodyErr = ntAtKey("body", ntMissingValue())
+			ref.value = ntAtKey("body", ntMissingValue())
 			return ref
 		}
 		body, bodyErr, ok := ntInt(bodyRaw)
 		if !ok {
 			ref.bodyKind = ntBodyError
-			ref.bodyErr = ntAtKey("body", bodyErr)
+			ref.value = ntAtKey("body", bodyErr)
 			return ref
 		}
-		ref.body = body
+		ref.link = body
 		return ref
 	case "TypeLevelString":
 		value, err, ok := ntStringField(obj, "value")
 		if !ok {
-			return ntRef{err: err}
+			return ntRef{value: err}
 		}
 		return ntRef{ok: true, kind: ntRefStatic, value: ntTypeLevelString(value)}
 	case "Int":
@@ -477,7 +466,7 @@ func (t *ntTable) decodeRef(raw any) ntRef {
 	case "Any":
 		return ntRef{ok: true, kind: ntRefStatic, value: ntStaticValue(ntTagAny)}
 	default:
-		return ntRef{err: ntTypeMismatch("ExprType")}
+		return ntRef{value: ntTypeMismatch("ExprType")}
 	}
 }
 
@@ -549,17 +538,16 @@ type ntTable struct {
 	refs    []ntRef
 	pending []int64
 	state   []uint8
-	errs    []gopurs_runtime.Value
-	types   []gopurs_runtime.Value
+	// state distinguishes a stored error (1) from a resolved type (2).
+	values []gopurs_runtime.Value
 }
 
 func (t *ntTable) set(id int64, result ntResult) {
+	t.values[id] = result.value
 	if result.right {
 		t.state[id] = 2
-		t.types[id] = result.value
 	} else {
 		t.state[id] = 1
-		t.errs[id] = result.value
 	}
 }
 
@@ -573,9 +561,9 @@ func (t *ntTable) resolveId(id int64, force bool) ntResult {
 	}
 	switch t.state[id] {
 	case 2:
-		return ntResult{ok: true, right: true, value: t.types[id]}
+		return ntResult{ok: true, right: true, value: t.values[id]}
 	case 1:
-		return ntResult{ok: true, right: false, value: t.errs[id]}
+		return ntResult{ok: true, right: false, value: t.values[id]}
 	}
 	if force {
 		return ntResult{ok: true, right: true, value: ntStaticValue(ntTagAny)}
@@ -583,16 +571,15 @@ func (t *ntTable) resolveId(id int64, force bool) ntResult {
 	return ntResult{}
 }
 
-func (t *ntTable) resolveArgs(args []int64, force bool) ntResult {
-	values := make([]gopurs_runtime.Value, 0, len(args))
-	waiting := false
+// Resolution only reads settled states. An unresolved argument dominates every
+// argument error; otherwise the first error in argument order wins.
+func (t *ntTable) checkArgs(args []int64, force bool) ntResult {
 	firstErr := gopurs_runtime.Value{}
 	hasErr := false
 	for _, id := range args {
 		resolved := t.resolveId(id, force)
 		if !resolved.ok {
-			waiting = true
-			continue
+			return ntResult{}
 		}
 		if !resolved.right {
 			if !hasErr {
@@ -601,20 +588,33 @@ func (t *ntTable) resolveArgs(args []int64, force bool) ntResult {
 			}
 			continue
 		}
-		values = append(values, resolved.value)
-	}
-	if waiting {
-		return ntResult{}
 	}
 	if hasErr {
 		return ntResult{ok: true, right: false, value: firstErr}
 	}
-	return ntResult{ok: true, right: true, value: gopurs_runtime.Array(values), slice: values}
+	return ntResult{ok: true, right: true}
+}
+
+// Materialize only after all dependencies needed by the constructor are ready.
+func (t *ntTable) argumentValues(args []int64, force bool) []gopurs_runtime.Value {
+	values := make([]gopurs_runtime.Value, len(args))
+	for i, id := range args {
+		values[i] = t.resolveId(id, force).value
+	}
+	return values
+}
+
+func (t *ntTable) resolveArgs(args []int64, force bool) ntResult {
+	result := t.checkArgs(args, force)
+	if result.ok && result.right {
+		result.slice = t.argumentValues(args, force)
+	}
+	return result
 }
 
 func (t *ntTable) resolveType(ref *ntRef, force bool) ntResult {
 	if !ref.ok {
-		return ntResult{ok: true, right: false, value: ref.err}
+		return ntResult{ok: true, right: false, value: ref.value}
 	}
 	switch ref.kind {
 	case ntRefStatic:
@@ -627,9 +627,9 @@ func (t *ntTable) resolveType(ref *ntRef, force bool) ntResult {
 		if !args.right {
 			return args
 		}
-		return ntResult{ok: true, right: true, value: ntADT(ref.name, ref.fqn, args.slice)}
+		return ntResult{ok: true, right: true, value: ntADT(ref.name, ref.names, args.slice)}
 	case ntRefTypeApp:
-		ctor := t.resolveId(ref.ctor, force)
+		ctor := t.resolveId(ref.link, force)
 		if !ctor.ok {
 			return ntResult{}
 		}
@@ -637,7 +637,7 @@ func (t *ntTable) resolveType(ref *ntRef, force bool) ntResult {
 			return ctor
 		}
 		if !ref.argsOK {
-			return ntResult{ok: true, right: false, value: ref.argsErr}
+			return ntResult{ok: true, right: false, value: ref.value}
 		}
 		args := t.resolveArgs(ref.args, force)
 		if !args.ok {
@@ -648,8 +648,8 @@ func (t *ntTable) resolveType(ref *ntRef, force bool) ntResult {
 		}
 		return ntResult{ok: true, right: true, value: ntTypeApp(ctor.value, args.slice)}
 	case ntRefFunc:
-		args := t.resolveArgs(ref.fargs, force)
-		ret := t.resolveId(ref.ret, force)
+		args := t.checkArgs(ref.args, force)
+		ret := t.resolveId(ref.link, force)
 		if args.ok && !args.right {
 			return args
 		}
@@ -657,11 +657,11 @@ func (t *ntTable) resolveType(ref *ntRef, force bool) ntResult {
 			return ret
 		}
 		if args.ok && ret.ok {
-			return ntResult{ok: true, right: true, value: ntFunc(args.slice, ret.value)}
+			return ntResult{ok: true, right: true, value: ntFunc(t.argumentValues(ref.args, force), ret.value)}
 		}
 		return ntResult{}
 	case ntRefArray:
-		element := t.resolveId(ref.el, force)
+		element := t.resolveId(ref.link, force)
 		if !element.ok {
 			return ntResult{}
 		}
@@ -670,7 +670,7 @@ func (t *ntTable) resolveType(ref *ntRef, force bool) ntResult {
 		}
 		return ntResult{ok: true, right: true, value: ntArrayType(element.value)}
 	case ntRefRecord:
-		row := t.resolveId(ref.row, force)
+		row := t.resolveId(ref.link, force)
 		if !row.ok {
 			return ntResult{}
 		}
@@ -679,74 +679,75 @@ func (t *ntTable) resolveType(ref *ntRef, force bool) ntResult {
 		}
 		return ntResult{ok: true, right: true, value: ntRecordType(row.value)}
 	case ntRefRow:
-		resolved := make([]ntResult, len(ref.fields))
-		for i := range ref.fields {
-			field := t.resolveId(ref.fields[i].typeId, force)
+		firstErr := ntResult{ok: true, right: true}
+		for _, refField := range ref.fields {
+			field := t.resolveId(refField.typeId, force)
 			if !field.ok {
 				return ntResult{}
 			}
-			resolved[i] = field
-		}
-		for _, field := range resolved {
-			if !field.right {
-				return field
+			if !field.right && firstErr.right {
+				firstErr = field
 			}
 		}
-		fields := make([]*Constructor_Data_Tuple_Tuple[string, gopurs_runtime.Value], len(resolved))
-		for i, field := range resolved {
-			fields[i] = &Constructor_Data_Tuple_Tuple[string, gopurs_runtime.Value]{1, ref.fields[i].label, field.value}
+		if !firstErr.right {
+			return firstErr
 		}
+		var tailValue *Constructor_Data_Maybe_Just[gopurs_runtime.Value]
 		switch ref.tailKind {
 		case ntTailError:
-			return ntResult{ok: true, right: false, value: ref.tailErr}
+			return ntResult{ok: true, right: false, value: ref.value}
 		case ntTailNone:
-			return ntResult{ok: true, right: true, value: ntRowType(fields, nil)}
 		default:
-			tail := t.resolveId(ref.tail, force)
+			tail := t.resolveId(ref.link, force)
 			if !tail.ok {
 				return ntResult{}
 			}
 			if !tail.right {
 				return tail
 			}
-			return ntResult{ok: true, right: true, value: ntRowType(fields, &Constructor_Data_Maybe_Just[gopurs_runtime.Value]{1, tail.value})}
+			tailValue = &Constructor_Data_Maybe_Just[gopurs_runtime.Value]{1, tail.value}
 		}
+		fields := make([]*Constructor_Data_Tuple_Tuple[string, gopurs_runtime.Value], len(ref.fields))
+		for i, field := range ref.fields {
+			fields[i] = &Constructor_Data_Tuple_Tuple[string, gopurs_runtime.Value]{1, field.label, t.resolveId(field.typeId, force).value}
+		}
+		return ntResult{ok: true, right: true, value: ntRowType(fields, tailValue)}
 	case ntRefForAll:
-		body := t.resolveId(ref.body, force)
+		body := t.resolveId(ref.link, force)
 		if !body.ok {
 			return ntResult{}
 		}
 		if !body.right {
 			return body
 		}
-		return ntResult{ok: true, right: true, value: ntForAll(ref.vars, body.value)}
+		return ntResult{ok: true, right: true, value: ntForAll(ref.names, body.value)}
 	case ntRefConstrained:
-		resolved := make([]ntResult, len(ref.constraints))
-		for i := range ref.constraints {
-			constraint := t.resolveArgs(ref.constraints[i].args, force)
+		firstErr := ntResult{ok: true, right: true}
+		for _, refConstraint := range ref.constraints {
+			constraint := t.checkArgs(refConstraint.args, force)
 			if !constraint.ok {
 				return ntResult{}
 			}
-			resolved[i] = constraint
-		}
-		for _, constraint := range resolved {
-			if !constraint.right {
-				return constraint
+			if !constraint.right && firstErr.right {
+				firstErr = constraint
 			}
 		}
-		if ref.bodyKind == ntBodyError {
-			return ntResult{ok: true, right: false, value: ref.bodyErr}
+		if !firstErr.right {
+			return firstErr
 		}
-		body := t.resolveId(ref.body, force)
+		if ref.bodyKind == ntBodyError {
+			return ntResult{ok: true, right: false, value: ref.value}
+		}
+		body := t.resolveId(ref.link, force)
 		if !body.ok {
 			return ntResult{}
 		}
 		if !body.right {
 			return body
 		}
-		constraints := make([]*Constructor_Data_Tuple_Tuple[[]string, []gopurs_runtime.Value], len(resolved))
-		for i, constraint := range resolved {
-			constraints[i] = &Constructor_Data_Tuple_Tuple[[]string, []gopurs_runtime.Value]{1, ref.constraints[i].fqn, constraint.slice}
+		constraints := make([]*Constructor_Data_Tuple_Tuple[[]string, []gopurs_runtime.Value], len(ref.constraints))
+		for i, constraint := range ref.constraints {
+			constraints[i] = &Constructor_Data_Tuple_Tuple[[]string, []gopurs_runtime.Value]{1, constraint.fqn, t.argumentValues(constraint.args, force)}
 		}
 		return ntResult{ok: true, right: true, value: ntConstrainedType(constraints, body.value)}
 	}
@@ -759,7 +760,8 @@ func (t *ntTable) settle() {
 		if len(indices) == 0 {
 			return
 		}
-		next := make([]int64, 0, len(indices))
+		// Stable in-place compaction only overwrites indices already visited.
+		next := indices[:0]
 		for _, id := range indices {
 			resolved := t.resolveType(&t.refs[id], false)
 			if resolved.ok {
@@ -806,8 +808,7 @@ func decodeTypeTableNative(raw any) gopurs_runtime.Value {
 		refs:    make([]ntRef, count),
 		pending: make([]int64, count),
 		state:   make([]uint8, count),
-		errs:    make([]gopurs_runtime.Value, count),
-		types:   make([]gopurs_runtime.Value, count),
+		values:  make([]gopurs_runtime.Value, count),
 	}
 	for i := range entries {
 		table.refs[i] = table.decodeRef(entries[i])
@@ -824,13 +825,12 @@ func decodeTypeTableNative(raw any) gopurs_runtime.Value {
 		table.set(id, resolved)
 		table.settle()
 	}
-	out := make([]gopurs_runtime.Value, count)
+	out := table.values
 	for i := range out {
 		switch table.state[i] {
 		case 2:
-			out[i] = table.types[i]
 		case 1:
-			return ntLeft(table.errs[i])
+			return ntLeft(out[i])
 		default:
 			return ntLeft(ntTypeMismatch("Unresolved Type (Cycle Deadlock)"))
 		}
