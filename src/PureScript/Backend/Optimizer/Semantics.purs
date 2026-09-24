@@ -826,6 +826,10 @@ makeLet = floatLetWith go
       SemLet ident binding k
 
 -- | Fait 'remonter' (float) une déclaration locale pour élargir sa portée si cela est sûr.
+-- | Le type annote la valeur de l'expression ; un 'let' interne peut donc sortir
+-- | de son enveloppe tant que la même annotation reste sur le corps, qui produit
+-- | cette valeur. Sans cela, le 'let' typé reste imbriqué et bloque les
+-- | simplifications qui l'auraient aplati.
 floatLet :: BackendSemantics -> (BackendSemantics -> BackendSemantics) -> BackendSemantics
 floatLet = floatLetWith (const (#)) Nothing
 
@@ -844,6 +848,12 @@ floatLetWith = go
     SemLetRec bindings k2 ->
       SemLetRec bindings \nextBindings ->
         makeLet ident1 (k2 nextBindings) k1
+    SemTyped ty (SemLet ident2 binding2 k2) ->
+      go makeLet ident2 binding2 \nextBinding2 ->
+        f ident1 (SemTyped ty (k2 nextBinding2)) k1
+    SemTyped ty (SemLetRec bindings k2) ->
+      SemLetRec bindings \nextBindings ->
+        makeLet ident1 (SemTyped ty (k2 nextBindings)) k1
     NeutFail _ ->
       binding1
     _ ->
