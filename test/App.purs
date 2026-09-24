@@ -17,6 +17,7 @@ import Node.FS.Sync as FS
 import PureScript.Backend.Optimizer.App (readCoreFnModule)
 import PureScript.Backend.Optimizer.Convert (toBackendModule)
 import PureScript.Backend.Optimizer.CoreFn (Ident(..), Module(..), ModuleName(..), Qualified(..))
+import PureScript.Backend.Optimizer.Semantics (instantiateNeutralType)
 import PureScript.Backend.Optimizer.Tracer.Printer (printModuleSteps)
 
 assertEqual :: forall a. Eq a => Show a => String -> a -> a -> Effect Unit
@@ -54,6 +55,7 @@ main = launchAff_ do
           , directives: Map.empty
           , dataTypes: Map.empty
           , foreignSemantics: Map.empty
+          , instantiateNeutral: instantiateNeutralType
           , rewriteLimit: 10000
           , traceIdents: Set.singleton (Qualified (Just rec.name) (Ident "maybe"))
           , optimizationSteps: []

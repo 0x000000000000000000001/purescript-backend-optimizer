@@ -33,7 +33,6 @@ import Foreign.Object (Object)
 import Foreign.Object as Object
 import Partial.Unsafe (unsafePartial)
 import Prelude as Prelude
-import PureScript.Backend.Optimizer.CoreFn.TypeTable (decodeTypeTableST)
 import PureScript.Backend.Optimizer.CoreFn.Usage (validateSourceUsageModule)
 import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), BindingUsage, CaseAlternative(..), CaseGuard(..), ClassDecl, Comment(..), ConstructorType(..), DataConstructor, DataDecl, Expr(..), ExprType, Guard(..), Ident(..), Import(..), Literal(..), Meta(..), Module(..), ModuleName(..), Prop(..), ProperName(..), Qualified(..), ReExport(..), SourceBindingId(..), SourcePos, SourceSpan, SourceUsage, VariableUse, emptySpan)
 import Safe.Coerce (coerce)
