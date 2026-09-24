@@ -15,10 +15,7 @@ module PureScript.Backend.Optimizer.App
 import Prelude
 
 import Control.Parallel (parTraverse)
-import Data.Argonaut.Decode.Error (printJsonDecodeError)
-import Data.Argonaut.Parser (jsonParser)
 import Data.Array as Array
-import Data.Bifunctor (lmap)
 import Data.Either (Either(..))
 import Data.List as List
 import Data.Maybe (Maybe(..), isJust)
@@ -34,7 +31,7 @@ import Node.Encoding (Encoding(..))
 import Node.FS.Aff as FS
 import Node.FS.Stats as Stats
 import PureScript.Backend.Optimizer.CoreFn (Ann, Module)
-import PureScript.Backend.Optimizer.CoreFn.Json (decodeModule)
+import PureScript.Backend.Optimizer.CoreFn.Json.Text (parseModule)
 import PureScript.Backend.Optimizer.CoreFn.Sort (sortModules)
 import PureScript.Backend.Optimizer.Directives (parseDirectiveFile)
 import PureScript.Backend.Optimizer.Directives.Defaults (defaultDirectives)
@@ -47,7 +44,7 @@ readCoreFnModule filePath = do
     Right stat -> do
       if Stats.isFile stat then do
         contents <- FS.readTextFile UTF8 filePath
-        case jsonParser contents >>= (lmap printJsonDecodeError <<< decodeModule) of
+        case parseModule contents of
           Left err -> do
             liftEffect $ Console.error $ "Failed to decode " <> filePath <> ": " <> err
             pure Nothing
