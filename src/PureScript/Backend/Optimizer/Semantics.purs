@@ -65,6 +65,7 @@ import Data.List as List
 import Data.Map (Map)
 import Data.Map as Map
 import Data.Maybe (Maybe(..))
+import Debug as Debug
 import Data.Monoid (power)
 import Data.Newtype (class Newtype, unwrap)
 import Data.Set as Set
@@ -72,7 +73,7 @@ import Data.String as String
 import Data.Tuple (Tuple(..), fst, snd)
 import Partial.Unsafe (unsafeCrashWith)
 import PureScript.Backend.Optimizer.Analysis (class HasAnalysis, BackendAnalysis(..), Capture(..), Complexity(..), ResultTerm(..), Usage(..), analysisOf, bound, bump, complex, updated, withRewrite)
-import PureScript.Backend.Optimizer.CoreFn (ConstructorType, ExprType(..), Ident(..), Literal(..), ModuleName, Prop(..), ProperName, Qualified(..), findProp, propKey, propValue)
+import PureScript.Backend.Optimizer.CoreFn (ConstructorType, ExprType(..), Ident(..), Literal(..), ModuleName(..), Prop(..), ProperName, Qualified(..), findProp, propKey, propValue)
 import PureScript.Backend.Optimizer.Syntax (class HasSyntax, BackendAccessor(..), BackendEffect, BackendOperator(..), BackendOperator1(..), BackendOperator2(..), BackendOperatorNum(..), BackendOperatorOrd(..), BackendSyntax(Var, Local, Lit, App, Abs, UncurriedApp, UncurriedAbs, UncurriedEffectApp, UncurriedEffectAbs, Accessor, Update, CtorSaturated, CtorDef, LetRec, Let, EffectBind, EffectPure, EffectDefer, Branch, PrimOp, PrimEffect, PrimUndefined, Fail, Typed), Level(..), Pair(..), syntaxOf)
 import PureScript.Backend.Optimizer.Syntax as Syn
 import PureScript.Backend.Optimizer.TypeSubstitution as TypeSubstitution
@@ -1221,6 +1222,32 @@ envForGroup env@(Env e) ref acc group =
     if Array.null group then scopedEnv else addStop scopedEnv ref acc
 
 -- | Tente d'évaluer une fonction externe (FFI) si une implémentation sémantique (ForeignEval) est fournie pour elle.
+classAccessorField :: NeutralExpr -> Maybe String
+classAccessorField = go
+  where
+  go (NeutralExpr (Typed _ inner)) = go inner
+  go (NeutralExpr (Abs _ body)) = case strip body of
+    NeutralExpr (Accessor (NeutralExpr (Local _ _)) (GetProp member)) -> Just member
+    _ -> Nothing
+  go _ = Nothing
+
+  strip (NeutralExpr (Typed _ inner)) = strip inner
+  strip other = other
+
+knownInstanceDictionary :: BackendSemantics -> Maybe NeutralExpr
+knownInstanceDictionary = go
+  where
+  go (SemTyped _ inner) = go inner
+  go (SemTypeApp _ inner) = go inner
+  go (NeutVar qual) = Just (NeutralExpr (Var qual))
+  -- Instances are usually still references when the accessor is applied;
+  -- accept only nullary references so no type application is dropped.
+  go (SemRef (EvalExtern qual) refSpine _)
+    | Array.null refSpine = Just (NeutralExpr (Var qual))
+    | otherwise = Nothing
+  go _ = Nothing
+
+
 evalExternFromImpl :: Env -> Qualified Ident -> Tuple BackendAnalysis ExternImpl -> Array ExternSpine -> Maybe BackendSemantics
 evalExternFromImpl (Env e) qual (Tuple _ (ExternExpr _ _)) spine
   | Just { head: ExternTypeApp _ } <- Array.uncons spine
@@ -1238,6 +1265,20 @@ evalExternFromImpl (Env e) qual (Tuple _ (ExternExpr _ expr@(NeutralExpr (Typed 
         Just InlineNever -> Just $ neutralSpine (NeutStop qual) spine
         Just (InlineArity n) | n > 1 -> Nothing
         _ -> Just arg
+-- A class accessor is an outer lambda projecting one dictionary field.
+-- Beta-reducing it on a known instance dictionary resolves the method to the
+-- instance member (`add semiringInt` becomes `intAdd`) instead of leaving a
+-- runtime dictionary dispatch, and sidesteps the generic-annotation rule below
+-- because the projection itself is not inlined.
+evalExternFromImpl env@(Env e) qual (Tuple _ (ExternExpr group expr)) spine
+  | Just member <- classAccessorField expr
+  , Array.all isNotTypeApp spine
+  , [ ExternApp args ] <- spine
+  , Just { head: dictionary, tail: rest } <- Array.uncons args
+  , Just dictionaryExpr <- knownInstanceDictionary dictionary =
+      Just $ evalApp env
+        (eval (envForGroup env (EvalExtern qual) InlineRef group) (NeutralExpr (Accessor dictionaryExpr (GetProp member))))
+        rest
 -- A value application does not instantiate the implementation's quantifiers.
 -- Inlining it would attach its generic annotations to caller expressions; a
 -- later caller substitution could capture those still-unbound type names.
