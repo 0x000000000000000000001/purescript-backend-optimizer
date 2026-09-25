@@ -81,7 +81,7 @@ import Data.Tuple (Tuple(..), fst, snd)
 import Effect.Unsafe (unsafePerformEffect)
 import Partial.Unsafe (unsafeCrashWith)
 import PureScript.Backend.Optimizer.Analysis (BackendAnalysis, analysisOf, analyze, analyzeEffectBlock)
-import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), ClassDecl, Comment, ConstructorType(..), DataDecl, Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Meta(..), Module(..), ModuleName(..), ProperName(..), Qualified(..), ReExport, binderAnn, exprAnn, findProp, propKey, propValue, qualifiedModuleName, unQualified)
+import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), ClassDecl, Comment, ConstructorType(..), DataDecl, Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Meta(..), Module(..), ModuleName(..), Prop(..), ProperName(..), Qualified(..), ReExport, binderAnn, exprAnn, findProp, propKey, propValue, qualifiedModuleName, unQualified)
 import PureScript.Backend.Optimizer.Directives (DirectiveHeaderResult, parseDirectiveHeader)
 import PureScript.Backend.Optimizer.CoreFn.Usage (invalidateSourceUsageModule)
 import PureScript.Backend.Optimizer.Semantics (BackendExpr(..), BackendSemantics, Ctx(..), DataTypeMeta, Env(..), EvalRef(..), ExternImpl(..), ExternSpine(..), InlineAccessor(..), InlineDirective(..), InlineDirectiveMap, NeutralExpr(..), build, evalExternFromImpl, evalExternRefFromImpl, freeze, optimize, unwrapSemTyped)
@@ -343,6 +343,12 @@ toTopLevelBackendBinding group env (Binding (Ann bindingAnn) ident cfn) = do
   , value: Tuple ident (Tuple (unwrap (fst impl)).deps expr')
   }
 
+-- | Largest method body (in analysis units) that a dictionary may force
+-- | inline. Members above the budget stay runtime calls, which keeps linear
+-- | the code generated for instances of recursive types.
+maxInlineDictionaryMemberSize :: Int
+maxInlineDictionaryMemberSize = 64
+
 inferTransitiveDirective :: InlineDirectiveMap -> Int -> ExternImpl -> BackendExpr -> Expr Ann -> Maybe (Map InlineAccessor InlineDirective)
 inferTransitiveDirective directives dictSize impl backendExpr cfn = fromImpl <|> fromBackendExpr
   where
@@ -387,10 +393,35 @@ inferTransitiveDirective directives dictSize impl backendExpr cfn = fromImpl <|>
       | meta == IsTypeClassConstructor || meta == IsNewtype
       , dictSize <= 512 ->
           Just $ Map.singleton InlineRef InlineAlways
-    cfn' | Tuple isDict props <- isTypeClassDictionaryWithProps cfn', isDict
-         , dictSize <= 512000 ->
-      Just $ Map.fromFoldable $
-        [ Tuple InlineRef InlineAlways ] <> (props >>= \p -> [ Tuple (InlineProp p) InlineAlways, Tuple (InlineSpineProp p) InlineAlways ])
+    cfn' | Tuple isDict props <- isTypeClassDictionaryWithProps cfn', isDict ->
+      -- A dictionary is free to inline while it stays small (class instances
+      -- of primitive and record types resolve through `eqRec`/`eqRowCons`
+      -- chains). Forcing a derived method of a recursive type inline unrolls
+      -- the recursive instance at every use: `Eq (BehaviourF Term)` expands
+      -- `Eq Term`, `Eq QueryTerm` and `Eq RepeatSpec` inside itself, and each
+      -- expansion repeats the constructor paths of every nested field. Bound
+      -- each member by its own size so large instances remain runtime calls.
+      let
+        refDirectives =
+          if dictSize <= 512 then [ Tuple InlineRef InlineAlways ] else []
+        memberDirectives = case impl of
+          ExternDict _ members -> members >>= \(Prop prop (Tuple analysis _)) ->
+            if (unwrap analysis).size <= maxInlineDictionaryMemberSize then
+              [ Tuple (InlineProp prop) InlineAlways
+              , Tuple (InlineSpineProp prop) InlineAlways
+              ]
+            else []
+          -- A dictionary whose optimized form is not a record literal has no
+          -- member analyses to budget. Only force its declared members inline
+          -- while the whole dictionary is small.
+          _ | dictSize <= 512 ->
+                props >>= \p -> [ Tuple (InlineProp p) InlineAlways, Tuple (InlineSpineProp p) InlineAlways ]
+            | otherwise ->
+                []
+      in
+        case refDirectives <> memberDirectives of
+          [] -> Nothing
+          dirs -> Just $ Map.fromFoldable dirs
     _ -> case backendExpr of
       ExprSyntax _ (App (ExprSyntax _ (Var qual)) args) ->
         case Map.lookup (EvalExtern qual) directives >>= Map.lookup InlineRef of
