@@ -46,9 +46,9 @@ import PureScript.Backend.Optimizer.Analysis (BackendAnalysis)
 import PureScript.Backend.Optimizer.BoundedMemo (createBoundedMemo, createStringMemo)
 import PureScript.Backend.Optimizer.Cache (beginPurmetaBuild, nowMillis, trimPurmetaCache, writePurmetaSync)
 import PureScript.Backend.Optimizer.Convert (BackendImplementations, BackendModule, ExternLookup(..), OptimizationSteps, PurmetaLookup, lookupPurmetaImplementation, toBackendModuleWithLookup)
-import PureScript.Backend.Optimizer.CoreFn (Ann, Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Expr(..), Guard(..), Ident(..), Literal(..), Module(..), ModuleName(..), Prop(..), Qualified(..))
+import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Expr(..), Guard(..), Ident(..), Literal(..), Module(..), ModuleName(..), Prop(..), Qualified(..))
 import PureScript.Backend.Optimizer.CoreFn as CoreFn
-import PureScript.Backend.Optimizer.Semantics (BackendExpr, Ctx, ExternImpl, InlineDirectiveMap, instantiateNeutralType)
+import PureScript.Backend.Optimizer.Semantics (BackendExpr, Ctx, EvalRef(..), ExternImpl, InlineAccessor(..), InlineDirective(..), InlineDirectiveMap, instantiateNeutralType)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
 import PureScript.Backend.Optimizer.Syntax (BackendSyntax)
 
@@ -110,15 +110,16 @@ type ParallelStats =
 
 -- | Builds modules given a _sorted_ list of modules.
 -- | See `PureScript.Backend.Optimizer.CoreFn.Sort.sortModules`.
+
 buildModules :: forall m. MonadEffect m => BuildOptions m -> List (Module Ann) -> m Unit
 buildModules options coreFnModules = do
   liftEffect beginPurmetaBuild
-  void $ go { directives: options.directives, implementations: Map.empty, moduleIndex: 0, exports: Map.empty } coreFnModules
+  void $ go { directives: options.directives, implementations: Map.empty, moduleIndex: 0, exports: Map.empty, privateGlobals: Set.empty } coreFnModules
   where
   moduleCount = List.length coreFnModules
 
   go acc Nil = pure acc
-  go ( { directives, implementations, moduleIndex, exports } ) (Cons coreFnModule remainingModules) = do
+  go ( { directives, implementations, moduleIndex, exports, privateGlobals } ) (Cons coreFnModule remainingModules) = do
     let buildEnv = { implementations, moduleCount, moduleIndex }
     coreFnModule'@(Module { name, exports: modExportsArray }) <- options.onPrepareModule buildEnv coreFnModule
     mbCachedMod <- options.onSkipModule buildEnv coreFnModule'
@@ -139,6 +140,7 @@ buildModules options coreFnModules = do
           , implementations: Map.empty
           , moduleIndex: moduleIndex + 1
           , exports: newExports
+          , privateGlobals: Set.union privateGlobals (untypedPrivateGlobals coreFnModule')
           }
           remainingModules
       Nothing -> do
@@ -147,6 +149,7 @@ buildModules options coreFnModules = do
         instantiate <- liftEffect $ createBoundedMemo 512 (mkFn2 instantiateNeutralType)
         lookupRaw <- liftEffect $ createStringMemo 512 (mkFn2 lookupPurmetaImplementation)
         let lookupPurmeta = lookupRaw
+        let forcedDirectives = forcePrivateInlines (Set.union privateGlobals (untypedPrivateGlobals coreFnModule')) directives
         let
           Tuple optimizationSteps backendMod = toBackendModuleWithLookup lookupPurmeta coreFnModule'
             { analyzeCustom: options.analyzeCustom
@@ -156,7 +159,7 @@ buildModules options coreFnModules = do
             , toLevel: Map.empty
             , implementations
             , moduleImplementations: Map.empty
-            , directives
+            , directives: forcedDirectives
             , dataTypes: Map.empty
             , foreignSemantics: options.foreignSemantics
             , rewriteLimit: options.rewriteLimit
@@ -178,8 +181,51 @@ buildModules options coreFnModules = do
           , implementations: Map.empty
           , moduleIndex: moduleIndex + 1
           , exports: newExports
+          , privateGlobals: Set.union privateGlobals (untypedPrivateGlobals coreFnModule')
           }
           remainingModules
+
+
+-- | Private globals whose TAST carries no type annotation. Code generation
+-- | cannot type a cross-module reference to one of these, so `boxUnbox` would
+-- | materialize a class dictionary around an already typed value. Force their
+-- | inlining everywhere, including inside their defining module.
+untypedPrivateGlobals :: Module Ann -> Set (Qualified Ident)
+untypedPrivateGlobals (Module m) =
+  let
+    exported = Set.fromFoldable m.exports
+    decls = Array.concatMap flatten m.decls
+    flatten = case _ of
+      NonRec binding -> [ binding ]
+      Rec bindings -> bindings
+    privateUntyped = Set.fromFoldable (map bindingIdent (Array.filter untyped decls))
+  in Set.map (Qualified (Just m.name)) (Set.difference privateUntyped exported)
+  where
+  bindingIdent (Binding _ ident _) = ident
+  untyped (Binding (Ann ann) _ expr) = ann.type == Nothing && exprUntyped expr
+
+exprUntyped :: Expr Ann -> Boolean
+exprUntyped = case _ of
+  ExprVar (Ann ann) _ -> ann.type == Nothing
+  ExprLit (Ann ann) _ -> ann.type == Nothing
+  ExprAbs (Ann ann) _ _ -> ann.type == Nothing
+  ExprApp (Ann ann) _ _ -> ann.type == Nothing
+  ExprTypeApp (Ann ann) _ _ -> ann.type == Nothing
+  ExprLet (Ann ann) _ _ -> ann.type == Nothing
+  ExprCase (Ann ann) _ _ -> ann.type == Nothing
+  ExprConstructor (Ann ann) _ _ _ -> ann.type == Nothing
+  ExprAccessor (Ann ann) _ _ -> ann.type == Nothing
+  ExprUpdate (Ann ann) _ _ -> ann.type == Nothing
+
+-- | Force inlining for references to globals that are not exported by their
+-- | defining module, without overriding an explicit published directive.
+forcePrivateInlines :: Set (Qualified Ident) -> InlineDirectiveMap -> InlineDirectiveMap
+forcePrivateInlines privateGlobals directives =
+  Array.foldl addDirective directives (Set.toUnfoldable privateGlobals :: Array (Qualified Ident))
+  where
+  addDirective acc qual = case Map.member (EvalExtern qual) acc of
+    true -> acc
+    false -> Map.insert (EvalExtern qual) (Map.singleton InlineRef InlineAlways) acc
 
 -- | Parallel builder. Modules are converted by `runJobs`; the coordinator
 -- | remains the only writer of purmeta, directives and codegen.
