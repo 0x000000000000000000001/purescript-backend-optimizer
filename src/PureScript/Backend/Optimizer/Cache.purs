@@ -2,6 +2,7 @@ module PureScript.Backend.Optimizer.Cache
   ( writePurmetaSync
   , readPurmetaSync
   , writeAllocProfile
+  , nowMillis
   , beginPurmetaBuild
   , clearPurmetaCache
   , trimPurmetaCache
@@ -49,3 +50,6 @@ foreign import writeAllocProfileImpl :: String -> Effect Unit
 
 writeAllocProfile :: String -> Effect Unit
 writeAllocProfile = writeAllocProfileImpl
+
+-- | Horloge monotone en millisecondes, pour l'instrumentation des campagnes.
+foreign import nowMillis :: Effect Number

@@ -16,7 +16,7 @@ module PureScript.Backend.Optimizer.Builder
   ( BuildEnv
   , BuildOptions
   , ParallelJob
-  , JobRunner
+  , JobScheduler
   , ParallelStats
   , buildModules
   , buildModulesParallel
@@ -44,7 +44,7 @@ import Effect.Ref as Ref
 import Effect.Unsafe (unsafePerformEffect)
 import PureScript.Backend.Optimizer.Analysis (BackendAnalysis)
 import PureScript.Backend.Optimizer.BoundedMemo (createBoundedMemo, createStringMemo)
-import PureScript.Backend.Optimizer.Cache (beginPurmetaBuild, trimPurmetaCache, writePurmetaSync)
+import PureScript.Backend.Optimizer.Cache (beginPurmetaBuild, nowMillis, trimPurmetaCache, writePurmetaSync)
 import PureScript.Backend.Optimizer.Convert (BackendImplementations, BackendModule, ExternLookup(..), OptimizationSteps, PurmetaLookup, lookupPurmetaImplementation, toBackendModuleWithLookup)
 import PureScript.Backend.Optimizer.CoreFn (Ann, Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Expr(..), Guard(..), Ident(..), Literal(..), Module(..), ModuleName(..), Prop(..), Qualified(..))
 import PureScript.Backend.Optimizer.CoreFn as CoreFn
@@ -82,20 +82,30 @@ type ParallelJob =
   -- | Le coordinateur ne publie pas un tel résultat : il rejoue la conversion
   -- | après la finalisation de ces prédécesseurs.
   , pendingDeps :: Set Int
+  -- | Durée murale de la tentative, en millisecondes.
+  , attemptMillis :: Number
   }
 
-type JobRunner m = Array (Unit -> m ParallelJob) -> m (Array ParallelJob)
+-- | Ordonnanceur de tâches concurrentes fourni par le backend : `fork`
+-- | soumet une conversion, `await` rend le prochain résultat disponible.
+type JobScheduler m =
+  { fork :: (Unit -> m ParallelJob) -> m Unit
+  , await :: m ParallelJob
+  }
 
 -- | Compteurs d'ordonnancement pour les campagnes de mesure.
 type ParallelStats =
-  { batches :: Int
-  , dispatched :: Int
+  { dispatched :: Int
   , maxReady :: Int
-  , fallbackPasses :: Int
   , fallbackDispatched :: Int
   , deferredAttempts :: Int
   , wakeups :: Int
   , waitingPeak :: Int
+  , attemptMillis :: Number
+  , attemptMaxMillis :: Number
+  , coordinatorMillis :: Number
+  , awaitMillis :: Number
+  , emitMillis :: Number
   }
 
 -- | Builds modules given a _sorted_ list of modules.
@@ -183,7 +193,7 @@ buildModulesParallel
   :: forall m
    . MonadEffect m
   => { jobs :: Int
-     , runJobs :: JobRunner m
+     , scheduler :: JobScheduler m
      , onStats :: Maybe (ParallelStats -> m Unit)
      }
   -> BuildOptions m
@@ -259,15 +269,19 @@ buildModulesParallel runner options coreFnModules = do
     , waiting: Map.empty
     , nextCodegen: 0
     , waitingCodegen: Map.empty
+    , inFlight: Set.empty
     , stats:
-        { batches: 0
-        , dispatched: 0
+        { dispatched: 0
         , maxReady: 0
-        , fallbackPasses: 0
         , fallbackDispatched: 0
         , deferredAttempts: 0
         , wakeups: 0
         , waitingPeak: 0
+        , attemptMillis: 0.0
+        , attemptMaxMillis: 0.0
+        , coordinatorMillis: 0.0
+        , awaitMillis: 0.0
+        , emitMillis: 0.0
         }
     }
     where
@@ -292,61 +306,85 @@ buildModulesParallel runner options coreFnModules = do
   flushCodegen st = case Map.lookup st.nextCodegen st.waitingCodegen of
     Nothing -> pure st
     Just job -> do
+      started <- liftEffect nowMillis
       when (not job.cached) $
         options.onCodegenModule
           { implementations: job.backendMod.implementations, moduleCount, moduleIndex: job.index }
           job.coreFnModule
           job.backendMod
           job.steps
+      ended <- liftEffect nowMillis
       flushCodegen st
         { waitingCodegen = Map.delete job.index st.waitingCodegen
         , nextCodegen = st.nextCodegen + 1
+        , stats = st.stats { emitMillis = st.stats.emitMillis + (ended - started) }
         }
 
-  go st =
-    let
-      batch = Array.take runner.jobs (Set.toUnfoldable st.ready :: Array Int)
-      enqueue i = map (\coreFnModule -> mkJob st i coreFnModule) (Map.lookup i st.pending)
-    in
-      if Array.null batch then do
-        -- Aucun module prêt : convertir les indices restants dans l'ordre du
-        -- tri, comme le builder séquentiel, mais sans réessayer les modules
-        -- déjà en attente d'un prédécesseur : une nouvelle tentative ne
-        -- pourrait que redécouvrir la même dépendance. L'indice restant le
-        -- plus petit n'attend jamais de prédécesseur en cours, donc chaque
-        -- passe progresse.
-        let
-          pendingIndices = Set.toUnfoldable (Map.keys st.pending) :: Array Int
-          readyToTry = Array.filter (\i -> not (Map.member i st.waiting)) pendingIndices
-          remaining =
-            if Array.null readyToTry then Array.take 1 pendingIndices
-            else Array.take runner.jobs readyToTry
-        if Array.null remaining then
-          case runner.onStats of
-            Just report -> report (st.stats { maxReady = max (Set.size st.ready) st.stats.maxReady })
-            Nothing -> pure unit
-        else do
+  -- | Prochain module à convertir : un module prêt (le plus petit indice),
+  -- | sinon un module en attente qui n'attend pas de prédécesseur, sinon le
+  -- | plus petit indice restant. Les modules déjà en vol sont exclus.
+  pickModule st
+    | Set.size st.inFlight >= runner.jobs = Nothing
+    | otherwise = case firstFree st.ready of
+        Just i -> Just (Tuple i false)
+        Nothing ->
           let
-            stats' = st.stats
-              { fallbackPasses = st.stats.fallbackPasses + 1
-              , fallbackDispatched = st.stats.fallbackDispatched + Array.length remaining
-              }
-          results <- runner.runJobs (Array.mapMaybe enqueue remaining)
-          st' <- foldM step (st { stats = stats' }) (Array.sortWith _.index results)
-          go st'
-      else do
+            pendingIndices = Set.toUnfoldable (Map.keys st.pending) :: Array Int
+            readyToTry = Array.filter
+              (\i -> not (Map.member i st.waiting) && not (Set.member i st.inFlight))
+              pendingIndices
+          in
+            case Array.head readyToTry of
+              Just i -> Just (Tuple i true)
+              Nothing ->
+                -- Aucun module disponible : si des tentatives sont en vol, les
+                -- attendre (leurs résultats feront progresser l'état) plutôt
+                -- que de reforker un module déjà en attente de prédécesseur.
+                -- Le repli ultime ne sert qu'au blocage complet.
+                if Set.isEmpty st.inFlight then
+                  (\i -> Tuple i true) <$> firstFree (Map.keys st.pending)
+                else Nothing
+    where
+    firstFree indices =
+      Array.find (\i -> not (Set.member i st.inFlight)) (Set.toUnfoldable indices :: Array Int)
+
+  go st = case pickModule st of
+    Just (Tuple i isFallback) -> case Map.lookup i st.pending of
+      Nothing -> go st
+      Just coreFnModule -> do
+        runner.scheduler.fork (mkJob st i coreFnModule)
         let
-          readyAfter = foldl (flip Set.delete) st.ready batch
           stats' = st.stats
-            { batches = st.stats.batches + 1
-            , dispatched = st.stats.dispatched + Array.length batch
+            { dispatched = st.stats.dispatched + if isFallback then 0 else 1
+            , fallbackDispatched = st.stats.fallbackDispatched + if isFallback then 1 else 0
             , maxReady = max (Set.size st.ready) st.stats.maxReady
             }
-        results <- runner.runJobs (Array.mapMaybe enqueue batch)
-        st' <- foldM step (st { ready = readyAfter, stats = stats' }) (Array.sortWith _.index results)
-        go st'
+        go (st { inFlight = Set.insert i st.inFlight, stats = stats' })
+    Nothing ->
+      if Set.isEmpty st.inFlight then
+        case runner.onStats of
+          Just report -> report (st.stats { maxReady = max (Set.size st.ready) st.stats.maxReady })
+          Nothing -> pure unit
+      else do
+        awaitStarted <- liftEffect nowMillis
+        result <- runner.scheduler.await
+        awaitEnded <- liftEffect nowMillis
+        coordStarted <- liftEffect nowMillis
+        st' <- step st result
+        coordEnded <- liftEffect nowMillis
+        go
+          ( st'
+              { inFlight = Set.delete result.index st'.inFlight
+              , stats = st'.stats
+                  { awaitMillis = st'.stats.awaitMillis + (awaitEnded - awaitStarted)
+                  , coordinatorMillis = st'.stats.coordinatorMillis + (coordEnded - coordStarted)
+                  , maxReady = max (Set.size st.ready) st'.stats.maxReady
+                  }
+              }
+          )
 
   mkJob st i coreFnModule _ = do
+    attemptStarted <- liftEffect nowMillis
     pendingRef <- liftEffect (Ref.new Set.empty)
     lookupRaw <- createRankLookup
       { indexByName
@@ -366,6 +404,7 @@ buildModulesParallel runner options coreFnModules = do
         , steps: []
         , cached: true
         , pendingDeps: Set.empty
+        , attemptMillis: 0.0
         }
       Nothing -> do
         instantiate <- liftEffect $ createBoundedMemo 512 (mkFn2 instantiateNeutralType)
@@ -387,6 +426,7 @@ buildModulesParallel runner options coreFnModules = do
             , optimizationSteps: []
             }
         pending <- liftEffect (Ref.read pendingRef)
+        attemptEnded <- liftEffect nowMillis
         pure
           { index: i
           , coreFnModule: prepared
@@ -394,6 +434,7 @@ buildModulesParallel runner options coreFnModules = do
           , steps
           , cached: false
           , pendingDeps: pending
+          , attemptMillis: attemptEnded - attemptStarted
           }
 
   step st result = do
@@ -407,6 +448,8 @@ buildModulesParallel runner options coreFnModules = do
         stats' = st.stats
           { deferredAttempts = st.stats.deferredAttempts + 1
           , waitingPeak = max st.stats.waitingPeak (Map.size st.waiting + 1)
+          , attemptMillis = st.stats.attemptMillis + result.attemptMillis
+          , attemptMaxMillis = max st.stats.attemptMaxMillis result.attemptMillis
           }
       if Set.isEmpty fresh then
         pure (st { ready = Set.insert result.index st.ready, waiting = Map.delete result.index st.waiting, stats = stats' })
@@ -431,7 +474,12 @@ buildModulesParallel runner options coreFnModules = do
         , waiting: woken.waiting
         , nextCodegen: st.nextCodegen
         , waitingCodegen: Map.insert result.index result st.waitingCodegen
-        , stats: st.stats { wakeups = st.stats.wakeups + Set.size woken.ready }
+        , inFlight: st.inFlight
+        , stats: st.stats
+            { wakeups = st.stats.wakeups + Set.size woken.ready
+            , attemptMillis = st.stats.attemptMillis + result.attemptMillis
+            , attemptMaxMillis = max st.stats.attemptMaxMillis result.attemptMillis
+            }
         }
 
 -- | Directives effectives d'une tentative : la configuration, plus toutes

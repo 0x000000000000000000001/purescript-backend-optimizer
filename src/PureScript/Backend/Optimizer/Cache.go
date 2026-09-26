@@ -6,9 +6,17 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"sync"
+	"time"
 
 	"gopurs/output/gopurs_runtime"
 )
+
+var processEpoch = time.Now()
+
+// NowMillis reports monotonic elapsed milliseconds for instrumentation.
+func NowMillis() float64 {
+	return float64(time.Since(processEpoch).Nanoseconds()) / 1e6
+}
 
 // Native bootstrap keeps immutable implementations in memory for one build.
 // V8's .purmeta encoding is not portable to Go. There is no disk fallback, so

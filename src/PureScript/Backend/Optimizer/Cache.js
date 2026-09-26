@@ -1,4 +1,5 @@
 import v8 from 'v8';
+import { performance } from 'node:perf_hooks';
 import fs from 'fs';
 import path from 'path';
 
@@ -218,6 +219,8 @@ function maybeCollectGarbage() {
 
 // Cumulative allocation profile. The Native bootstrap implements this with
 // runtime/pprof; the JavaScript backend has no equivalent sampling hook.
+export const nowMillis = () => performance.now();
+
 export const writeAllocProfileImpl = function(path) {
   return function() {
     console.log('[Cache] allocation profile requested (unsupported in JS): ' + path);

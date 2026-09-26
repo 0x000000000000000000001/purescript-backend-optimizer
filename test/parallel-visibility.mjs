@@ -54,20 +54,30 @@ const runReference = modules => {
   return collect;
 };
 
-// Termine les tâches du lot dans l'ordre inverse, tout en renvoyant les
-// résultats dans l'ordre d'entrée, comme un coordinateur réel. Avec
-// `m = Effect`, une tâche est une fonction qui rend le calcul à exécuter.
-const executeJob = job => job(undefined)();
-const reversedJobs = jobs => () => {
-  const results = new Array(jobs.length);
-  for (let index = jobs.length - 1; index >= 0; index--) results[index] = executeJob(jobs[index]);
-  return results;
+// Avec `m = Effect`, une tâche est une fonction qui exécute la conversion et
+// rend son résultat. Deux ordonnanceurs de test : l'un exécute la tâche à la
+// soumission (achèvements dans l'ordre), l'autre la garde en file et l'exécute
+// au moment de l'attente, en commençant par la plus récente (achèvements dans
+// le désordre).
+const makeScheduler = order => {
+  const queue = [];
+  const results = [];
+  return {
+    fork: job => () => {
+      if (order === "eager") results.push(job(undefined)());
+      else queue.push(job);
+    },
+    await: () => {
+      if (order === "eager") return results.shift();
+      const job = order === "lifo" ? queue.pop() : queue.shift();
+      return job(undefined)();
+    },
+  };
 };
-const inOrderJobs = jobs => () => jobs.map(executeJob);
 
-const runParallel = (modules, runJobs, jobs = 4) => {
+const runParallel = (modules, order, jobs = 4) => {
   const collect = [];
-  B.buildModulesParallel(EffectClass.monadEffectEffect)({ jobs, runJobs, onStats: Maybe.Nothing.value })(options(collect))(List.fromFoldable(Foldable.foldableArray)(modules))();
+  B.buildModulesParallel(EffectClass.monadEffectEffect)({ jobs, scheduler: makeScheduler(order), onStats: Maybe.Nothing.value })(options(collect))(List.fromFoldable(Foldable.foldableArray)(modules))();
   return collect;
 };
 
@@ -132,8 +142,8 @@ test("parallel conversion matches the sequential reference with completed work o
     moduleOf("User", [["use", variable("Base", "value")]]),
   ];
   const reference = runReference(modules);
-  for (const runJobs of [inOrderJobs, reversedJobs]) {
-    const parallel = runParallel(modules, runJobs);
+  for (const order of ["eager", "lifo"]) {
+    const parallel = runParallel(modules, order);
     assert.deepEqual(parallel, reference);
   }
   assert.ok(!(bindingOf(reference, "Ahead", "use") instanceof Syntax.Lit),
@@ -150,7 +160,7 @@ test("parallel directive contributions match sequential accumulation", t => {
     moduleOf("C", [["use", variable("A", "f")]]),
   ];
   const reference = runReference(modules);
-  const parallel = runParallel(modules, inOrderJobs, 2);
+  const parallel = runParallel(modules, "eager", 2);
   assert.deepEqual(parallel, reference);
   for (const [module, ident] of [["B", "use"], ["C", "use"]]) {
     assert.ok(!(bindingOf(reference, module, ident) instanceof Syntax.Lit), `${module}.${ident} must keep the call`);
