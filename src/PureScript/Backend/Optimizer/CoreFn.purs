@@ -77,7 +77,20 @@ derive newtype instance ordProperName :: Ord ProperName
 data Qualified a = Qualified (Maybe ModuleName) a
 
 derive instance eqQualified :: Eq a => Eq (Qualified a)
-derive instance ordQualified :: Ord a => Ord (Qualified a)
+
+-- | Comparaison manuelle, sans `ordMaybe` : les clés `Qualified` dominent les
+-- | `Map` de PBO et la comparaison dérivée reboxe un `Maybe` à chaque appel.
+-- | L'ordre est identique à celui de l'instance dérivée (module puis valeur).
+instance ordQualified :: Ord a => Ord (Qualified a) where
+  compare (Qualified m1 i1) (Qualified m2 i2) = case compareModule m1 m2 of
+    EQ -> compare i1 i2
+    other -> other
+    where
+    compareModule Nothing Nothing = EQ
+    compareModule Nothing (Just _) = LT
+    compareModule (Just _) Nothing = GT
+    compareModule (Just a) (Just b) = compare a b
+
 derive instance Functor Qualified
 
 unQualified :: forall a. Qualified a -> a

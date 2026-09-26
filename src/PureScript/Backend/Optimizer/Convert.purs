@@ -47,7 +47,9 @@ module PureScript.Backend.Optimizer.Convert
   ( BackendBindingGroup
   , BackendImplementations
   , BackendModule
+  , ExternLookup(..)
   , OptimizationSteps
+  , PurmetaLookup
   , alignClassMemberAnnotations
   , toBackendModule
   , toBackendModuleWithLookup
@@ -131,7 +133,18 @@ type ConvertEnvFields =
   , traceIdents :: Set (Qualified Ident)
   )
 
-type PurmetaLookup = String -> String -> Maybe (Tuple BackendAnalysis ExternImpl)
+-- | Issue d'une consultation d'implémentation externe.
+-- |
+-- | `ExternPending` est produit par une vue de build lorsqu'un prédécesseur
+-- | n'est pas encore finalisé : la tentative sera rejouée plus tard. La
+-- | conversion traite cette issue comme une absence ; c'est le coordinateur
+-- | qui décide de publier le résultat ou de réessayer.
+data ExternLookup
+  = ExternFound (Tuple BackendAnalysis ExternImpl)
+  | ExternMissing
+  | ExternPending
+
+type PurmetaLookup = String -> String -> ExternLookup
 
 type ConvertEnv =
   { lookupPurmeta :: PurmetaLookup
@@ -538,14 +551,22 @@ lookupImplementation conv qual@(Qualified mbMn ident) =
   case Map.lookup qual conv.implementations of
     Just impl -> Just impl
     Nothing -> case mbMn of
-      Just mn -> conv.lookupPurmeta (unwrap mn) (unwrap ident)
+      Just mn -> case conv.lookupPurmeta (unwrap mn) (unwrap ident) of
+        ExternFound impl -> Just impl
+        ExternMissing -> Nothing
+        -- La dépendance est enregistrée par la vue ; la tentative se poursuit
+        -- comme une absence et sera rejouée par le coordinateur.
+        ExternPending -> Nothing
       Nothing -> Nothing
 
 lookupPurmetaImplementation :: PurmetaLookup
 lookupPurmetaImplementation moduleName ident =
   case unsafePerformEffect (readPurmetaSync (ModuleName moduleName)) of
-    Just impls -> Map.lookup (Qualified (Just (ModuleName moduleName)) (Ident ident)) impls
-    Nothing -> Nothing
+    Just impls ->
+      case Map.lookup (Qualified (Just (ModuleName moduleName)) (Ident ident)) impls of
+        Just impl -> ExternFound impl
+        Nothing -> ExternMissing
+    Nothing -> ExternMissing
 
 makeExternEvalRef :: Array (Qualified Ident) -> ConvertEnv -> Env -> Qualified Ident -> Maybe BackendSemantics
 makeExternEvalRef group conv env qual =

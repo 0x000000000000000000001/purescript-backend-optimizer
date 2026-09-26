@@ -1,6 +1,7 @@
 module PureScript.Backend.Optimizer.Cache
   ( writePurmetaSync
   , readPurmetaSync
+  , writeAllocProfile
   , beginPurmetaBuild
   , clearPurmetaCache
   , trimPurmetaCache
@@ -41,3 +42,10 @@ foreign import logMemoryImpl :: String -> Effect Unit
 
 logMemory :: String -> Effect Unit
 logMemory = logMemoryImpl
+
+-- | Profil d'allocations cumulées (pprof) pour les campagnes de mesure.
+-- | Sans effet sur les backends qui ne l'implémentent pas.
+foreign import writeAllocProfileImpl :: String -> Effect Unit
+
+writeAllocProfile :: String -> Effect Unit
+writeAllocProfile = writeAllocProfileImpl

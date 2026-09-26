@@ -232,7 +232,21 @@ data EvalRef
   | EvalLocal (Maybe Ident) Level
 
 derive instance Eq EvalRef
-derive instance Ord EvalRef
+
+-- | Même raison que pour `Qualified` : évite la comparaison générique de
+-- | `Maybe` dans une clé de `Map` très sollicitée.
+instance Ord EvalRef where
+  compare (EvalExtern q1) (EvalExtern q2) = compare q1 q2
+  compare (EvalExtern _) (EvalLocal _ _) = LT
+  compare (EvalLocal _ _) (EvalExtern _) = GT
+  compare (EvalLocal m1 l1) (EvalLocal m2 l2) = case compareModule m1 m2 of
+    EQ -> compare l1 l2
+    other -> other
+    where
+    compareModule Nothing Nothing = EQ
+    compareModule Nothing (Just _) = LT
+    compareModule (Just _) Nothing = GT
+    compareModule (Just a) (Just b) = compare a b
 
 -- | Cible spécifique d'une directive d'inlining (référence brute ou propriété d'un record).
 data InlineAccessor

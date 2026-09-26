@@ -2,7 +2,9 @@ package PureScript_Backend_Optimizer_Cache
 
 import (
 	"fmt"
+	"os"
 	"runtime"
+	"runtime/pprof"
 	"sync"
 
 	"gopurs/output/gopurs_runtime"
@@ -38,6 +40,24 @@ func ReadPurmetaSyncImpl(moduleName string, just gopurs_runtime.Value, nothing g
 		return nothing
 	}
 	return gopurs_runtime.Apply(just, data)
+}
+
+// WriteAllocProfileImpl writes the cumulative allocation profile (pprof
+// "allocs") to the given path. Used by allocation campaigns; errors are
+// reported on stderr and never fail the build.
+func WriteAllocProfileImpl(path string, _ gopurs_runtime.Value) gopurs_runtime.Value {
+	f, err := os.Create(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[Cache] cannot create allocation profile %s: %v\n", path, err)
+		return gopurs_runtime.Value{}
+	}
+	if err := pprof.Lookup("allocs").WriteTo(f, 0); err != nil {
+		fmt.Fprintf(os.Stderr, "[Cache] cannot write allocation profile %s: %v\n", path, err)
+	}
+	if err := f.Close(); err != nil {
+		fmt.Fprintf(os.Stderr, "[Cache] cannot close allocation profile %s: %v\n", path, err)
+	}
+	return gopurs_runtime.Value{}
 }
 
 func ClearPurmetaCacheImpl(_ gopurs_runtime.Value) gopurs_runtime.Value {
