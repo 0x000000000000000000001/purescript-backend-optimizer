@@ -4,6 +4,8 @@
 module PureScript.Backend.Optimizer.FfiSupport
   ( findFfiFile
   , hashString
+  , compareStringImpl
+  , compareIntImpl
   ) where
 
 import Prelude
@@ -14,6 +16,14 @@ import Data.Nullable (Nullable, toNullable, toMaybe)
 
 foreign import findFfiFileImpl :: String -> Array String -> Nullable String -> String -> Nullable String -> Effect (Nullable String)
 foreign import hashString :: String -> String
+
+-- | Comparaison native de chaînes : rend l'un des trois ordres fournis.
+-- | Les dictionnaires `Ord String`/`Ord Int` boxent leurs arguments à chaque
+-- | appel ; cette FFI est appelée nativement (motif `OrdStringImpl`).
+foreign import compareStringImpl :: forall a. a -> a -> a -> String -> String -> a
+
+-- | Idem pour les entiers (niveau des variables locales `EvalLocal`).
+foreign import compareIntImpl :: forall a. a -> a -> a -> Int -> Int -> a
 
 -- | Finds the FFI file corresponding to a PureScript module
 -- | extension: e.g. ".go" or ".php"

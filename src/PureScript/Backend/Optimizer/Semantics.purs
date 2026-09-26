@@ -73,7 +73,8 @@ import Data.String as String
 import Data.Tuple (Tuple(..), fst, snd)
 import Partial.Unsafe (unsafeCrashWith)
 import PureScript.Backend.Optimizer.Analysis (class HasAnalysis, BackendAnalysis(..), Capture(..), Complexity(..), ResultTerm(..), Usage(..), analysisOf, bound, bump, complex, updated, withRewrite)
-import PureScript.Backend.Optimizer.CoreFn (ConstructorType, ExprType(..), Ident(..), Literal(..), ModuleName(..), Prop(..), ProperName, Qualified(..), findProp, propKey, propValue)
+import PureScript.Backend.Optimizer.CoreFn (ConstructorType, ExprType(..), Ident(..), Literal(..), ModuleName(..), Prop(..), ProperName, Qualified(..), compareIdents, compareQualifiedIdent, eqIdents, eqQualifiedIdent, findProp, propKey, propValue)
+import PureScript.Backend.Optimizer.FfiSupport (compareIntImpl)
 import PureScript.Backend.Optimizer.Syntax (class HasSyntax, BackendAccessor(..), BackendEffect, BackendOperator(..), BackendOperator1(..), BackendOperator2(..), BackendOperatorNum(..), BackendOperatorOrd(..), BackendSyntax(Var, Local, Lit, App, Abs, UncurriedApp, UncurriedAbs, UncurriedEffectApp, UncurriedEffectAbs, Accessor, Update, CtorSaturated, CtorDef, LetRec, Let, EffectBind, EffectPure, EffectDefer, Branch, PrimOp, PrimEffect, PrimUndefined, Fail, Typed), Level(..), Pair(..), syntaxOf)
 import PureScript.Backend.Optimizer.Syntax as Syn
 import PureScript.Backend.Optimizer.TypeSubstitution as TypeSubstitution
@@ -231,22 +232,42 @@ data EvalRef
   = EvalExtern (Qualified Ident)
   | EvalLocal (Maybe Ident) Level
 
-derive instance Eq EvalRef
+-- | Instances manuelles : les instances dérivées/polymorphes sont compilées
+-- | déspecialisées en `Value` par le backend Go, qui boxe les `Maybe`/
+-- | `Qualified` et reconstruit un dictionnaire à chaque comparaison. Les clés
+-- | `EvalRef` dominent les `Map` de directives.
+instance Eq EvalRef where
+  eq (EvalExtern q1) (EvalExtern q2) = eqQualifiedIdent q1 q2
+  eq (EvalLocal m1 l1) (EvalLocal m2 l2) = eqMaybeIdents m1 m2 && eqLevels l1 l2
+  eq _ _ = false
 
 -- | Même raison que pour `Qualified` : évite la comparaison générique de
 -- | `Maybe` dans une clé de `Map` très sollicitée.
 instance Ord EvalRef where
-  compare (EvalExtern q1) (EvalExtern q2) = compare q1 q2
+  compare (EvalExtern q1) (EvalExtern q2) = compareQualifiedIdent q1 q2
   compare (EvalExtern _) (EvalLocal _ _) = LT
   compare (EvalLocal _ _) (EvalExtern _) = GT
-  compare (EvalLocal m1 l1) (EvalLocal m2 l2) = case compareModule m1 m2 of
-    EQ -> compare l1 l2
+  compare (EvalLocal m1 l1) (EvalLocal m2 l2) = case compareMaybeIdents m1 m2 of
+    EQ -> compareLevels l1 l2
     other -> other
-    where
-    compareModule Nothing Nothing = EQ
-    compareModule Nothing (Just _) = LT
-    compareModule (Just _) Nothing = GT
-    compareModule (Just a) (Just b) = compare a b
+
+compareMaybeIdents :: Maybe Ident -> Maybe Ident -> Ordering
+compareMaybeIdents Nothing Nothing = EQ
+compareMaybeIdents Nothing (Just _) = LT
+compareMaybeIdents (Just _) Nothing = GT
+compareMaybeIdents (Just a) (Just b) = compareIdents a b
+
+eqMaybeIdents :: Maybe Ident -> Maybe Ident -> Boolean
+eqMaybeIdents Nothing Nothing = true
+eqMaybeIdents Nothing (Just _) = false
+eqMaybeIdents (Just _) Nothing = false
+eqMaybeIdents (Just a) (Just b) = eqIdents a b
+
+compareLevels :: Level -> Level -> Ordering
+compareLevels (Level a) (Level b) = compareIntImpl LT EQ GT a b
+
+eqLevels :: Level -> Level -> Boolean
+eqLevels (Level a) (Level b) = compareIntImpl false true false a b
 
 -- | Cible spécifique d'une directive d'inlining (référence brute ou propriété d'un record).
 data InlineAccessor

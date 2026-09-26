@@ -36,6 +36,10 @@ module PureScript.Backend.Optimizer.CoreFn
   , findProp
   , propKey
   , propValue
+  , compareQualifiedIdent
+  , eqQualifiedIdent
+  , compareIdents
+  , eqIdents
   , binderAnn
   , exprAnn
   , qualifiedModuleName
@@ -52,6 +56,7 @@ import Data.Newtype (class Newtype)
 import Data.String.CodeUnits as SCU
 import Data.Traversable (class Traversable, sequenceDefault, traverse)
 import Data.Tuple (Tuple)
+import PureScript.Backend.Optimizer.FfiSupport (compareStringImpl)
 
 newtype Ident = Ident String
 
@@ -90,6 +95,38 @@ instance ordQualified :: Ord a => Ord (Qualified a) where
     compareModule Nothing (Just _) = LT
     compareModule (Just _) Nothing = GT
     compareModule (Just a) (Just b) = compare a b
+
+-- | Comparaison monomorphe des clés `Qualified Ident` (les `Map` de
+-- | directives dominent le runtime du builder). L'instance polymorphe
+-- | `ordQualified` est compilée déspecialisée en `Value` par le backend Go :
+-- | elle reboxe les idents et reconstruit un dictionnaire à chaque
+-- | comparaison. Ici tout est concret et la comparaison de chaînes est native.
+compareQualifiedIdent :: Qualified Ident -> Qualified Ident -> Ordering
+compareQualifiedIdent (Qualified m1 i1) (Qualified m2 i2) = case compareModuleNames m1 m2 of
+  EQ -> compareIdents i1 i2
+  other -> other
+
+-- | Égalité monomorphe correspondante.
+eqQualifiedIdent :: Qualified Ident -> Qualified Ident -> Boolean
+eqQualifiedIdent (Qualified m1 i1) (Qualified m2 i2) = eqModuleNames m1 m2 && eqIdents i1 i2
+
+compareModuleNames :: Maybe ModuleName -> Maybe ModuleName -> Ordering
+compareModuleNames Nothing Nothing = EQ
+compareModuleNames Nothing (Just _) = LT
+compareModuleNames (Just _) Nothing = GT
+compareModuleNames (Just (ModuleName a)) (Just (ModuleName b)) = compareStringImpl LT EQ GT a b
+
+compareIdents :: Ident -> Ident -> Ordering
+compareIdents (Ident a) (Ident b) = compareStringImpl LT EQ GT a b
+
+eqModuleNames :: Maybe ModuleName -> Maybe ModuleName -> Boolean
+eqModuleNames Nothing Nothing = true
+eqModuleNames Nothing (Just _) = false
+eqModuleNames (Just _) Nothing = false
+eqModuleNames (Just (ModuleName a)) (Just (ModuleName b)) = compareStringImpl false true false a b
+
+eqIdents :: Ident -> Ident -> Boolean
+eqIdents (Ident a) (Ident b) = compareStringImpl false true false a b
 
 derive instance Functor Qualified
 

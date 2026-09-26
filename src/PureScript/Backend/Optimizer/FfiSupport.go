@@ -143,3 +143,27 @@ func FindFfiFileImpl(extension string, extraSpagoDirs []string, ffiDir gopurs_ru
 	}
 	return gopurs_runtime.Any(nil)
 }
+
+// CompareStringImpl compares native strings and returns one of the three
+// orderings; same order as Data.Ord's OrdStringImpl, without the Value
+// boundary (the generic T keeps the caller's representation).
+func CompareStringImpl[T any](lt T, eq T, gt T, x string, y string) T {
+	if x < y {
+		return lt
+	}
+	if x == y {
+		return eq
+	}
+	return gt
+}
+
+// CompareIntImpl is the same for Int (native int64) arguments.
+func CompareIntImpl[T any](lt T, eq T, gt T, x int64, y int64) T {
+	if x < y {
+		return lt
+	}
+	if x == y {
+		return eq
+	}
+	return gt
+}
