@@ -132,7 +132,7 @@ buildModules options coreFnModules = do
     case mbCachedMod of
       Just cachedMod -> do
         let
-          newDirectives = foldrWithIndex (insertEvalRefImpl evalRefCompare) directives cachedMod.directives
+          newDirectives = foldrWithIndex (insertEvalRefImpl evalRefCompare compare) directives cachedMod.directives
         liftEffect $ writePurmetaSync name cachedMod.implementations
         liftEffect trimPurmetaCache
 
@@ -169,7 +169,7 @@ buildModules options coreFnModules = do
             }
           -- Directives accumulate, as in upstream: a module sees the defaults
           -- and the directives published by every module converted so far.
-          newDirectives = foldrWithIndex (insertEvalRefImpl evalRefCompare) directives backendMod.directives
+          newDirectives = foldrWithIndex (insertEvalRefImpl evalRefCompare compare) directives backendMod.directives
 
         options.onCodegenModule (buildEnv { implementations = backendMod.implementations }) coreFnModule' backendMod optimizationSteps
 
@@ -224,9 +224,9 @@ forcePrivateInlines :: Set (Qualified Ident) -> InlineDirectiveMap -> InlineDire
 forcePrivateInlines privateGlobals directives =
   Array.foldl addDirective directives (Set.toUnfoldable privateGlobals :: Array (Qualified Ident))
   where
-  addDirective acc qual = case memberEvalRefImpl evalRefCompare (EvalExtern qual) acc of
+  addDirective acc qual = case memberEvalRefImpl evalRefCompare compare (EvalExtern qual) acc of
     true -> acc
-    false -> insertEvalRefImpl evalRefCompare (EvalExtern qual) (Map.singleton InlineRef InlineAlways) acc
+    false -> insertEvalRefImpl evalRefCompare compare (EvalExtern qual) (Map.singleton InlineRef InlineAlways) acc
 
 -- | Parallel builder. Modules are converted by `runJobs`; the coordinator
 -- | remains the only writer of purmeta, directives and codegen.
@@ -517,7 +517,7 @@ buildModulesParallel runner options coreFnModules = do
         , ready: foldl (flip Set.insert) woken.ready newlyReady
         , finalized: Map.insert result.index result.backendMod.implementations st.finalized
         , contributions: Map.insert result.index result.backendMod.directives st.contributions
-        , accumulated: foldrWithIndex (insertEvalRefImpl evalRefCompare) st.accumulated result.backendMod.directives
+        , accumulated: foldrWithIndex (insertEvalRefImpl evalRefCompare compare) st.accumulated result.backendMod.directives
         , waiting: woken.waiting
         , nextCodegen: st.nextCodegen
         , waitingCodegen: Map.insert result.index result st.waitingCodegen

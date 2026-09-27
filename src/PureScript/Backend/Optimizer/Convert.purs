@@ -368,7 +368,7 @@ inferTransitiveDirective directives dictSize impl backendExpr cfn = fromImpl <|>
   where
   fromImpl = case impl of
     ExternExpr _ (NeutralExpr (App (NeutralExpr (Var qual)) args)) ->
-      case lookupEvalRefImpl evalRefCompare (EvalExtern qual) directives of
+      case lookupEvalRefImpl evalRefCompare compare (EvalExtern qual) directives of
         Just dirs -> do
           let
             newDirs = foldrWithIndex
@@ -392,7 +392,7 @@ inferTransitiveDirective directives dictSize impl backendExpr cfn = fromImpl <|>
         _ ->
           Nothing
     ExternExpr _ (NeutralExpr (Accessor (NeutralExpr (App (NeutralExpr (Var qual)) _)) (GetProp prop))) ->
-      case lookupEvalRefImpl evalRefCompare (EvalExtern qual) directives >>= Map.lookup (InlineSpineProp prop) of
+      case lookupEvalRefImpl evalRefCompare compare (EvalExtern qual) directives >>= Map.lookup (InlineSpineProp prop) of
         Just (InlineArity n) ->
           Just $ Map.singleton InlineRef (InlineArity n)
         _ ->
@@ -438,7 +438,7 @@ inferTransitiveDirective directives dictSize impl backendExpr cfn = fromImpl <|>
           dirs -> Just $ Map.fromFoldable dirs
     _ -> case backendExpr of
       ExprSyntax _ (App (ExprSyntax _ (Var qual)) args) ->
-        case lookupEvalRefImpl evalRefCompare (EvalExtern qual) directives >>= Map.lookup InlineRef of
+        case lookupEvalRefImpl evalRefCompare compare (EvalExtern qual) directives >>= Map.lookup InlineRef of
           Just (InlineArity n)
             | arity <- NonEmptyArray.length args
             , arity >= n ->

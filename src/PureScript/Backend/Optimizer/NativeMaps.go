@@ -273,20 +273,20 @@ func compareRefLikeKeys(a, b refLikeKey) int {
 	}
 }
 
-func LookupEvalRefImpl(compare gopurs_runtime.Value, k gopurs_runtime.Value, m gopurs_runtime.Value) gopurs_runtime.Value {
+func LookupEvalRefImpl(compare gopurs_runtime.Value, _ gopurs_runtime.Value, k gopurs_runtime.Value, m gopurs_runtime.Value) gopurs_runtime.Value {
 	return nativeLookupValue(compare, k, m)
 }
 
-func InsertEvalRefImpl(compare gopurs_runtime.Value, k gopurs_runtime.Value, v gopurs_runtime.Value, m gopurs_runtime.Value) gopurs_runtime.Value {
+func InsertEvalRefImpl(compare gopurs_runtime.Value, _ gopurs_runtime.Value, k gopurs_runtime.Value, v gopurs_runtime.Value, m gopurs_runtime.Value) gopurs_runtime.Value {
 	return gopurs_runtime.Box(Data_Map_Internal_InsertNative(nativeCompare(compare), k, v, m))
 }
 
-func MemberEvalRefImpl(compare gopurs_runtime.Value, k gopurs_runtime.Value, m gopurs_runtime.Value) bool {
+func MemberEvalRefImpl(compare gopurs_runtime.Value, _ gopurs_runtime.Value, k gopurs_runtime.Value, m gopurs_runtime.Value) bool {
 	_, ok := Data_Map_Internal_LookupNative(nativeCompare(compare), k, m)
 	return ok
 }
 
-func UnionWithTcoRefImpl(compare gopurs_runtime.Value, f func(interface{}) func(interface{}) interface{}, m1 gopurs_runtime.Value, m2 gopurs_runtime.Value) gopurs_runtime.Value {
+func UnionWithTcoRefImpl(compare gopurs_runtime.Value, _ gopurs_runtime.Value, f func(interface{}) func(interface{}) interface{}, m1 gopurs_runtime.Value, m2 gopurs_runtime.Value) gopurs_runtime.Value {
 	return nativeUnionValue(compare, f, m1, m2)
 }
 

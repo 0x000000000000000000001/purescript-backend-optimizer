@@ -115,8 +115,8 @@ derive instance Newtype TcoAnalysis _
 
 instance Semigroup TcoAnalysis where
   append (TcoAnalysis a) (TcoAnalysis b) = TcoAnalysis
-    { usages: unionWithTcoRefImpl tcoRefCompare append a.usages b.usages
-    , tailCalls: unionWithTcoRefImpl tcoRefCompare add a.tailCalls b.tailCalls
+    { usages: unionWithTcoRefImpl tcoRefCompare compare append a.usages b.usages
+    , tailCalls: unionWithTcoRefImpl tcoRefCompare compare add a.tailCalls b.tailCalls
     , role: noTcoRole
     }
 

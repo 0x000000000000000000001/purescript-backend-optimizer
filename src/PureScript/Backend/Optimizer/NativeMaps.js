@@ -1,11 +1,10 @@
 // FFI JavaScript de `NativeMaps` : les entrées à comparateur natif n'existent
 // que pour le backend Go. En JS, elles retombent sur `Data.Map.Internal` avec
-// l'instance `Ord` correspondante.
+// l'instance `Ord` correspondante (passée par l'appelant pour `EvalRef`/
+// `TcoRef`, afin d'éviter un cycle d'imports avec Semantics/Tco).
 import * as CoreFn from '../PureScript.Backend.Optimizer.CoreFn/index.js';
 import * as DataOrd from '../Data.Ord/index.js';
 import * as DataMapInternal from '../Data.Map.Internal/index.js';
-import * as Semantics from '../PureScript.Backend.Optimizer.Semantics/index.js';
-import * as Tco from '../PureScript.Backend.Optimizer.Codegen.Tco/index.js';
 
 let qualifiedIdentOrdCache = null;
 
@@ -50,16 +49,16 @@ export const unionWithIntImpl = (_compare) => (f) => (m1) => (m2) =>
 
 export const evalRefCompare = null;
 
-export const lookupEvalRefImpl = (_compare) => (key) => (map) =>
-    DataMapInternal.lookup(Semantics.ordEvalRef)(key)(map);
+export const lookupEvalRefImpl = (_compare) => (dictCompare) => (key) => (map) =>
+    DataMapInternal.lookup({ compare: dictCompare })(key)(map);
 
-export const insertEvalRefImpl = (_compare) => (key) => (value) => (map) =>
-    DataMapInternal.insert(Semantics.ordEvalRef)(key)(value)(map);
+export const insertEvalRefImpl = (_compare) => (dictCompare) => (key) => (value) => (map) =>
+    DataMapInternal.insert({ compare: dictCompare })(key)(value)(map);
 
-export const memberEvalRefImpl = (_compare) => (key) => (map) =>
-    DataMapInternal.member(Semantics.ordEvalRef)(key)(map);
+export const memberEvalRefImpl = (_compare) => (dictCompare) => (key) => (map) =>
+    DataMapInternal.member({ compare: dictCompare })(key)(map);
 
 export const tcoRefCompare = null;
 
-export const unionWithTcoRefImpl = (_compare) => (f) => (m1) => (m2) =>
-    DataMapInternal.unionWith(Tco.ordTcoRef)(f)(m1)(m2);
+export const unionWithTcoRefImpl = (_compare) => (dictCompare) => (f) => (m1) => (m2) =>
+    DataMapInternal.unionWith({ compare: dictCompare })(f)(m1)(m2);

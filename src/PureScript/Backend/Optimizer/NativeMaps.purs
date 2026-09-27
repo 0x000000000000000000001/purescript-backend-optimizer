@@ -88,11 +88,14 @@ foreign import data EvalRefCompare :: Type
 
 foreign import evalRefCompare :: EvalRefCompare
 
-foreign import lookupEvalRefImpl :: forall k a. EvalRefCompare -> k -> Map k a -> Maybe a
+-- | La comparaison de l'instance est passée par l'appelant : le repli JS
+-- | l'utilise (sous `{ compare }` pour `Data.Map`), le Go l'ignore — cela
+-- | évite un cycle d'imports avec Semantics/Tco.
+foreign import lookupEvalRefImpl :: forall k a. EvalRefCompare -> (k -> k -> Ordering) -> k -> Map k a -> Maybe a
 
-foreign import insertEvalRefImpl :: forall k a. EvalRefCompare -> k -> a -> Map k a -> Map k a
+foreign import insertEvalRefImpl :: forall k a. EvalRefCompare -> (k -> k -> Ordering) -> k -> a -> Map k a -> Map k a
 
-foreign import memberEvalRefImpl :: forall k a. EvalRefCompare -> k -> Map k a -> Boolean
+foreign import memberEvalRefImpl :: forall k a. EvalRefCompare -> (k -> k -> Ordering) -> k -> Map k a -> Boolean
 
 -- | Comparateur natif des clés `TcoRef` (analyses TCO) : même forme que
 -- | `EvalRef` (`TcoTopLevel` < `TcoLocal`).
@@ -100,4 +103,4 @@ foreign import data TcoRefCompare :: Type
 
 foreign import tcoRefCompare :: TcoRefCompare
 
-foreign import unionWithTcoRefImpl :: forall k v. TcoRefCompare -> (v -> v -> v) -> Map k v -> Map k v -> Map k v
+foreign import unionWithTcoRefImpl :: forall k v. TcoRefCompare -> (k -> k -> Ordering) -> (v -> v -> v) -> Map k v -> Map k v -> Map k v
