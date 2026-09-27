@@ -48,6 +48,7 @@ import PureScript.Backend.Optimizer.Cache (beginPurmetaBuild, nowMillis, trimPur
 import PureScript.Backend.Optimizer.Convert (BackendImplementations, BackendModule, ExternLookup(..), OptimizationSteps, PurmetaLookup, lookupPurmetaImplementation, toBackendModuleWithLookup)
 import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Expr(..), Guard(..), Ident(..), Literal(..), Module(..), ModuleName(..), Prop(..), Qualified(..))
 import PureScript.Backend.Optimizer.CoreFn as CoreFn
+import PureScript.Backend.Optimizer.NativeMaps (lookupQualifiedIdentImpl, qualifiedIdentCompare)
 import PureScript.Backend.Optimizer.Semantics (BackendExpr, Ctx, EvalRef(..), ExternImpl, InlineAccessor(..), InlineDirective(..), InlineDirectiveMap, instantiateNeutralType)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
 import PureScript.Backend.Optimizer.Syntax (BackendSyntax)
@@ -583,7 +584,7 @@ createRankLookup view pendingRef = do
           | other >= view.currentIndex -> ExternMissing
           | otherwise -> case Map.lookup other view.finalized of
               Just impls ->
-                case Map.lookup (Qualified (Just (ModuleName moduleName)) (Ident ident)) impls of
+                case lookupQualifiedIdentImpl qualifiedIdentCompare (Qualified (Just (ModuleName moduleName)) (Ident ident)) impls of
                   Just impl -> ExternFound impl
                   Nothing -> ExternMissing
               Nothing -> unsafePerformEffect do

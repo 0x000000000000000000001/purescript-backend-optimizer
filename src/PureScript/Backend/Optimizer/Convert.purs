@@ -86,6 +86,7 @@ import PureScript.Backend.Optimizer.Analysis (BackendAnalysis, analysisOf, analy
 import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), ClassDecl, Comment, ConstructorType(..), DataDecl, Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Meta(..), Module(..), ModuleName(..), Prop(..), ProperName(..), Qualified(..), ReExport, binderAnn, exprAnn, findProp, propKey, propValue, qualifiedModuleName, unQualified)
 import PureScript.Backend.Optimizer.Directives (DirectiveHeaderResult, parseDirectiveHeader)
 import PureScript.Backend.Optimizer.CoreFn.Usage (invalidateSourceUsageModule)
+import PureScript.Backend.Optimizer.NativeMaps (insertQualifiedIdentImpl, insertStringImpl, lookupQualifiedIdentImpl, lookupStringImpl, qualifiedIdentCompare, stringCompare)
 import PureScript.Backend.Optimizer.Semantics (BackendExpr(..), BackendSemantics, Ctx(..), DataTypeMeta, Env(..), EvalRef(..), ExternImpl(..), ExternSpine(..), InlineAccessor(..), InlineDirective(..), InlineDirectiveMap, NeutralExpr(..), build, evalExternFromImpl, evalExternRefFromImpl, freeze, optimize, unwrapSemTyped)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
 import PureScript.Backend.Optimizer.Substitute (substituteExprType)
@@ -336,8 +337,8 @@ toTopLevelBackendBinding group env (Binding (Ann bindingAnn) ident cfn) = do
   let isDict = fst (isTypeClassDictionaryWithProps cfn)
   let Tuple impl expr' = toExternImpl env group isDict optimizedExprWithTy
   { accum: env
-      { implementations = Map.insert qualifiedIdent impl env.implementations
-      , moduleImplementations = Map.insert qualifiedIdent impl env.moduleImplementations
+      { implementations = insertQualifiedIdentImpl qualifiedIdentCompare qualifiedIdent impl env.implementations
+      , moduleImplementations = insertQualifiedIdentImpl qualifiedIdentCompare qualifiedIdent impl env.moduleImplementations
       , optimizationSteps = maybe env.optimizationSteps (Array.snoc env.optimizationSteps <<< Tuple qualifiedIdent) $ NonEmptyArray.fromArray mbSteps
       , directives =
           case inferTransitiveDirective env.directives (unwrap (fst impl)).size (snd impl) backendExpr cfn of
@@ -497,7 +498,7 @@ toExternImpl env group isDict expr = case unwrapTyped expr of
     Tuple (Tuple (analysisOf expr) (ExternDict group propsWithAnalysis)) expr'
   ExprSyntax _ (CtorDef ct ty tag fields) -> do
     let Tuple _ expr' = freeze expr
-    let meta = fromMaybe { constructors: Map.empty, size: 0 } $ Map.lookup ty env.dataTypes
+    let meta = fromMaybe { constructors: Map.empty, size: 0 } $ lookupStringImpl stringCompare ty env.dataTypes
     Tuple (Tuple (analysisOf expr) (ExternCtor meta ct ty tag fields)) expr'
   _ -> do
     let Tuple analysis expr' = freeze expr
@@ -533,7 +534,7 @@ makeExternEvalSpine group conv env qual spine = do
     let
       spine' = unwrapExternSpine <$> spine
       result = do
-        fn <- Map.lookup qual conv.foreignSemantics
+        fn <- lookupQualifiedIdentImpl qualifiedIdentCompare qual conv.foreignSemantics
         fn env qual (Array.filter isRuntimeSpine spine')
       res = case result of
         Nothing -> do
@@ -548,7 +549,7 @@ makeExternEvalSpine group conv env qual spine = do
 
 lookupImplementation :: ConvertEnv -> Qualified Ident -> Maybe (Tuple BackendAnalysis ExternImpl)
 lookupImplementation conv qual@(Qualified mbMn ident) =
-  case Map.lookup qual conv.implementations of
+  case lookupQualifiedIdentImpl qualifiedIdentCompare qual conv.implementations of
     Just impl -> Just impl
     Nothing -> case mbMn of
       Just mn -> case conv.lookupPurmeta (unwrap mn) (unwrap ident) of
@@ -563,7 +564,7 @@ lookupPurmetaImplementation :: PurmetaLookup
 lookupPurmetaImplementation moduleName ident =
   case unsafePerformEffect (readPurmetaSync (ModuleName moduleName)) of
     Just impls ->
-      case Map.lookup (Qualified (Just (ModuleName moduleName)) (Ident ident)) impls of
+      case lookupQualifiedIdentImpl qualifiedIdentCompare (Qualified (Just (ModuleName moduleName)) (Ident ident)) impls of
         Just impl -> ExternFound impl
         Nothing -> ExternMissing
     Nothing -> ExternMissing
@@ -617,7 +618,7 @@ intro :: forall f a. Foldable f => f Ident -> Level -> ConvertM a -> ConvertM a
 intro ident lvl f env = f
   ( env
       { currentLevel = env.currentLevel + 1
-      , toLevel = foldr (flip Map.insert lvl) env.toLevel ident
+      , toLevel = foldr (\id m -> insertStringImpl stringCompare id lvl m) env.toLevel ident
       }
   )
 
@@ -665,9 +666,9 @@ toBackendExprWithType mbTy expr = do
     ExprVar _ qi -> do
       { currentModule, toLevel } <- ask
       case qi of
-        Qualified Nothing ident | Just lvl <- Map.lookup ident toLevel ->
+        Qualified Nothing ident | Just lvl <- lookupStringImpl stringCompare ident toLevel ->
           buildM (Local (Just ident) lvl)
-        Qualified (Just mn) ident | mn == currentModule, Just lvl <- Map.lookup ident toLevel ->
+        Qualified (Just mn) ident | mn == currentModule, Just lvl <- lookupStringImpl stringCompare ident toLevel ->
           buildM (Local (Just ident) lvl)
         Qualified (Just (ModuleName "Prim")) (Ident "undefined") ->
           buildM PrimUndefined
@@ -680,7 +681,7 @@ toBackendExprWithType mbTy expr = do
     ExprConstructor _ ty name fields -> do
       { dataTypes } <- ask
       let
-        ct = case Map.lookup ty dataTypes of
+        ct = case lookupStringImpl stringCompare ty dataTypes of
           Just { constructors } | Map.size constructors == 1 -> ProductType
           _ -> SumType
       buildM (CtorDef ct ty name fields)
