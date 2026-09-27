@@ -1284,6 +1284,19 @@ knownInstanceDictionary = go
   go _ = Nothing
 
 
+-- The class-accessor shortcut only pays off when the member actually resolves
+-- to a known reference (an instance member, a literal, a primitive). A neutral
+-- accessor on a dictionary that is not inlined keeps a runtime field read and
+-- skips the constant folding of the generic rules (e.g. `negate` on the Int
+-- instance); leave those to the generic rules.
+memberResolved :: BackendSemantics -> Boolean
+memberResolved = go
+  where
+  go (SemTyped _ inner) = go inner
+  go (SemTypeApp _ inner) = go inner
+  go (NeutAccessor _ _) = false
+  go _ = true
+
 evalExternFromImpl :: Env -> Qualified Ident -> Tuple BackendAnalysis ExternImpl -> Array ExternSpine -> Maybe BackendSemantics
 evalExternFromImpl (Env e) qual (Tuple _ (ExternExpr _ _)) spine
   | Just { head: ExternTypeApp _ } <- Array.uncons spine
@@ -1312,9 +1325,10 @@ evalExternFromImpl env@(Env e) qual (Tuple _ (ExternExpr group expr)) spine
   , [ ExternApp args ] <- spine
   , Just { head: dictionary, tail: rest } <- Array.uncons args
   , Just dictionaryExpr <- knownInstanceDictionary dictionary =
-      Just $ evalApp env
-        (eval (envForGroup env (EvalExtern qual) InlineRef group) (NeutralExpr (Accessor dictionaryExpr (GetProp member))))
-        rest
+      let resolved = evalApp env
+            (eval (envForGroup env (EvalExtern qual) InlineRef group) (NeutralExpr (Accessor dictionaryExpr (GetProp member))))
+            rest
+      in if memberResolved resolved then Just resolved else Nothing
 -- A value application does not instantiate the implementation's quantifiers.
 -- Inlining it would attach its generic annotations to caller expressions; a
 -- later caller substitution could capture those still-unbound type names.
