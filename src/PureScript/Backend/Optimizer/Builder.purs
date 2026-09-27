@@ -48,7 +48,7 @@ import PureScript.Backend.Optimizer.Cache (beginPurmetaBuild, nowMillis, trimPur
 import PureScript.Backend.Optimizer.Convert (BackendImplementations, BackendModule, ExternLookup(..), OptimizationSteps, PurmetaLookup, lookupPurmetaImplementation, toBackendModuleWithLookup)
 import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Expr(..), Guard(..), Ident(..), Literal(..), Module(..), ModuleName(..), Prop(..), Qualified(..))
 import PureScript.Backend.Optimizer.CoreFn as CoreFn
-import PureScript.Backend.Optimizer.NativeMaps (lookupQualifiedIdentImpl, qualifiedIdentCompare)
+import PureScript.Backend.Optimizer.NativeMaps (evalRefCompare, insertEvalRefImpl, lookupQualifiedIdentImpl, memberEvalRefImpl, qualifiedIdentCompare)
 import PureScript.Backend.Optimizer.Semantics (BackendExpr, Ctx, EvalRef(..), ExternImpl, InlineAccessor(..), InlineDirective(..), InlineDirectiveMap, instantiateNeutralType)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
 import PureScript.Backend.Optimizer.Syntax (BackendSyntax)
@@ -132,7 +132,7 @@ buildModules options coreFnModules = do
     case mbCachedMod of
       Just cachedMod -> do
         let
-          newDirectives = foldrWithIndex Map.insert directives cachedMod.directives
+          newDirectives = foldrWithIndex (insertEvalRefImpl evalRefCompare) directives cachedMod.directives
         liftEffect $ writePurmetaSync name cachedMod.implementations
         liftEffect trimPurmetaCache
 
@@ -169,7 +169,7 @@ buildModules options coreFnModules = do
             }
           -- Directives accumulate, as in upstream: a module sees the defaults
           -- and the directives published by every module converted so far.
-          newDirectives = foldrWithIndex Map.insert directives backendMod.directives
+          newDirectives = foldrWithIndex (insertEvalRefImpl evalRefCompare) directives backendMod.directives
 
         options.onCodegenModule (buildEnv { implementations = backendMod.implementations }) coreFnModule' backendMod optimizationSteps
 
@@ -224,9 +224,9 @@ forcePrivateInlines :: Set (Qualified Ident) -> InlineDirectiveMap -> InlineDire
 forcePrivateInlines privateGlobals directives =
   Array.foldl addDirective directives (Set.toUnfoldable privateGlobals :: Array (Qualified Ident))
   where
-  addDirective acc qual = case Map.member (EvalExtern qual) acc of
+  addDirective acc qual = case memberEvalRefImpl evalRefCompare (EvalExtern qual) acc of
     true -> acc
-    false -> Map.insert (EvalExtern qual) (Map.singleton InlineRef InlineAlways) acc
+    false -> insertEvalRefImpl evalRefCompare (EvalExtern qual) (Map.singleton InlineRef InlineAlways) acc
 
 -- | Parallel builder. Modules are converted by `runJobs`; the coordinator
 -- | remains the only writer of purmeta, directives and codegen.
@@ -517,7 +517,7 @@ buildModulesParallel runner options coreFnModules = do
         , ready: foldl (flip Set.insert) woken.ready newlyReady
         , finalized: Map.insert result.index result.backendMod.implementations st.finalized
         , contributions: Map.insert result.index result.backendMod.directives st.contributions
-        , accumulated: foldrWithIndex Map.insert st.accumulated result.backendMod.directives
+        , accumulated: foldrWithIndex (insertEvalRefImpl evalRefCompare) st.accumulated result.backendMod.directives
         , waiting: woken.waiting
         , nextCodegen: st.nextCodegen
         , waitingCodegen: Map.insert result.index result st.waitingCodegen

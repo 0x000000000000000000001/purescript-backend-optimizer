@@ -86,7 +86,7 @@ import PureScript.Backend.Optimizer.Analysis (BackendAnalysis, analysisOf, analy
 import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), ClassDecl, Comment, ConstructorType(..), DataDecl, Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Meta(..), Module(..), ModuleName(..), Prop(..), ProperName(..), Qualified(..), ReExport, binderAnn, exprAnn, findProp, propKey, propValue, qualifiedModuleName, unQualified)
 import PureScript.Backend.Optimizer.Directives (DirectiveHeaderResult, parseDirectiveHeader)
 import PureScript.Backend.Optimizer.CoreFn.Usage (invalidateSourceUsageModule)
-import PureScript.Backend.Optimizer.NativeMaps (insertQualifiedIdentImpl, insertStringImpl, lookupQualifiedIdentImpl, lookupStringImpl, qualifiedIdentCompare, stringCompare)
+import PureScript.Backend.Optimizer.NativeMaps (evalRefCompare, insertQualifiedIdentImpl, insertStringImpl, lookupEvalRefImpl, lookupQualifiedIdentImpl, lookupStringImpl, qualifiedIdentCompare, stringCompare)
 import PureScript.Backend.Optimizer.Semantics (BackendExpr(..), BackendSemantics, Ctx(..), DataTypeMeta, Env(..), EvalRef(..), ExternImpl(..), ExternSpine(..), InlineAccessor(..), InlineDirective(..), InlineDirectiveMap, NeutralExpr(..), build, evalExternFromImpl, evalExternRefFromImpl, freeze, optimize, unwrapSemTyped)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
 import PureScript.Backend.Optimizer.Substitute (substituteExprType)
@@ -368,7 +368,7 @@ inferTransitiveDirective directives dictSize impl backendExpr cfn = fromImpl <|>
   where
   fromImpl = case impl of
     ExternExpr _ (NeutralExpr (App (NeutralExpr (Var qual)) args)) ->
-      case Map.lookup (EvalExtern qual) directives of
+      case lookupEvalRefImpl evalRefCompare (EvalExtern qual) directives of
         Just dirs -> do
           let
             newDirs = foldrWithIndex
@@ -392,7 +392,7 @@ inferTransitiveDirective directives dictSize impl backendExpr cfn = fromImpl <|>
         _ ->
           Nothing
     ExternExpr _ (NeutralExpr (Accessor (NeutralExpr (App (NeutralExpr (Var qual)) _)) (GetProp prop))) ->
-      case Map.lookup (EvalExtern qual) directives >>= Map.lookup (InlineSpineProp prop) of
+      case lookupEvalRefImpl evalRefCompare (EvalExtern qual) directives >>= Map.lookup (InlineSpineProp prop) of
         Just (InlineArity n) ->
           Just $ Map.singleton InlineRef (InlineArity n)
         _ ->
@@ -438,7 +438,7 @@ inferTransitiveDirective directives dictSize impl backendExpr cfn = fromImpl <|>
           dirs -> Just $ Map.fromFoldable dirs
     _ -> case backendExpr of
       ExprSyntax _ (App (ExprSyntax _ (Var qual)) args) ->
-        case Map.lookup (EvalExtern qual) directives >>= Map.lookup InlineRef of
+        case lookupEvalRefImpl evalRefCompare (EvalExtern qual) directives >>= Map.lookup InlineRef of
           Just (InlineArity n)
             | arity <- NonEmptyArray.length args
             , arity >= n ->

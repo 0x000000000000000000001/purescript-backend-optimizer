@@ -104,3 +104,197 @@ func LookupStringImpl(compare gopurs_runtime.Value, k gopurs_runtime.Value, m go
 func InsertStringImpl(compare gopurs_runtime.Value, k gopurs_runtime.Value, v gopurs_runtime.Value, m gopurs_runtime.Value) gopurs_runtime.Value {
 	return gopurs_runtime.Box(Data_Map_Internal_InsertNative(nativeCompare(compare), k, v, m))
 }
+
+// UnionStringImpl/UnionWithStringImpl rebuild a String-keyed map with the
+// native comparator; only the combine callback (overlapping keys) stays PS.
+func UnionStringImpl(compare gopurs_runtime.Value, m1 gopurs_runtime.Value, m2 gopurs_runtime.Value) gopurs_runtime.Value {
+	return gopurs_runtime.Box(Data_Map_Internal_UnionWithNative(nativeCompare(compare), keepLeftValue, m1, m2))
+}
+
+func UnionWithStringImpl(compare gopurs_runtime.Value, f func(interface{}) func(interface{}) interface{}, m1 gopurs_runtime.Value, m2 gopurs_runtime.Value) gopurs_runtime.Value {
+	return nativeUnionValue(compare, f, m1, m2)
+}
+
+// IntCompare orders `Int` keys (and newtypes such as `Level`) numerically.
+var IntCompare = func(a, b interface{}) int {
+	left := unboxIntKey(a)
+	right := unboxIntKey(b)
+	switch {
+	case left < right:
+		return -1
+	case left > right:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func unboxIntKey(v interface{}) int64 {
+	if boxed, ok := v.(gopurs_runtime.Value); ok {
+		return boxed.IntVal
+	}
+	switch n := v.(type) {
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	}
+	panic("Expected a boxed Int key")
+}
+
+func LookupIntImpl(compare gopurs_runtime.Value, k gopurs_runtime.Value, m gopurs_runtime.Value) gopurs_runtime.Value {
+	return nativeLookupValue(compare, k, m)
+}
+
+func InsertIntImpl(compare gopurs_runtime.Value, k gopurs_runtime.Value, v gopurs_runtime.Value, m gopurs_runtime.Value) gopurs_runtime.Value {
+	return gopurs_runtime.Box(Data_Map_Internal_InsertNative(nativeCompare(compare), k, v, m))
+}
+
+func UnionWithIntImpl(compare gopurs_runtime.Value, f func(interface{}) func(interface{}) interface{}, m1 gopurs_runtime.Value, m2 gopurs_runtime.Value) gopurs_runtime.Value {
+	return nativeUnionValue(compare, f, m1, m2)
+}
+
+// Generated constructor tags (hashString) for the reference-like key types
+// below. They are compiled into the same binary as these comparators; any
+// drift breaks parity, which the corpus comparison checks exhaustively.
+const (
+	evalExternTag  = int64(4213482863)
+	evalLocalTag   = int64(3190081234)
+	tcoTopLevelTag = int64(2834237787)
+	tcoLocalTag    = int64(3812431755)
+)
+
+type refLikeKey struct {
+	externOrTop bool
+	module      string
+	hasModule   bool
+	ident       string
+	hasIdent    bool
+	level       int64
+}
+
+// EvalRefCompare orders `EvalRef` keys like `ordEvalRef`: `EvalExtern` first,
+// then `EvalLocal` (Maybe Ident then Level). The boxed payloads are
+// `Qualified[string]` / `Maybe[string]` + native level.
+var EvalRefCompare = func(a, b interface{}) int {
+	return compareRefLikeKeys(evalRefKeyOf(a), evalRefKeyOf(b))
+}
+
+func evalRefKeyOf(v interface{}) refLikeKey {
+	boxed := v.(gopurs_runtime.Value)
+	switch boxed.IntVal {
+	case evalExternTag:
+		e := (*Constructor_PureScript_Backend_Optimizer_Semantics_EvalExtern)(boxed.UnsafePtr)
+		key := refLikeKey{externOrTop: true}
+		if e.V0 != nil {
+			key.ident, key.hasIdent = e.V0.V1, true
+			if e.V0.V0 != nil {
+				key.module, key.hasModule = e.V0.V0.V0, true
+			}
+		}
+		return key
+	case evalLocalTag:
+		e := (*Constructor_PureScript_Backend_Optimizer_Semantics_EvalLocal)(boxed.UnsafePtr)
+		key := refLikeKey{level: e.V1}
+		if e.V0 != nil {
+			key.ident, key.hasIdent = e.V0.V0, true
+		}
+		return key
+	}
+	panic("Expected a boxed EvalRef key")
+}
+
+// TcoRefCompare is the same ordering for `TcoRef` (`TcoTopLevel` first).
+var TcoRefCompare = func(a, b interface{}) int {
+	return compareRefLikeKeys(tcoRefKeyOf(a), tcoRefKeyOf(b))
+}
+
+func tcoRefKeyOf(v interface{}) refLikeKey {
+	boxed := v.(gopurs_runtime.Value)
+	switch boxed.IntVal {
+	case tcoTopLevelTag:
+		e := (*Constructor_PureScript_Backend_Optimizer_Codegen_Tco_TcoTopLevel)(boxed.UnsafePtr)
+		key := refLikeKey{externOrTop: true}
+		if e.V0 != nil {
+			key.ident, key.hasIdent = e.V0.V1, true
+			if e.V0.V0 != nil {
+				key.module, key.hasModule = e.V0.V0.V0, true
+			}
+		}
+		return key
+	case tcoLocalTag:
+		e := (*Constructor_PureScript_Backend_Optimizer_Codegen_Tco_TcoLocal)(boxed.UnsafePtr)
+		key := refLikeKey{level: e.V1}
+		if e.V0 != nil {
+			key.ident, key.hasIdent = e.V0.V0, true
+		}
+		return key
+	}
+	panic("Expected a boxed TcoRef key")
+}
+
+func compareRefLikeKeys(a, b refLikeKey) int {
+	switch {
+	case a.externOrTop && !b.externOrTop:
+		return -1
+	case !a.externOrTop && b.externOrTop:
+		return 1
+	case a.externOrTop:
+		switch {
+		case !a.hasModule && b.hasModule:
+			return -1
+		case a.hasModule && !b.hasModule:
+			return 1
+		case a.hasModule:
+			if c := strings.Compare(a.module, b.module); c != 0 {
+				return c
+			}
+		}
+		return strings.Compare(a.ident, b.ident)
+	default:
+		switch {
+		case !a.hasIdent && b.hasIdent:
+			return -1
+		case a.hasIdent && !b.hasIdent:
+			return 1
+		case a.hasIdent:
+			if c := strings.Compare(a.ident, b.ident); c != 0 {
+				return c
+			}
+		}
+		switch {
+		case a.level < b.level:
+			return -1
+		case a.level > b.level:
+			return 1
+		default:
+			return 0
+		}
+	}
+}
+
+func LookupEvalRefImpl(compare gopurs_runtime.Value, k gopurs_runtime.Value, m gopurs_runtime.Value) gopurs_runtime.Value {
+	return nativeLookupValue(compare, k, m)
+}
+
+func InsertEvalRefImpl(compare gopurs_runtime.Value, k gopurs_runtime.Value, v gopurs_runtime.Value, m gopurs_runtime.Value) gopurs_runtime.Value {
+	return gopurs_runtime.Box(Data_Map_Internal_InsertNative(nativeCompare(compare), k, v, m))
+}
+
+func MemberEvalRefImpl(compare gopurs_runtime.Value, k gopurs_runtime.Value, m gopurs_runtime.Value) bool {
+	_, ok := Data_Map_Internal_LookupNative(nativeCompare(compare), k, m)
+	return ok
+}
+
+func UnionWithTcoRefImpl(compare gopurs_runtime.Value, f func(interface{}) func(interface{}) interface{}, m1 gopurs_runtime.Value, m2 gopurs_runtime.Value) gopurs_runtime.Value {
+	return nativeUnionValue(compare, f, m1, m2)
+}
+
+func nativeUnionValue(compare gopurs_runtime.Value, f func(interface{}) func(interface{}) interface{}, m1 gopurs_runtime.Value, m2 gopurs_runtime.Value) gopurs_runtime.Value {
+	combine := func(v1, v2 interface{}) interface{} { return f(v1)(v2) }
+	return gopurs_runtime.Box(Data_Map_Internal_UnionWithNative(nativeCompare(compare), combine, m1, m2))
+}
+
+func keepLeftValue(v1 interface{}, _ interface{}) interface{} {
+	return v1
+}

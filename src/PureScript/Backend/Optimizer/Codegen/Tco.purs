@@ -22,6 +22,7 @@ import Data.Set as Set
 import Data.Traversable (traverse)
 import Data.Tuple (Tuple(..))
 import PureScript.Backend.Optimizer.CoreFn (Ident, ModuleName, Qualified(..))
+import PureScript.Backend.Optimizer.NativeMaps (tcoRefCompare, unionWithTcoRefImpl)
 import PureScript.Backend.Optimizer.Semantics (NeutralExpr(..))
 import PureScript.Backend.Optimizer.Syntax (BackendEffect(..), BackendSyntax(..), Level, Pair(..))
 
@@ -114,8 +115,8 @@ derive instance Newtype TcoAnalysis _
 
 instance Semigroup TcoAnalysis where
   append (TcoAnalysis a) (TcoAnalysis b) = TcoAnalysis
-    { usages: Map.unionWith append a.usages b.usages
-    , tailCalls: Map.unionWith add a.tailCalls b.tailCalls
+    { usages: unionWithTcoRefImpl tcoRefCompare append a.usages b.usages
+    , tailCalls: unionWithTcoRefImpl tcoRefCompare add a.tailCalls b.tailCalls
     , role: noTcoRole
     }
 

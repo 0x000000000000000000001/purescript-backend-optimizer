@@ -31,6 +31,7 @@ import Data.String.CodeUnits as SCU
 import Data.Traversable (foldMap, foldr)
 import Data.Tuple (Tuple(..), snd)
 import PureScript.Backend.Optimizer.CoreFn (Ident, Literal(..), Qualified)
+import PureScript.Backend.Optimizer.NativeMaps (intCompare, unionWithIntImpl)
 import PureScript.Backend.Optimizer.Syntax (class HasSyntax, BackendAccessor(..), BackendOperator(..), BackendOperator1(..), BackendSyntax(..), Level, Pair(..), sndPair, syntaxOf)
 
 data Capture = CaptureNone | CaptureBranch | CaptureClosure
@@ -117,7 +118,7 @@ derive instance Newtype BackendAnalysis _
 
 instance Semigroup BackendAnalysis where
   append (BackendAnalysis a) (BackendAnalysis b) = BackendAnalysis
-    { usages: Map.unionWith append a.usages b.usages
+    { usages: unionWithIntImpl intCompare append a.usages b.usages
     , size: a.size + b.size
     , complexity: a.complexity <> b.complexity
     , args: []

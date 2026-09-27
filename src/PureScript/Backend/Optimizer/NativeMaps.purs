@@ -14,6 +14,21 @@ module PureScript.Backend.Optimizer.NativeMaps
   , stringCompare
   , lookupStringImpl
   , insertStringImpl
+  , unionStringImpl
+  , unionWithStringImpl
+  , IntCompare
+  , intCompare
+  , lookupIntImpl
+  , insertIntImpl
+  , unionWithIntImpl
+  , EvalRefCompare
+  , evalRefCompare
+  , lookupEvalRefImpl
+  , insertEvalRefImpl
+  , memberEvalRefImpl
+  , TcoRefCompare
+  , tcoRefCompare
+  , unionWithTcoRefImpl
   ) where
 
 import Prelude
@@ -49,3 +64,40 @@ foreign import stringCompare :: StringCompare
 foreign import lookupStringImpl :: forall k a. StringCompare -> k -> Map k a -> Maybe a
 
 foreign import insertStringImpl :: forall k a. StringCompare -> k -> a -> Map k a -> Map k a
+
+-- | `union`/`unionWith` des maps `String` avec le comparateur natif : le
+-- | combine reste un callback PS (uniquement sur les clés en commun).
+foreign import unionStringImpl :: forall k v. StringCompare -> Map k v -> Map k v -> Map k v
+
+foreign import unionWithStringImpl :: forall k v. StringCompare -> (v -> v -> v) -> Map k v -> Map k v -> Map k v
+
+-- | Comparateur natif des clés `Int` (et de leurs newtypes `Level`…).
+foreign import data IntCompare :: Type
+
+foreign import intCompare :: IntCompare
+
+foreign import lookupIntImpl :: forall k a. IntCompare -> k -> Map k a -> Maybe a
+
+foreign import insertIntImpl :: forall k a. IntCompare -> k -> a -> Map k a -> Map k a
+
+foreign import unionWithIntImpl :: forall k v. IntCompare -> (v -> v -> v) -> Map k v -> Map k v -> Map k v
+
+-- | Comparateur natif des clés `EvalRef` (directives d'inlining) :
+-- | `EvalExtern` < `EvalLocal`, module puis ident, `Maybe`/niveau natifs.
+foreign import data EvalRefCompare :: Type
+
+foreign import evalRefCompare :: EvalRefCompare
+
+foreign import lookupEvalRefImpl :: forall k a. EvalRefCompare -> k -> Map k a -> Maybe a
+
+foreign import insertEvalRefImpl :: forall k a. EvalRefCompare -> k -> a -> Map k a -> Map k a
+
+foreign import memberEvalRefImpl :: forall k a. EvalRefCompare -> k -> Map k a -> Boolean
+
+-- | Comparateur natif des clés `TcoRef` (analyses TCO) : même forme que
+-- | `EvalRef` (`TcoTopLevel` < `TcoLocal`).
+foreign import data TcoRefCompare :: Type
+
+foreign import tcoRefCompare :: TcoRefCompare
+
+foreign import unionWithTcoRefImpl :: forall k v. TcoRefCompare -> (v -> v -> v) -> Map k v -> Map k v -> Map k v
