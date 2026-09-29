@@ -829,14 +829,16 @@ func tc_ndNumber(raw tcCursor) (float64, *tc_ndFailure) {
 	return 0, tc_ndPublic("Number")
 }
 
-// tc_ndInt mirrors decodeInt: decodeNumber followed by Int.fromNumber.
+// tc_ndInt decodes an Int literal. The native runtime represents Int as
+// int64, and the compiler encodes Int32-min as `negate 2147483648`: the
+// literal must keep its value so constant folding yields the right constant.
 func tc_ndInt(raw tcCursor) (int64, *tc_ndFailure) {
 	number, failure := tc_ndNumber(raw)
 	if failure != nil {
 		return 0, failure
 	}
 	value := int64(number)
-	if float64(value) != number || value < -2147483648 || value > 2147483647 {
+	if float64(value) != number {
 		return 0, tc_ndPublic("Int")
 	}
 	return value, nil
@@ -1293,7 +1295,7 @@ func tc_cndBoolean(raw tcCursor) bool {
 func tc_cndInt(raw tcCursor) int64 {
 	number := tc_cndNumber(raw)
 	value := int64(number)
-	if float64(value) != number || value < -2147483648 || value > 2147483647 {
+	if float64(value) != number {
 		tc_cndFail("Int")
 	}
 	return value
@@ -1419,14 +1421,33 @@ func tc_cndStringLiteralValue(raw tcCursor) gopurs_runtime.Value {
 	// map fromCodePointArray (decodeCodePointArray json), otherwise StringLiteral.
 	if value, failure := tc_cndTry(func() gopurs_runtime.Value {
 		var builder strings.Builder
+		var elements []tcCursor
 		for cursorLoop := tc_cndElements(raw).iter(); cursorLoop.more(); {
-			index, element := cursorLoop.next()
+			_, element := cursorLoop.next()
+			elements = append(elements, element)
+		}
+		for index := 0; index < len(elements); index++ {
+			element := elements[index]
 			if _, failure := tc_cndTry(func() gopurs_runtime.Value {
 				codePoint := tc_cndInt(element)
 				if codePoint < 0 || codePoint > 0x10FFFF {
 					tc_cndFail("CodePoint")
 				}
-				builder.WriteRune(rune(codePoint))
+				// The typed corefn stores strings that are not valid UTF-8 as a
+				// list of UTF-16 code units: combine surrogate pairs and keep
+				// isolated surrogates as WTF-8 (see appendWTF8Text).
+				if codePoint >= 0xD800 && codePoint <= 0xDBFF && index+1 < len(elements) {
+					next := int64(0)
+					if _, nextFailure := tc_cndTry(func() gopurs_runtime.Value {
+						next = tc_cndInt(elements[index+1])
+						return gopurs_runtime.Value{}
+					}); nextFailure == nil && next >= 0xDC00 && next <= 0xDFFF {
+						builder.WriteRune(rune(0x10000 + ((codePoint-0xD800)<<10 + (next - 0xDC00))))
+						index++
+						return gopurs_runtime.Value{}
+					}
+				}
+				appendWTF8Text(&builder, codePoint)
 				return gopurs_runtime.Value{}
 			}); failure != nil {
 				tc_cndFailValue(gopurs_runtime.Value{Type: 9, IntVal: tc_cndTagAtIndex, UnsafePtr: unsafe.Pointer(&Constructor_Data_Argonaut_Decode_Error_AtIndex{1, int64(index), failure.err})})
@@ -1438,6 +1459,19 @@ func tc_cndStringLiteralValue(raw tcCursor) gopurs_runtime.Value {
 	}
 	tc_cndFail("StringLiteral")
 	return gopurs_runtime.Value{}
+}
+
+// appendWTF8Text writes one decoded code unit, preserving isolated surrogates
+// as WTF-8 (the native string representation). Go's WriteRune would replace
+// them with U+FFFD, breaking strings that are not valid UTF-8.
+func appendWTF8Text(builder *strings.Builder, codePoint int64) {
+	if codePoint >= 0xD800 && codePoint <= 0xDFFF {
+		builder.WriteByte(0xED)
+		builder.WriteByte(byte(0xA0 | ((codePoint >> 6) & 0x3F)))
+		builder.WriteByte(byte(0x80 | (codePoint & 0x3F)))
+		return
+	}
+	builder.WriteRune(rune(codePoint))
 }
 
 func tc_cndStringValue(raw tcCursor) gopurs_runtime.Value {

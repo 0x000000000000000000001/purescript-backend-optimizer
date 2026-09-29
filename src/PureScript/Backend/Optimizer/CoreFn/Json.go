@@ -1553,13 +1553,28 @@ func cndStringLiteralValue(raw any) gopurs_runtime.Value {
 	// map fromCodePointArray (decodeCodePointArray json), otherwise StringLiteral.
 	if value, failure := cndTry(func() gopurs_runtime.Value {
 		var builder strings.Builder
-		for index, element := range cndElements(raw) {
+		elements := cndElements(raw)
+		for index := 0; index < len(elements); index++ {
 			if _, failure := cndTry(func() gopurs_runtime.Value {
-				codePoint := cndInt(element)
+				codePoint := cndInt(elements[index])
 				if codePoint < 0 || codePoint > 0x10FFFF {
 					cndFail("CodePoint")
 				}
-				builder.WriteRune(rune(codePoint))
+				// The typed corefn stores strings that are not valid UTF-8 as a
+				// list of UTF-16 code units: combine surrogate pairs and keep
+				// isolated surrogates as WTF-8 (see appendWTF8Json).
+				if codePoint >= 0xD800 && codePoint <= 0xDBFF && index+1 < len(elements) {
+					next := int64(0)
+					if _, nextFailure := cndTry(func() gopurs_runtime.Value {
+						next = cndInt(elements[index+1])
+						return gopurs_runtime.Value{}
+					}); nextFailure == nil && next >= 0xDC00 && next <= 0xDFFF {
+						builder.WriteRune(rune(0x10000 + ((codePoint-0xD800)<<10 + (next - 0xDC00))))
+						index++
+						return gopurs_runtime.Value{}
+					}
+				}
+				appendWTF8Json(&builder, codePoint)
 				return gopurs_runtime.Value{}
 			}); failure != nil {
 				cndFailValue(gopurs_runtime.Value{Type: 9, IntVal: cndTagAtIndex, UnsafePtr: unsafe.Pointer(&Constructor_Data_Argonaut_Decode_Error_AtIndex{1, int64(index), failure.err})})
@@ -1571,6 +1586,19 @@ func cndStringLiteralValue(raw any) gopurs_runtime.Value {
 	}
 	cndFail("StringLiteral")
 	return gopurs_runtime.Value{}
+}
+
+// appendWTF8Json writes one decoded code unit, preserving isolated surrogates
+// as WTF-8 (the native string representation). Go's WriteRune would replace
+// them with U+FFFD, breaking strings that are not valid UTF-8.
+func appendWTF8Json(builder *strings.Builder, codePoint int64) {
+	if codePoint >= 0xD800 && codePoint <= 0xDFFF {
+		builder.WriteByte(0xED)
+		builder.WriteByte(byte(0xA0 | ((codePoint >> 6) & 0x3F)))
+		builder.WriteByte(byte(0x80 | (codePoint & 0x3F)))
+		return
+	}
+	builder.WriteRune(rune(codePoint))
 }
 
 func cndStringValue(raw any) gopurs_runtime.Value {
