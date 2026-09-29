@@ -7,8 +7,10 @@ import Data.Argonaut (Json, JsonDecodeError(..), caseJson, isNull)
 import Data.Array as Array
 import Data.Array.ST as STArray
 import Data.Either (Either(..), note)
+import Data.Enum (toEnum)
 import Data.Int as Int
 import Data.Maybe (Maybe(..), fromMaybe)
+import Data.String.CodeUnits as SCU
 import Data.Traversable (traverse, sequence)
 import Data.Tuple (Tuple(..))
 import Foreign.Object as Object
@@ -22,8 +24,25 @@ type JsonDecode = Either JsonDecodeError
 fail :: forall a b. a -> JsonDecode b
 fail _ = Left (TypeMismatch "Failed decode")
 
+-- | The compiler emits JSON strings, except for strings containing lone
+-- | surrogates, which it emits as arrays of UTF-16 code units (see PSString).
 decodeString :: Json -> JsonDecode String
-decodeString = caseJson fail fail fail Right fail fail
+decodeString json =
+  case decodePlainString json of
+    Right str -> Right str
+    Left _ -> case decodeArray decodeCodeUnit json of
+      Right units -> Right (SCU.fromCharArray units)
+      Left _ -> Left (TypeMismatch "Failed decode")
+
+decodePlainString :: Json -> JsonDecode String
+decodePlainString = caseJson fail fail fail Right fail fail
+
+decodeCodeUnit :: Json -> JsonDecode Char
+decodeCodeUnit json = do
+  code <- decodeInt json
+  case toEnum code of
+    Just char -> Right char
+    Nothing -> Left (TypeMismatch "Failed decode")
 
 decodeNumber :: Json -> JsonDecode Number
 decodeNumber = caseJson fail fail Right fail fail fail
