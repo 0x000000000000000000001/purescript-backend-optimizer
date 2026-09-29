@@ -486,6 +486,23 @@ isConstrainedType = case _ of
   ForAll _ ty -> isConstrainedType ty
   _ -> false
 
+-- | Recognise the dictionary redex the desugarer builds for an explicitly
+-- | constrained lambda, `\dict -> (\dict1 -> body) dict`. The inner lambda is
+-- | itself constrained (it re-takes the class dictionary) and the application
+-- | forwards the enclosing binder untouched. The redex is exactly a letting of
+-- | the dictionary under the inner binder's own name, so the body can be bound
+-- | under that name instead of converting the application. Backends that
+-- | position arguments by counting binders then see the two lambdas the
+-- | ConstrainedType flattens into (dictionary then value).
+dictionaryAlias :: Ident -> Expr Ann -> Maybe (Tuple Ident (Expr Ann))
+dictionaryAlias arg = case _ of
+  ExprApp _ (ExprAbs (Ann innerAnn) innerArg innerBody) (ExprVar _ (Qualified Nothing usedArg))
+    | usedArg == arg
+    , Just ty <- innerAnn.type
+    , isConstrainedType ty ->
+        Just (Tuple innerArg innerBody)
+  _ -> Nothing
+
 toExternImpl :: ConvertEnv -> Array (Qualified Ident) -> Boolean -> BackendExpr -> Tuple (Tuple BackendAnalysis ExternImpl) NeutralExpr
 toExternImpl env group isDict expr = case unwrapTyped expr of
   ExprSyntax _ (Lit (LitRecord props)) -> do
@@ -693,7 +710,12 @@ toBackendExprWithType mbTy expr = do
         <*> traverse (traverse toBackendExpr) bs
     ExprAbs _ arg body -> do
       lvl <- currentLevel
-      make $ Abs (NonEmptyArray.singleton (Tuple (Just arg) lvl)) (intro [ arg ] lvl (toBackendExpr body))
+      case dictionaryAlias arg body of
+        Just (Tuple innerArg innerBody) ->
+          make $ Abs (NonEmptyArray.singleton (Tuple (Just arg) lvl))
+            (intro [ arg ] lvl (makeLet (Just innerArg) (make $ Local (Just arg) lvl) \_ -> toBackendExpr innerBody))
+        Nothing ->
+          make $ Abs (NonEmptyArray.singleton (Tuple (Just arg) lvl)) (intro [ arg ] lvl (toBackendExpr body))
     ExprApp _ a b
       | ExprVar (Ann { meta: Just IsNewtype }) id <- stripTypeApps a -> do
           toBackendExpr b
