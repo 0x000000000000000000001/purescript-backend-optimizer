@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 // Resolve ordinary, well-formed acyclic tables without the generic ST,
 // Maybe/Either and dictionary plumbing. Anything requiring error precedence
 // or cycle forcing is delegated to the validated PureScript implementation.
@@ -19,14 +21,16 @@ mod purust_type_table {
         Constrained(Vec<(Value, Vec<usize>)>, usize),
     }
 
-    fn object(value: &Value) -> Option<&Rc<Object>> {
+    pub(super) fn object(value: &Value) -> Option<&Rc<Object>> {
         match value.resolve() {
             Value::Class(native) => native.downcast_ref::<Rc<Object>>(),
             _ => None,
         }
     }
 
-    fn integer(value: &Value) -> Option<i64> {
+    // Exactly Data.Int.fromNumber: finite, integral and within the Int range.
+    // `decodeInt`'s +2147483648 -> bottom rule is deliberately not part of it.
+    pub(super) fn integer(value: &Value) -> Option<i64> {
         let number = match value.resolve() {
             Value::Int(n) => *n as f64,
             Value::Number(n) => *n,
@@ -165,6 +169,216 @@ mod purust_type_table {
     }
 }
 
+// Decode an annotation and its source usage directly from the JSON object.
+// Every unsupported or malformed shape returns None so the caller delegates to
+// the validated PureScript decoder, which keeps the exact error values and the
+// meta/type/source-usage precedence. Nothing is cached between inputs: each
+// call builds fresh Meta, Maybe and record values, while type-table entries are
+// cloned handles so they keep sharing the decoded table's ExprType arcs.
+mod purust_ann {
+    use super::*;
+    use super::purust_type_table::{integer, object};
+    use std::rc::Rc;
+    use Purs_Data_Maybe::Maybe;
+    use Purs_PureScript_Backend_Optimizer_CoreFn::{ConstructorType, Meta};
+
+    fn string(value: &Value) -> Option<String> {
+        // Data.Argonaut caseJson's on_string accepts String and Char exactly.
+        match value.resolve() {
+            Value::String(text) => Some(text.clone()),
+            Value::Char(character) => Some(character.to_string()),
+            _ => None,
+        }
+    }
+
+    fn number(value: &Value) -> Option<f64> {
+        match value.resolve() {
+            Value::Int(value) => Some(*value as f64),
+            Value::Number(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    fn is_null(value: &Value) -> bool { matches!(value.resolve(), Value::Null) }
+
+    // getFieldOptional': an absent or null field is Maybe Nothing and is never
+    // decoded; anything else must decode or the whole fast path declines.
+    fn optional(value: &Option<Value>, decode: impl Fn(&Value) -> Option<Value>) -> Option<Option<Value>> {
+        match value {
+            None => Some(None),
+            Some(value) if is_null(value) => Some(None),
+            Some(value) => decode(value).map(Some),
+        }
+    }
+
+    fn maybe(value: Option<Value>) -> Value {
+        let payload = match value {
+            Some(value) => Maybe::Just(value),
+            None => Maybe::Nothing,
+        };
+        Value::Class(Rc::new(Rc::new(payload)))
+    }
+
+    fn meta(meta: Meta) -> Value { Value::Class(Rc::new(Rc::new(meta))) }
+
+    fn constructor_type(value: &Value) -> Option<ConstructorType> {
+        match string(value)?.as_str() {
+            "ProductType" => Some(ConstructorType::ProductType),
+            "SumType" => Some(ConstructorType::SumType),
+            _ => None,
+        }
+    }
+
+    // decodeArray decodeIdent: one decodeString per element, in order.
+    fn identifiers(value: &Value) -> Option<Value> {
+        if !value.is_array() { return None; }
+        let mut result = Vec::with_capacity(value.array_len());
+        for item in value.array_iter() {
+            result.push(Value::String(string(&item)?));
+        }
+        Some(mk_array(result))
+    }
+
+    fn decode_meta(value: &Value) -> Option<Value> {
+        let fields = object(value)?;
+        let [meta_type] = fields.get_many(["metaType"]);
+        let tag = string(&meta_type?)?;
+        Some(match tag.as_str() {
+            "IsConstructor" => {
+                let [constructor, identifier_list] = fields.get_many(["constructorType", "identifiers"]);
+                meta(Meta::IsConstructor(constructor_type(&constructor?)?, identifiers(&identifier_list?)?))
+            }
+            "IsNewtype" => meta(Meta::IsNewtype),
+            "IsTypeClassConstructor" => meta(Meta::IsTypeClassConstructor),
+            "IsForeign" => meta(Meta::IsForeign),
+            "IsWhere" => meta(Meta::IsWhere),
+            "IsSyntheticApp" => meta(Meta::IsSyntheticApp),
+            _ => return None,
+        })
+    }
+
+    // decodeInt + Array.index for Ann.type: +2147483648 is the Int bottom and
+    // therefore indexes Nothing, negatives and out-of-range indexes are
+    // Nothing too, and every other number that decodeInt rejects declines.
+    fn decode_type(table: &Value, value: &Value) -> Option<Value> {
+        let number = number(value)?;
+        let index = if let Some(int) = integer(value) {
+            if int < 0 { return Some(maybe(None)); }
+            int as usize
+        } else if number == 2147483648.0 {
+            return Some(maybe(None));
+        } else {
+            return None;
+        };
+        if !table.is_array() { return None; }
+        if index < table.array_len() {
+            Some(maybe(Some(table.array_get(index))))
+        } else {
+            Some(maybe(None))
+        }
+    }
+
+    // decodeSourceBindingId: a nonnegative identifier produced by fromNumber.
+    fn decode_binding_id(module: &str, value: &Value) -> Option<Value> {
+        let binding_id = integer(value)?;
+        if binding_id < 0 { return None; }
+        Some(Value::Record_bindingId_moduleName(perceus_ptr::PerceusPtr::new(
+            purust_core::Record_bindingId_moduleName {
+                moduleName: Some(Value::String(module.to_owned())),
+                bindingId: Some(mk_int(binding_id)),
+            })))
+    }
+
+    // decodeUsageBound: a finite nonnegative integer is Just when it fits in
+    // Int, Nothing when it is only known to be larger, and an error otherwise.
+    fn decode_max_uses(value: &Option<Value>) -> Option<Value> {
+        match value {
+            None => Some(maybe(None)),
+            Some(value) if is_null(value) => Some(maybe(None)),
+            Some(value) => {
+                let number = number(value)?;
+                if !super::PureScript_Backend_Optimizer_CoreFn_Json_isNonNegativeInteger(number) {
+                    return None;
+                }
+                Some(maybe(integer(value).map(mk_int)))
+            }
+        }
+    }
+
+    fn decode_escaping_use_context(value: &Option<Value>) -> Option<Value> {
+        match value {
+            None => Some(maybe(None)),
+            Some(value) if is_null(value) => Some(maybe(None)),
+            Some(value) => match value.resolve() {
+                Value::Bool(flag) => Some(maybe(Some(mk_bool(*flag)))),
+                _ => None,
+            },
+        }
+    }
+
+    // decodeLastLocalUse: null is Nothing, true is Just true, false is an error.
+    fn decode_last_local_use(value: &Option<Value>) -> Option<Value> {
+        match value {
+            None => Some(maybe(None)),
+            Some(value) if is_null(value) => Some(maybe(None)),
+            Some(value) => match value.resolve() {
+                Value::Bool(true) => Some(maybe(Some(mk_bool(true)))),
+                _ => None,
+            },
+        }
+    }
+
+    fn decode_binding_usage(module: &str, value: &Value) -> Option<Value> {
+        let fields = object(value)?;
+        let [binding, max_uses, escaping] = fields.get_many(["bindingId", "maxUses", "hasEscapingUseContext"]);
+        Some(Value::Record_binding_hasEscapingUseContext_maxUses(perceus_ptr::PerceusPtr::new(
+            purust_core::Record_binding_hasEscapingUseContext_maxUses {
+                binding: Some(decode_binding_id(module, &binding?)?),
+                maxUses: Some(decode_max_uses(&max_uses)?),
+                hasEscapingUseContext: Some(decode_escaping_use_context(&escaping)?),
+            })))
+    }
+
+    fn decode_variable_use(module: &str, value: &Value) -> Option<Value> {
+        let fields = object(value)?;
+        let [binding, last_local_use] = fields.get_many(["bindingId", "lastLocalUse"]);
+        Some(Value::Record_binding_lastLocalUse(perceus_ptr::PerceusPtr::new(
+            purust_core::Record_binding_lastLocalUse {
+                binding: Some(decode_binding_id(module, &binding?)?),
+                lastLocalUse: Some(decode_last_local_use(&last_local_use)?),
+            })))
+    }
+
+    pub(super) fn decode(module: &str, table: &Value, input: &Value) -> Option<Value> {
+        let fields = object(input)?;
+        let [meta_field, type_field, binding_usage, variable_use] =
+            fields.get_many(["meta", "type", "bindingUsage", "variableUse"]);
+        let meta = optional(&meta_field, decode_meta)?;
+        let type_value = match &type_field {
+            None => maybe(None),
+            Some(value) if is_null(value) => maybe(None),
+            Some(value) => decode_type(table, value)?,
+        };
+        let binding_usage = optional(&binding_usage, |value| decode_binding_usage(module, value))?;
+        let variable_use = optional(&variable_use, |value| decode_variable_use(module, value))?;
+        let source_usage = match (binding_usage, variable_use) {
+            (None, None) => maybe(None),
+            (binding_usage, variable_use) => maybe(Some(Value::Record_bindingUsage_variableUse(
+                perceus_ptr::PerceusPtr::new(purust_core::Record_bindingUsage_variableUse {
+                    bindingUsage: Some(maybe(binding_usage)),
+                    variableUse: Some(maybe(variable_use)),
+                })))),
+        };
+        Some(Value::Record_meta_sourceUsage_span_type_kw(perceus_ptr::PerceusPtr::new(
+            purust_core::Record_meta_sourceUsage_span_type_kw {
+                span: Some(Purs_PureScript_Backend_Optimizer_CoreFn::PureScript_Backend_Optimizer_CoreFn_emptySpan()),
+                meta: Some(maybe(meta)),
+                type_kw: Some(type_value),
+                sourceUsage: Some(source_usage),
+            })))
+    }
+}
+
 pub fn PureScript_Backend_Optimizer_CoreFn_Json_decodeTypeTableImpl(input: Value) -> std::rc::Rc<Purs_Data_Either::Either> {
     purust_type_table::decode(&input).unwrap_or_else(||
         Purs_PureScript_Backend_Optimizer_CoreFn_TypeTable::PureScript_Backend_Optimizer_CoreFn_TypeTable_decodeTypeTablePS(input))
@@ -176,11 +390,41 @@ pub fn PureScript_Backend_Optimizer_CoreFn_Json_isNonNegativeInteger(input: f64)
 
 pub fn PureScript_Backend_Optimizer_CoreFn_Json_decodeArrayImpl(
     fallback: Func2<Func1<Value, Value>, Value, Value>, decoder: Func1<Value, Value>, input: Value,
-) -> Value { fallback(decoder, input) }
+) -> Value {
+    // decodeArray only calls this after decodeJArray succeeded. Anything else
+    // is delegated before the first callback so a non-array never runs one.
+    if !input.is_array() { return fallback(decoder, input); }
+    let items = input.array_iter();
+    let mut result = Vec::with_capacity(items.len());
+    for (index, item) in items.enumerate() {
+        // Exactly one callback per element, in order.
+        let decoded = decoder(item);
+        let Value::Class(payload) = decoded.resolve() else { panic!("Expected Either") };
+        let either = payload.downcast_ref::<Rc<Purs_Data_Either::Either>>().expect("Expected Either");
+        match either.as_ref() {
+            // Stop at the first Left and wrap it exactly like decodeArrayPS.
+            // The fallback is never re-run here: the callback may be expensive
+            // or effectful and every element is decoded at most once.
+            Purs_Data_Either::Either::Left(error) => {
+                let error = error.unwrap_class::<Rc<Purs_Data_Argonaut_Decode_Error::JsonDecodeError>>().clone();
+                let at_index = Value::Class(Rc::new(Rc::new(
+                    Purs_Data_Argonaut_Decode_Error::JsonDecodeError::AtIndex(index as i64, error))));
+                return Value::Class(Rc::new(Rc::new(Purs_Data_Either::Either::Left(at_index))));
+            }
+            Purs_Data_Either::Either::Right(value) => result.push(value.clone()),
+        }
+    }
+    Value::Class(Rc::new(Rc::new(Purs_Data_Either::Either::Right(mk_array(result)))))
+}
 
 pub fn PureScript_Backend_Optimizer_CoreFn_Json_decodeAnnWithUsageImpl(
     fallback: Func4<String, Value, String, Value, Value>, module: String, table: Value, path: String, input: Value,
-) -> Value { fallback(module, table, path, input) }
+) -> Value {
+    if let Some(ann) = purust_ann::decode(&module, &table, &input) {
+        return Value::Class(Rc::new(Rc::new(Purs_Data_Either::Either::Right(ann))));
+    }
+    fallback(module, table, path, input)
+}
 
 pub fn PureScript_Backend_Optimizer_CoreFn_Json_decodeModuleImpl(
     fallback: Func1<Value, Value>, _validate: Func1<Value, std::rc::Rc<Purs_Data_Either::Either>>, input: Value,

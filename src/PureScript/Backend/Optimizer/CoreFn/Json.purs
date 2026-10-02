@@ -122,7 +122,7 @@ decodeTypeTable json = do
   typeTableJson <- decodeJArray json
   decodeTypeTableImpl typeTableJson
 
--- The Go backend resolves the table without ST or Maybe/Either plumbing. The
+-- Native backends resolve the table without ST or Maybe/Either plumbing. The
 -- JavaScript implementation keeps the validated PureScript algorithm.
 foreign import decodeTypeTableImpl :: Array Json -> Either JsonDecodeError (Array ExprType)
 
@@ -162,7 +162,7 @@ decodeAnn typeTable _path json = do
 decodeAnnWithUsage :: ModuleName -> Array ExprType -> String -> Json -> JsonDecode Ann
 decodeAnnWithUsage moduleName typeTable path json = decodeAnnWithUsageImpl decodeAnnWithUsagePS moduleName typeTable path json
 
--- The Go backend decodes annotations natively. The JavaScript backend calls
+-- Native backends decode annotations natively. The JavaScript backend calls
 -- the PureScript implementation passed as the first argument, so the JS bundle
 -- keeps the exact previous behaviour.
 foreign import decodeAnnWithUsageImpl :: (ModuleName -> Array ExprType -> String -> Json -> JsonDecode Ann) -> ModuleName -> Array ExprType -> String -> Json -> JsonDecode Ann
@@ -471,7 +471,7 @@ decodeArray decoder json = case decodeJArray json of
     Left err
   Right arr -> decodeArrayImpl decodeArrayPS decoder arr
 
--- The Go backend runs the element loop directly. The JavaScript backend calls
+-- Native backends run the element loop directly. The JavaScript backend calls
 -- the validated PureScript loop passed as the first argument, so the JS bundle
 -- keeps the exact previous behaviour.
 foreign import decodeArrayImpl :: forall a. ((Json -> JsonDecode a) -> Array Json -> JsonDecode (Array a)) -> (Json -> JsonDecode a) -> Array Json -> JsonDecode (Array a)
