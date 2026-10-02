@@ -312,6 +312,7 @@ buildModulesParallel runner options coreFnModules = do
         (Map.toUnfoldable depsLeft0 :: Array _)
     , finalized: Map.empty
     , contributions: Map.empty
+    , privateGlobals: Map.empty
     , accumulated: options.directives
     , waiting: Map.empty
     , nextCodegen: 0
@@ -443,6 +444,14 @@ buildModulesParallel runner options coreFnModules = do
     let buildEnv = { implementations: Map.empty, moduleCount, moduleIndex: i }
     prepared@(Module m) <- options.onPrepareModule buildEnv coreFnModule
     mbCached <- options.onSkipModule buildEnv prepared
+    -- Match the sequential builder's forced inlining of untyped private
+    -- bindings, including the current prepared module. Only finalized lower
+    -- ranks are visible; lookup of an unfinished predecessor defers the job.
+    let privateGlobals = foldrWithIndex
+          (\rank globals acc -> if rank < i then Set.union globals acc else acc)
+          (untypedPrivateGlobals prepared)
+          st.privateGlobals
+    let forcedDirectives = forcePrivateInlines privateGlobals directives
     case mbCached of
       Just cached -> pure
         { index: i
@@ -465,7 +474,7 @@ buildModulesParallel runner options coreFnModules = do
             , toLevel: Map.empty
             , implementations: Map.empty
             , moduleImplementations: Map.empty
-            , directives
+            , directives: forcedDirectives
             , dataTypes: Map.empty
             , foreignSemantics: options.foreignSemantics
             , rewriteLimit: options.rewriteLimit
@@ -517,6 +526,7 @@ buildModulesParallel runner options coreFnModules = do
         , ready: foldl (flip Set.insert) woken.ready newlyReady
         , finalized: Map.insert result.index result.backendMod.implementations st.finalized
         , contributions: Map.insert result.index result.backendMod.directives st.contributions
+        , privateGlobals: Map.insert result.index (untypedPrivateGlobals result.coreFnModule) st.privateGlobals
         , accumulated: foldrWithIndex (insertEvalRefImpl evalRefCompare compare) st.accumulated result.backendMod.directives
         , waiting: woken.waiting
         , nextCodegen: st.nextCodegen
@@ -654,4 +664,3 @@ addBinderLit lit acc = case lit of
   LitArray binders -> foldl (\a b -> addBinder b a) acc binders
   LitRecord props -> foldl (\a (Prop _ b) -> addBinder b a) acc props
   _ -> acc
-
