@@ -27,7 +27,7 @@ module PureScript.Backend.Optimizer.Builder
 import Prelude
 
 import Data.Array as Array
-import Data.Foldable (foldl, foldM)
+import Data.Foldable (foldl)
 import Data.FoldableWithIndex (foldrWithIndex)
 import Data.Function.Uncurried (mkFn2)
 import Data.List (List(..))

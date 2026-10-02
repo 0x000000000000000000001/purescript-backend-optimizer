@@ -93,6 +93,14 @@ observed:
 * 20-25% improvement in minified bundle size.
 * 15-20% improvement in minified+gzip bundle size.
 
+## Internal implementation cache
+
+The JavaScript builder uses `.purmeta/<ModuleName>.purmeta` under the working
+directory as scratch storage for implementations published in the current
+build. The tagged V8 payload has no PBO file-protocol version or cross-build
+invalidation key. See the [storage and invalidation contract](docs/purmeta-cache.md)
+for lifecycle, failure behavior and requirements for persistent reuse.
+
 ## Inlining Directives
 
 The inliner follows some basic heuristics, but to get the most out of it you

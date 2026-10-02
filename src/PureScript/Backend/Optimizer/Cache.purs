@@ -6,6 +6,9 @@ module PureScript.Backend.Optimizer.Cache
   , beginPurmetaBuild
   , clearPurmetaCache
   , trimPurmetaCache
+  , setPurmetaCacheBudgetBytes
+  , setPurmetaStatsEnabled
+  , readPurmetaStatsJson
   , logMemory
   ) where
 
@@ -25,14 +28,38 @@ foreign import writePurmetaSyncImpl :: String -> BackendImplementations -> Effec
 foreign import readPurmetaSyncImpl :: String -> (BackendImplementations -> Maybe BackendImplementations) -> Maybe BackendImplementations -> Effect (Maybe BackendImplementations)
 foreign import clearPurmetaCacheImpl :: Effect Unit
 foreign import trimPurmetaCacheImpl :: Effect Unit
+
+-- | Start a fresh publication scope, discarding RAM and previous membership.
+-- | Both builders call this on each execution. JavaScript scratch files stay
+-- | on disk, but cannot be read until successfully republished in this scope.
 foreign import beginPurmetaBuild :: Effect Unit
 
+-- | Override the JavaScript cache's serialized-byte budget (default 64 MiB),
+-- | returning the previous value for scoped restoration. Accepts non-negative
+-- | safe integer byte counts; eviction still happens only at explicit trims.
+foreign import setPurmetaCacheBudgetBytes :: Number -> Effect Number
+
+-- | Opt-in JavaScript cache diagnostics. Enabling starts new counters without
+-- | changing cache contents/policy; beginPurmetaBuild resets them for each build.
+foreign import setPurmetaStatsEnabled :: Boolean -> Effect Unit
+
+-- | A detached JSON snapshot (schema 1), or "null" when disabled. Byte counts
+-- | and timings use JavaScript numbers rather than 32-bit PureScript Ints.
+foreign import readPurmetaStatsJson :: Effect String
+
+-- | Publish current-scope implementations. JavaScript writes an unversioned
+-- | V8 payload to .purmeta/<Module>.purmeta under the working directory before
+-- | marking it readable; serialization/write errors propagate to the caller.
 writePurmetaSync :: ModuleName -> BackendImplementations -> Effect Unit
 writePurmetaSync mn = writePurmetaSyncImpl (unwrap mn)
 
+-- | Read only implementations published in this process's current scope.
+-- | JavaScript checks membership before RAM or disk access, even before the
+-- | first beginPurmetaBuild. This is not a persistent cross-build cache.
 readPurmetaSync :: ModuleName -> Effect (Maybe BackendImplementations)
 readPurmetaSync mn = readPurmetaSyncImpl (unwrap mn) Just Nothing
 
+-- | Drop the JavaScript RAM LRU, retaining current-scope disk membership.
 clearPurmetaCache :: Effect Unit
 clearPurmetaCache = clearPurmetaCacheImpl
 

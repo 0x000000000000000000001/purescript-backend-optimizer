@@ -1,6 +1,7 @@
 // After building PBO: node test/purmeta-build-cache.mjs [compiled-output-directory]
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -24,6 +25,45 @@ const temporaryWorkingDirectory = t => {
     rmSync(directory, { recursive: true, force: true });
   });
 };
+
+test("a fresh process cannot read residual purmeta before its first builder invocation", t => {
+  temporaryWorkingDirectory(t);
+  Cache.writePurmetaSync("Old")(Map.empty)();
+  writeFileSync(".purmeta/Corrupt.purmeta", Buffer.from([0]));
+  const moduleURL = name => JSON.stringify(pathToFileURL(resolve(output, name, "index.js")).href);
+  const child = spawnSync(process.execPath, ["--input-type=module", "-e", `
+    import assert from 'node:assert/strict';
+    import fs from 'node:fs';
+    import * as Cache from ${moduleURL("PureScript.Backend.Optimizer.Cache")};
+    import * as Maybe from ${moduleURL("Data.Maybe")};
+    import * as Map from ${moduleURL("Data.Map")};
+    Cache.setPurmetaStatsEnabled(true)();
+    const probes = [];
+    const originalExists = fs.existsSync, originalRead = fs.readFileSync;
+    fs.existsSync = file => { probes.push(['exists', String(file)]); return originalExists(file); };
+    fs.readFileSync = (...args) => { probes.push(['read', String(args[0])]); return originalRead(...args); };
+    for (const name of ['Old', 'Corrupt']) {
+      assert.ok(Cache.readPurmetaSync(name)() instanceof Maybe.Nothing,
+        'old metadata must be blocked before builder initialization');
+    }
+    Cache.clearPurmetaCache();
+    assert.ok(Cache.readPurmetaSync('Old')() instanceof Maybe.Nothing);
+    assert.deepEqual(probes, [], 'rejected files must not even be probed');
+    fs.existsSync = originalExists;
+    fs.readFileSync = originalRead;
+    const stats = JSON.parse(Cache.readPurmetaStatsJson());
+    assert.equal(stats.reads.blocked, 3);
+    assert.equal(stats.reads.ramMisses, 0);
+    // Direct callers can publish into the initial empty scope, just as they
+    // can after beginPurmetaBuild; only this process's successful writes count.
+    Cache.writePurmetaSync('Old')(Map.empty)();
+    Cache.clearPurmetaCache();
+    assert.ok(Cache.readPurmetaSync('Old')() instanceof Maybe.Just);
+    Cache.beginPurmetaBuild();
+    assert.ok(Cache.readPurmetaSync('Old')() instanceof Maybe.Nothing);
+  `], { cwd: process.cwd(), encoding: "utf8", timeout: 30000 });
+  assert.equal(child.status, 0, child.stdout + child.stderr);
+});
 
 test("a new build ignores old purmeta until the module is written in that build", t => {
   temporaryWorkingDirectory(t);
@@ -55,7 +95,7 @@ test("a new build ignores old purmeta until the module is written in that build"
 
 test("a module accepted by onSkipModule publishes its validated implementations", t => {
   temporaryWorkingDirectory(t);
-  const module = { name: "Cached", exports: [] };
+  const module = { name: "Cached", exports: [], decls: [] };
   const cached = { directives: Map.empty, implementations: Map.empty };
   const options = {
     directives: Map.empty,
