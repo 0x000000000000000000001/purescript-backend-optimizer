@@ -1,4 +1,4 @@
-module PureScript.Backend.Optimizer.FreeVars (sanitizeName, localId, freeVars, paramTypes) where
+module PureScript.Backend.Optimizer.FreeVars (sanitizeName, localId, freeVars, freeVarsWith, paramTypes) where
 
 import Prelude
 
@@ -50,74 +50,80 @@ localId Nothing (Level l) = "__local_var_" <> show l
 
 -- | Computes the set of free variables (by unique localId) in a given `TcoExpr`.
 freeVars :: TcoExpr -> Set String
-freeVars (TcoExpr _ syntax) = case syntax of
+freeVars expr = freeVarsWith freeVars expr
+
+-- | One scope-aware step, with recursive calls supplied by the caller. This
+-- | lets backends memoize immutable TcoExpr nodes without duplicating binding
+-- | rules. Results contain original local IDs, before backend-specific renaming.
+freeVarsWith :: (TcoExpr -> Set String) -> TcoExpr -> Set String
+freeVarsWith recur (TcoExpr _ syntax) = case syntax of
   Var _ -> Set.empty
   Local mbIdent lvl -> Set.singleton (localId mbIdent lvl)
   Lit lit -> case lit of
-    LitArray arr -> foldl (\acc e -> Set.union acc (freeVars e)) Set.empty arr
-    LitRecord rec -> foldl (\acc (Prop _ e) -> Set.union acc (freeVars e)) Set.empty rec
+    LitArray arr -> foldl (\acc e -> Set.union acc (recur e)) Set.empty arr
+    LitRecord rec -> foldl (\acc (Prop _ e) -> Set.union acc (recur e)) Set.empty rec
     _ -> Set.empty
   App fn args ->
-    foldl (\acc e -> Set.union acc (freeVars e)) (freeVars fn) (toArray args)
+    foldl (\acc e -> Set.union acc (recur e)) (recur fn) (toArray args)
   TypeApp fn _ ->
-    freeVars fn
+    recur fn
   Abs args body ->
     let
       argsSet = foldl (\acc (Tuple mbIdent lvl) -> Set.insert (localId mbIdent lvl) acc) Set.empty (toArray args)
-      bodyVars = freeVars body
+      bodyVars = recur body
     in
       Set.difference bodyVars argsSet
   UncurriedApp fn args ->
-    foldl (\acc e -> Set.union acc (freeVars e)) (freeVars fn) args
+    foldl (\acc e -> Set.union acc (recur e)) (recur fn) args
   UncurriedAbs args body ->
     let
       argsSet = foldl (\acc (Tuple mbIdent lvl) -> Set.insert (localId mbIdent lvl) acc) Set.empty args
-      bodyVars = freeVars body
+      bodyVars = recur body
     in
       Set.difference bodyVars argsSet
   UncurriedEffectApp fn args ->
-    foldl (\acc e -> Set.union acc (freeVars e)) (freeVars fn) args
+    foldl (\acc e -> Set.union acc (recur e)) (recur fn) args
   UncurriedEffectAbs args body ->
     let
       argsSet = foldl (\acc (Tuple mbIdent lvl) -> Set.insert (localId mbIdent lvl) acc) Set.empty args
-      bodyVars = freeVars body
+      bodyVars = recur body
     in
       Set.difference bodyVars argsSet
-  Accessor e _ -> freeVars e
+  Accessor e _ -> recur e
   Update e props ->
-    foldl (\acc (Prop _ val) -> Set.union acc (freeVars val)) (freeVars e) props
+    foldl (\acc (Prop _ val) -> Set.union acc (recur val)) (recur e) props
   CtorSaturated _ _ _ _ args ->
-    foldl (\acc (Tuple _ e) -> Set.union acc (freeVars e)) Set.empty args
+    foldl (\acc (Tuple _ e) -> Set.union acc (recur e)) Set.empty args
   CtorDef _ _ _ _ -> Set.empty
   LetRec lvl binds body ->
     let
       bindsSet = foldl (\acc (Tuple ident _) -> Set.insert (localId (Just ident) lvl) acc) Set.empty (toArray binds)
-      bodyVars = freeVars body
-      bindsVars = foldl (\acc (Tuple _ e) -> Set.union acc (freeVars e)) Set.empty (toArray binds)
+      bodyVars = recur body
+      bindsVars = foldl (\acc (Tuple _ e) -> Set.union acc (recur e)) Set.empty (toArray binds)
     in
       Set.difference (Set.union bodyVars bindsVars) bindsSet
   Let mbIdent lvl val body ->
-    Set.union (freeVars val) (Set.difference (freeVars body) (Set.singleton (localId mbIdent lvl)))
+    Set.union (recur val) (Set.difference (recur body) (Set.singleton (localId mbIdent lvl)))
   EffectBind mbIdent lvl val body ->
-    Set.union (freeVars val) (Set.difference (freeVars body) (Set.singleton (localId mbIdent lvl)))
-  EffectPure e -> freeVars e
-  EffectDefer e -> freeVars e
+    Set.union (recur val) (Set.difference (recur body) (Set.singleton (localId mbIdent lvl)))
+  EffectPure e -> recur e
+  EffectDefer e -> recur e
   Branch pairs def ->
     let
-      defVars = freeVars def
-      pairsVars = foldl (\acc (Pair cond body) -> Set.union acc (Set.union (freeVars cond) (freeVars body))) Set.empty (toArray pairs)
+      defVars = recur def
+      pairsVars = foldl (\acc (Pair cond body) -> Set.union acc (Set.union (recur cond) (recur body))) Set.empty (toArray pairs)
     in
       Set.union defVars pairsVars
   PrimOp op -> case op of
-    Op1 _ e -> freeVars e
-    Op2 _ e1 e2 -> Set.union (freeVars e1) (freeVars e2)
+    Op1 _ e -> recur e
+    Op2 _ e1 e2 -> Set.union (recur e1) (recur e2)
   PrimEffect effect -> case effect of
-    EffectRefNew e -> freeVars e
-    EffectRefRead e -> freeVars e
-    EffectRefWrite ref val -> Set.union (freeVars ref) (freeVars val)
+    EffectRefNew e -> recur e
+    EffectRefRead e -> recur e
+    EffectRefWrite ref val -> Set.union (recur ref) (recur val)
   PrimUndefined -> Set.empty
   Fail _ -> Set.empty
-  Typed _ a -> freeVars a
+  Typed _ a -> recur a
 
 paramTypes :: TcoExpr -> Map String ExprType
 paramTypes (TcoExpr _ expr) = case expr of
