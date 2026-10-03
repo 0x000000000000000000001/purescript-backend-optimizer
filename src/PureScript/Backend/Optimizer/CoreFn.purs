@@ -38,6 +38,8 @@ module PureScript.Backend.Optimizer.CoreFn
   , propValue
   , compareQualifiedIdent
   , eqQualifiedIdent
+  , compareQualifiedIdentPS
+  , eqQualifiedIdentPS
   , compareIdents
   , eqIdents
   , binderAnn
@@ -97,18 +99,36 @@ instance ordQualified :: Ord a => Ord (Qualified a) where
     compareModule (Just a) (Just b) = compare a b
 
 -- | Comparaison monomorphe des clés `Qualified Ident` (les `Map` de
--- | directives dominent le runtime du builder). L'instance polymorphe
--- | `ordQualified` est compilée déspecialisée en `Value` par le backend Go :
--- | elle reboxe les idents et reconstruit un dictionnaire à chaque
--- | comparaison. Ici tout est concret et la comparaison de chaînes est native.
+-- | directives dominent le runtime du builder). Le chemin natif emprunte les
+-- | chaînes sans copie ; l'oracle PS distinct ci-dessous reste l'autorité de
+-- | repli JS/Go et le témoin du test différentiel Rust.
+foreign import compareQualifiedIdentImpl
+  :: (Qualified Ident -> Qualified Ident -> Ordering)
+  -> Qualified Ident
+  -> Qualified Ident
+  -> Ordering
+
+foreign import eqQualifiedIdentImpl
+  :: (Qualified Ident -> Qualified Ident -> Boolean)
+  -> Qualified Ident
+  -> Qualified Ident
+  -> Boolean
+
 compareQualifiedIdent :: Qualified Ident -> Qualified Ident -> Ordering
-compareQualifiedIdent (Qualified m1 i1) (Qualified m2 i2) = case compareModuleNames m1 m2 of
+compareQualifiedIdent a b = compareQualifiedIdentImpl compareQualifiedIdentPS a b
+
+eqQualifiedIdent :: Qualified Ident -> Qualified Ident -> Boolean
+eqQualifiedIdent a b = eqQualifiedIdentImpl eqQualifiedIdentPS a b
+
+-- | Oracle monomorphe conservé distinct : autorité de repli et témoin
+-- | différentiel du chemin natif.
+compareQualifiedIdentPS :: Qualified Ident -> Qualified Ident -> Ordering
+compareQualifiedIdentPS (Qualified m1 i1) (Qualified m2 i2) = case compareModuleNames m1 m2 of
   EQ -> compareIdents i1 i2
   other -> other
 
--- | Égalité monomorphe correspondante.
-eqQualifiedIdent :: Qualified Ident -> Qualified Ident -> Boolean
-eqQualifiedIdent (Qualified m1 i1) (Qualified m2 i2) = eqModuleNames m1 m2 && eqIdents i1 i2
+eqQualifiedIdentPS :: Qualified Ident -> Qualified Ident -> Boolean
+eqQualifiedIdentPS (Qualified m1 i1) (Qualified m2 i2) = eqModuleNames m1 m2 && eqIdents i1 i2
 
 compareModuleNames :: Maybe ModuleName -> Maybe ModuleName -> Ordering
 compareModuleNames Nothing Nothing = EQ

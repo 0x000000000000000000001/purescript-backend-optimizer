@@ -120,6 +120,16 @@ fn purust_map_split(compare: &impl Fn(&Value, &Value) -> KeyOrdering, key: &Valu
         },
     }
 }
+fn purust_map_insert_with(compare: &impl Fn(&Value, &Value) -> KeyOrdering, combine: &impl Fn(Value, Value) -> Value, key: Value, value: Value, map: &Rc<Map>) -> Rc<Map> {
+    match map.as_ref() {
+        Map::Leaf => purust_map_node(key, value, map.clone(), map.clone()),
+        Map::Node(h, s, mk, mv, ml, mr) => match compare(&key, mk) {
+            KeyOrdering::Less => purust_map_balance(mk.clone(), mv.clone(), purust_map_insert_with(compare, combine, key, value, ml), mr.clone()),
+            KeyOrdering::Greater => purust_map_balance(mk.clone(), mv.clone(), ml.clone(), purust_map_insert_with(compare, combine, key, value, mr)),
+            KeyOrdering::Equal => Rc::new(Map::Node(*h, *s, key, combine(mv.clone(), value), ml.clone(), mr.clone())),
+        },
+    }
+}
 fn purust_map_union(compare: &impl Fn(&Value, &Value) -> KeyOrdering, combine: &impl Fn(Value, Value) -> Value, left: &Rc<Map>, right: &Rc<Map>) -> Rc<Map> {
     match (left.as_ref(), right.as_ref()) {
         (Map::Leaf, _) => right.clone(),
@@ -151,6 +161,9 @@ pub fn PureScript_Backend_Optimizer_NativeMaps_lookupStringImpl(_: Value, key: V
 }
 pub fn PureScript_Backend_Optimizer_NativeMaps_insertStringImpl(_: Value, key: Value, value: Value, map: Rc<Map>) -> Rc<Map> {
     purust_map_insert(&purust_compare_string, key, value, &map)
+}
+pub fn PureScript_Backend_Optimizer_NativeMaps_insertWithStringImpl(_: Value, combine: Func2<Value, Value, Value>, key: Value, value: Value, map: Rc<Map>) -> Rc<Map> {
+    purust_map_insert_with(&purust_compare_string, &|old, new| combine(old, new), key, value, &map)
 }
 pub fn PureScript_Backend_Optimizer_NativeMaps_unionStringImpl(_: Value, a: Rc<Map>, b: Rc<Map>) -> Rc<Map> {
     purust_map_union(&purust_compare_string, &|a, _| a, &a, &b)

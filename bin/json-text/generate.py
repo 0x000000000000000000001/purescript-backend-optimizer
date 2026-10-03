@@ -15,7 +15,7 @@ TARGET = JSON.with_suffix('') / 'Text.go'
 
 def function(text, name, replacement):
     pattern = rf'^func {name}\([^\n]*\{{[^\n]*\}}\n|^func {name}\([^\n]*\{{\n.*?^\}}\n'
-    result, count = re.subn(pattern, lambda _: replacement+'\n', text, flags=re.M|re.S)
+    result, count = re.subn(pattern, lambda match: (replacement(match[0]) if callable(replacement) else replacement)+'\n', text, flags=re.M|re.S)
     if count != 1:
         raise ValueError((name, count))
     return result
@@ -23,6 +23,26 @@ def function(text, name, replacement):
 def specialize(text):
     for name in ['DecodeTypeTableImpl','IsNonNegativeInteger','DecodeArrayImpl','DecodeAnnWithUsageImpl']:
         text = function(text, name, '')
+    # Surrogate lookahead indexes this array repeatedly. Materialize its cursors
+    # once, as in the existing text decoder: tcArray.at walks from the beginning.
+    def indexed_literals(body):
+        body = re.sub(r'\belements\b', 'indexedElements', body)
+        before = 'indexedElements := cndElements(raw)'
+        assert body.count(before) == 1
+        return body.replace(before, 'var indexedElements []any\n'
+            '\t\tfor _, element := range cndElements(raw) {\n'
+            '\t\t\tindexedElements = append(indexedElements, element)\n\t\t}')
+    text = function(text, 'cndStringLiteralValue', indexed_literals)
+    # Keep the text decoder's existing native Int-literal policy: the frontend
+    # emits Int32-min as negate 2147483648. Type-table indices still use ntInt's
+    # Int32 check; only ndInt/cndInt accept the operand before negation.
+    literal_bound = 'float64(value) != number || value < -2147483648 || value > 2147483647'
+    assert text.count(literal_bound) == 2
+    text = text.replace(literal_bound, 'float64(value) != number')
+    text = text.replace('// ndInt mirrors decodeInt: decodeNumber followed by Int.fromNumber.',
+        '// ndInt decodes an Int literal. The native runtime represents Int as\n'
+        '// int64, and the compiler encodes Int32-min as `negate 2147483648`: the\n'
+        '// literal must keep its value so constant folding yields the right constant.')
     bodies = {
         'ntNative':'func ntNative(input any) any { return input }',
         'ntIsNull':"func ntIsNull(input any) (bool,bool) { return input.kind() == 'n', true }",
@@ -50,7 +70,7 @@ def specialize(text):
     text = text.replace('jsonValue := gopurs_runtime.Box(raw)', 'jsonValue := gopurs_runtime.Box(directMaterialize(directCursor(raw)))')
     text = text.replace('json gopurs_runtime.Value) (result gopurs_runtime.Value)', 'json tcCursor) (result gopurs_runtime.Value)')
     text = re.sub(r'\bany\b', 'tcCursor', text)
-    text = re.sub(r'\b((?:nt|nd|cnd)[A-Z]\w*|decodeTypeTableNative)\b', lambda m:'tc_'+m[0], text)
+    text = re.sub(r'\b((?:nt|nd|cnd)[A-Z]\w*|decodeTypeTableNative|appendWTF8Json)\b', lambda m:'tc_'+m[0], text)
     text = text.replace('func DecodeModuleImpl(', 'func tcDecodeModule(')
     for before, after in {
         'if s, ok := raw.text(); ok {':'if s, ok := raw.borrowedText(); ok {',

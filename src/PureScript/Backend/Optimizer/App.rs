@@ -1,9 +1,9 @@
 pub fn PureScript_Backend_Optimizer_App_moduleReadConcurrency() -> Value {
     Value::Func1(Func1::Shared(std::rc::Rc::new(|_| {
-        let configured = std::env::var("PURUST_JOBS").unwrap_or_default();
+        let configured = std::env::var("GOPURS_JOBS").unwrap_or_default();
         let jobs = if !configured.is_empty() && configured.bytes().all(|b| b.is_ascii_digit()) {
-            configured.parse::<i64>().ok().filter(|n| (1..=64).contains(n)).unwrap_or(1)
-        } else { 1 };
+            configured.parse::<i64>().ok().filter(|n| (1..=64).contains(n)).unwrap_or(8)
+        } else { 8 };
         Value::Int(jobs)
     })))
 }

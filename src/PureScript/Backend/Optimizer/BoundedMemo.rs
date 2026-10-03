@@ -14,7 +14,19 @@ fn purust_memo_key(value: &Value) -> Option<PurustMemoKey> {
         Value::Bool(v) => K::Bool(*v),
         Value::String(v) => K::String(v.clone()),
         Value::Char(v) => K::Char(*v),
-        Value::Class(v) => K::Pointer(0, Rc::as_ptr(v) as *const () as usize),
+        Value::Class(v) => {
+            // Typed compiler trees are boxed again at generic call sites. The
+            // outer Any allocation is fresh on each call; cache the shared tree
+            // identity, not that transient box. Entries retain both Values, so
+            // the inner allocation cannot be reused while its key is cached.
+            if let Some(tree) = v.downcast_ref::<Rc<Purs_PureScript_Backend_Optimizer_CoreFn::ExprType>>() {
+                K::Pointer(3, Rc::as_ptr(tree) as usize)
+            } else if let Some(tree) = v.downcast_ref::<Rc<Purs_PureScript_Backend_Optimizer_Syntax::BackendSyntax>>() {
+                K::Pointer(4, Rc::as_ptr(tree) as usize)
+            } else {
+                K::Pointer(0, Rc::as_ptr(v) as *const () as usize)
+            }
+        },
         Value::Array(v) => K::Pointer(1, Rc::as_ptr(v) as usize),
         Value::IntArray(v) => K::Pointer(2, Rc::as_ptr(v) as usize),
         _ => return None,

@@ -14,6 +14,7 @@ module PureScript.Backend.Optimizer.NativeMaps
   , stringCompare
   , lookupStringImpl
   , insertStringImpl
+  , insertWithStringImpl
   , unionStringImpl
   , unionWithStringImpl
   , IntCompare
@@ -64,6 +65,9 @@ foreign import stringCompare :: StringCompare
 foreign import lookupStringImpl :: forall k a. StringCompare -> k -> Map k a -> Maybe a
 
 foreign import insertStringImpl :: forall k a. StringCompare -> k -> a -> Map k a -> Map k a
+
+-- | Like Data.Map.insertWith, the callback receives the existing value first.
+foreign import insertWithStringImpl :: forall k a. StringCompare -> (a -> a -> a) -> k -> a -> Map k a -> Map k a
 
 -- | `union`/`unionWith` des maps `String` avec le comparateur natif : le
 -- | combine reste un callback PS (uniquement sur les clés en commun).

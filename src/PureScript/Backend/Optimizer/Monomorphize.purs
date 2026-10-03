@@ -45,7 +45,7 @@ import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Bindi
 import PureScript.Backend.Optimizer.CoreFn.BindingGroups (sortBindingGroups)
 import PureScript.Backend.Optimizer.CoreFn.Usage (invalidateSourceUsageModule)
 import PureScript.Backend.Optimizer.FfiSupport (hashString)
-import PureScript.Backend.Optimizer.NativeMaps (stringCompare, unionStringImpl, unionWithStringImpl)
+import PureScript.Backend.Optimizer.NativeMaps (insertWithStringImpl, stringCompare, unionStringImpl, unionWithStringImpl)
 import PureScript.Backend.Optimizer.Substitute (substituteExprType, unify)
 
 type Instantiation =
@@ -275,7 +275,7 @@ collectExpr globalAstMap modName acc expr = case expr of
     in
       case trueGenericType of
         Just t ->
-          Map.insertWith (\new old -> unionWithStringImpl stringCompare mergeInstantiation new old) qualName (Map.singleton (mangleType (defaultToAny t)) { instType: defaultToAny t, dictArgs: [], normalArgs: [], callers: Set.singleton modName, subst: Map.empty }) acc
+          insertWithStringImpl stringCompare (\new old -> unionWithStringImpl stringCompare mergeInstantiation new old) qualName (Map.singleton (mangleType (defaultToAny t)) { instType: defaultToAny t, dictArgs: [], normalArgs: [], callers: Set.singleton modName, subst: Map.empty }) acc
         Nothing -> acc
   ExprVar _ (Qualified Nothing _) -> acc
   ExprApp _ _ _ ->
@@ -328,7 +328,7 @@ collectExpr globalAstMap modName acc expr = case expr of
              else if hasTypeVariables instType then acc2
              else
                let specKey = specializationKey instType dictArgs normalArgs
-               in Map.insertWith (\new old -> unionWithStringImpl stringCompare mergeInstantiation new old) qualName (Map.singleton specKey { instType: defaultToAny instType, dictArgs, normalArgs, callers: Set.singleton modName, subst }) acc2
+               in insertWithStringImpl stringCompare (\new old -> unionWithStringImpl stringCompare mergeInstantiation new old) qualName (Map.singleton specKey { instType: defaultToAny instType, dictArgs, normalArgs, callers: Set.singleton modName, subst }) acc2
         _ -> acc2
 
   ExprLit _ lit -> foldl (collectExpr globalAstMap modName) acc lit

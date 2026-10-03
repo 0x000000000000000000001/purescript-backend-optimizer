@@ -5,6 +5,7 @@ module PureScript.Backend.Optimizer.Directives
   ( parseDirectiveFile
   , parseDirectiveHeader
   , parseDirectiveLine
+  , parseDirectiveLinePS
   , parseDirectiveExport
   , DirectiveFileResult
   , DirectiveHeaderResult
@@ -73,7 +74,17 @@ parseDirectiveHeader moduleName = foldl go { errors: [], locals: Map.empty, expo
     Left <$> parseDirectiveExport moduleName <|> Right <$> parseDirective
 
 parseDirectiveLine :: String -> Either PositionedError (Maybe (Tuple EvalRef (Tuple InlineAccessor InlineDirective)))
-parseDirectiveLine line = fst <$> runParser (lex line) parseDirectiveMaybe
+parseDirectiveLine = parseDirectiveLineImpl parseDirectiveLinePS
+
+-- The common ASCII form avoids constructing the CST lexer for every default
+-- directive. All other syntax and all errors retain this authoritative parser.
+foreign import parseDirectiveLineImpl
+  :: (String -> Either PositionedError (Maybe (Tuple EvalRef (Tuple InlineAccessor InlineDirective))))
+  -> String
+  -> Either PositionedError (Maybe (Tuple EvalRef (Tuple InlineAccessor InlineDirective)))
+
+parseDirectiveLinePS :: String -> Either PositionedError (Maybe (Tuple EvalRef (Tuple InlineAccessor InlineDirective)))
+parseDirectiveLinePS line = fst <$> runParser (lex line) parseDirectiveMaybe
 
 parseDirectiveMaybe :: Parser (Maybe (Tuple EvalRef (Tuple InlineAccessor InlineDirective)))
 parseDirectiveMaybe = Just <$> parseDirective <|> (Nothing <$ eof)

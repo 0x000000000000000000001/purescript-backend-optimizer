@@ -368,9 +368,9 @@ buildModulesParallel runner options coreFnModules = do
         , stats = st.stats { emitMillis = st.stats.emitMillis + (ended - started) }
         }
 
-  -- | Prochain module à convertir : un module prêt (le plus petit indice),
-  -- | sinon un module en attente qui n'attend pas de prédécesseur, sinon le
-  -- | plus petit indice restant. Les modules déjà en vol sont exclus.
+  -- | Prefer ready modules, then speculate only when referenced predecessors
+  -- | are finalized (unreferenced imports may still be pending). If no job is
+  -- | in flight, the lowest remaining rank guarantees forward progress.
   pickModule st
     | Set.size st.inFlight >= runner.jobs = Nothing
     | otherwise = case firstFree st.ready of
@@ -382,7 +382,7 @@ buildModulesParallel runner options coreFnModules = do
               (\i -> not (Map.member i st.waiting) && not (Set.member i st.inFlight))
               pendingIndices
           in
-            case Array.head readyToTry of
+            case Array.find referencesReady readyToTry of
               Just i -> Just (Tuple i true)
               Nothing ->
                 -- Aucun module disponible : si des tentatives sont en vol, les
@@ -393,6 +393,8 @@ buildModulesParallel runner options coreFnModules = do
                   (\i -> Tuple i true) <$> firstFree (Map.keys st.pending)
                 else Nothing
     where
+    referencesReady i = Array.all (\d -> Map.member d st.finalized)
+      (fromMaybe [] (Map.lookup i pairWaits))
     firstFree indices =
       Array.find (\i -> not (Set.member i st.inFlight)) (Set.toUnfoldable indices :: Array Int)
 
@@ -519,11 +521,15 @@ buildModulesParallel runner options coreFnModules = do
         depsLeft' = Map.delete result.index st.depsLeft
         childIndices = fromMaybe [] (Map.lookup result.index children)
         depsLeft'' = foldl (\acc c -> Map.update (\n -> Just (n - 1)) c acc) depsLeft' childIndices
-        newlyReady = Array.filter (\c -> Map.lookup c depsLeft'' == Just 0) childIndices
+        newlyReady = Array.filter
+          (\c -> Map.lookup c depsLeft'' == Just 0 && not (Map.member c woken.waiting))
+          childIndices
       flushCodegen
         { pending: Map.delete result.index st.pending
         , depsLeft: depsLeft''
-        , ready: foldl (flip Set.insert) woken.ready newlyReady
+        , ready: foldl (flip Set.insert)
+            (Set.union (Set.delete result.index st.ready) woken.ready)
+            newlyReady
         , finalized: Map.insert result.index result.backendMod.implementations st.finalized
         , contributions: Map.insert result.index result.backendMod.directives st.contributions
         , privateGlobals: Map.insert result.index (untypedPrivateGlobals result.coreFnModule) st.privateGlobals

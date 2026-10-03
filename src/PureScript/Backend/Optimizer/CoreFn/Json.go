@@ -196,12 +196,52 @@ type ntObject = gopurs_runtime.JSONObjectView
 
 func ntObjectOf(raw any) (ntObject, bool) { return gopurs_runtime.ReadJSONObject(raw) }
 
+// TypeTable.decodeString accepts PSString's JSON encoding: ordinary strings,
+// or arrays of UTF-16 code units when the frontend cannot encode a scalar
+// string. Unlike the expression literal decoder, units must fit in 16 bits.
+// Combine pairs, preserving isolated surrogates in the native WTF-8 form.
+func ntPSString(raw any) (string, bool) {
+	if value, ok := ntNative(raw).(string); ok {
+		return value, true
+	}
+	elements, ok := ntNative(raw).([]any)
+	if !ok {
+		return "", false
+	}
+	var builder strings.Builder
+	var high int64 = -1
+	for _, element := range elements {
+		unit, _, ok := ntInt(element)
+		if !ok || unit < 0 || unit > 0xFFFF {
+			return "", false
+		}
+		if high != -1 {
+			if unit >= 0xDC00 && unit <= 0xDFFF {
+				builder.WriteRune(utf16.DecodeRune(rune(high), rune(unit)))
+				high = -1
+				continue
+			}
+			appendWTF8Json(&builder, high)
+			high = -1
+		}
+		if unit >= 0xD800 && unit <= 0xDBFF {
+			high = unit
+		} else {
+			appendWTF8Json(&builder, unit)
+		}
+	}
+	if high != -1 {
+		appendWTF8Json(&builder, high)
+	}
+	return builder.String(), true
+}
+
 func ntStringField(obj ntObject, key string) (string, gopurs_runtime.Value, bool) {
 	raw, ok := obj.Lookup(key)
 	if !ok {
 		return "", ntAtKey(key, ntMissingValue()), false
 	}
-	value, ok := ntNative(raw).(string)
+	value, ok := ntPSString(raw)
 	if !ok {
 		return "", ntAtKey(key, ntTypeMismatch("Failed decode")), false
 	}

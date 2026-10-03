@@ -105,6 +105,10 @@ func InsertStringImpl(compare gopurs_runtime.Value, k gopurs_runtime.Value, v go
 	return gopurs_runtime.Box(Data_Map_Internal_InsertNative(nativeCompare(compare), k, v, m))
 }
 
+func InsertWithStringImpl(compare gopurs_runtime.Value, f func(interface{}) func(interface{}) interface{}, k gopurs_runtime.Value, v gopurs_runtime.Value, m gopurs_runtime.Value) gopurs_runtime.Value {
+	return gopurs_runtime.Box(Data_Map_Internal_InsertWithImpl(nativeCompare(compare), f, k, v, m))
+}
+
 // UnionStringImpl/UnionWithStringImpl rebuild a String-keyed map with the
 // native comparator; only the combine callback (overlapping keys) stays PS.
 func UnionStringImpl(compare gopurs_runtime.Value, m1 gopurs_runtime.Value, m2 gopurs_runtime.Value) gopurs_runtime.Value {

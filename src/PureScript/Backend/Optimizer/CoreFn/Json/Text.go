@@ -149,12 +149,53 @@ type tc_ntObject = tcCursor
 
 func tc_ntObjectOf(raw tcCursor) (tc_ntObject, bool) { return raw, raw.kind() == '{' }
 
+// TypeTable.decodeString accepts PSString's JSON encoding: ordinary strings,
+// or arrays of UTF-16 code units when the frontend cannot encode a scalar
+// string. Unlike the expression literal decoder, units must fit in 16 bits.
+// Combine pairs, preserving isolated surrogates in the native WTF-8 form.
+func tc_ntPSString(raw tcCursor) (string, bool) {
+	if value, ok := raw.text(); ok {
+		return value, true
+	}
+	elements, ok := raw.array()
+	if !ok {
+		return "", false
+	}
+	var builder strings.Builder
+	var high int64 = -1
+	for cursorLoop := elements.iter(); cursorLoop.more(); {
+		_, element := cursorLoop.next()
+		unit, _, ok := tc_ntInt(element)
+		if !ok || unit < 0 || unit > 0xFFFF {
+			return "", false
+		}
+		if high != -1 {
+			if unit >= 0xDC00 && unit <= 0xDFFF {
+				builder.WriteRune(utf16.DecodeRune(rune(high), rune(unit)))
+				high = -1
+				continue
+			}
+			tc_appendWTF8Json(&builder, high)
+			high = -1
+		}
+		if unit >= 0xD800 && unit <= 0xDBFF {
+			high = unit
+		} else {
+			tc_appendWTF8Json(&builder, unit)
+		}
+	}
+	if high != -1 {
+		tc_appendWTF8Json(&builder, high)
+	}
+	return builder.String(), true
+}
+
 func tc_ntStringField(obj tc_ntObject, key string) (string, gopurs_runtime.Value, bool) {
 	raw, ok := obj.Lookup(key)
 	if !ok {
 		return "", tc_ntAtKey(key, tc_ntMissingValue()), false
 	}
-	value, ok := raw.text()
+	value, ok := tc_ntPSString(raw)
 	if !ok {
 		return "", tc_ntAtKey(key, tc_ntTypeMismatch("Failed decode")), false
 	}
@@ -1421,25 +1462,24 @@ func tc_cndStringLiteralValue(raw tcCursor) gopurs_runtime.Value {
 	// map fromCodePointArray (decodeCodePointArray json), otherwise StringLiteral.
 	if value, failure := tc_cndTry(func() gopurs_runtime.Value {
 		var builder strings.Builder
-		var elements []tcCursor
+		var indexedElements []tcCursor
 		for cursorLoop := tc_cndElements(raw).iter(); cursorLoop.more(); {
 			_, element := cursorLoop.next()
-			elements = append(elements, element)
+			indexedElements = append(indexedElements, element)
 		}
-		for index := 0; index < len(elements); index++ {
-			element := elements[index]
+		for index := 0; index < len(indexedElements); index++ {
 			if _, failure := tc_cndTry(func() gopurs_runtime.Value {
-				codePoint := tc_cndInt(element)
+				codePoint := tc_cndInt(indexedElements[index])
 				if codePoint < 0 || codePoint > 0x10FFFF {
 					tc_cndFail("CodePoint")
 				}
 				// The typed corefn stores strings that are not valid UTF-8 as a
 				// list of UTF-16 code units: combine surrogate pairs and keep
-				// isolated surrogates as WTF-8 (see appendWTF8Text).
-				if codePoint >= 0xD800 && codePoint <= 0xDBFF && index+1 < len(elements) {
+				// isolated surrogates as WTF-8 (see tc_appendWTF8Json).
+				if codePoint >= 0xD800 && codePoint <= 0xDBFF && index+1 < len(indexedElements) {
 					next := int64(0)
 					if _, nextFailure := tc_cndTry(func() gopurs_runtime.Value {
-						next = tc_cndInt(elements[index+1])
+						next = tc_cndInt(indexedElements[index+1])
 						return gopurs_runtime.Value{}
 					}); nextFailure == nil && next >= 0xDC00 && next <= 0xDFFF {
 						builder.WriteRune(rune(0x10000 + ((codePoint-0xD800)<<10 + (next - 0xDC00))))
@@ -1447,7 +1487,7 @@ func tc_cndStringLiteralValue(raw tcCursor) gopurs_runtime.Value {
 						return gopurs_runtime.Value{}
 					}
 				}
-				appendWTF8Text(&builder, codePoint)
+				tc_appendWTF8Json(&builder, codePoint)
 				return gopurs_runtime.Value{}
 			}); failure != nil {
 				tc_cndFailValue(gopurs_runtime.Value{Type: 9, IntVal: tc_cndTagAtIndex, UnsafePtr: unsafe.Pointer(&Constructor_Data_Argonaut_Decode_Error_AtIndex{1, int64(index), failure.err})})
@@ -1461,10 +1501,10 @@ func tc_cndStringLiteralValue(raw tcCursor) gopurs_runtime.Value {
 	return gopurs_runtime.Value{}
 }
 
-// appendWTF8Text writes one decoded code unit, preserving isolated surrogates
+// tc_appendWTF8Json writes one decoded code unit, preserving isolated surrogates
 // as WTF-8 (the native string representation). Go's WriteRune would replace
 // them with U+FFFD, breaking strings that are not valid UTF-8.
-func appendWTF8Text(builder *strings.Builder, codePoint int64) {
+func tc_appendWTF8Json(builder *strings.Builder, codePoint int64) {
 	if codePoint >= 0xD800 && codePoint <= 0xDFFF {
 		builder.WriteByte(0xED)
 		builder.WriteByte(byte(0xA0 | ((codePoint >> 6) & 0x3F)))
