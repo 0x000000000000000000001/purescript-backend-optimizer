@@ -7,6 +7,9 @@ pub fn PureScript_Backend_Optimizer_Monomorphize_sameIdentity(a: Value, b: Value
         (Value::Char(a), Value::Char(b)) => a == b,
         (Value::String(a), Value::String(b)) => a == b,
         (Value::Class(a), Value::Class(b)) => std::rc::Rc::ptr_eq(a, b),
+        // Shared owners are stored unsized: the data address is the identity.
+        (Value::ClassShared(a), Value::ClassShared(b)) =>
+            a.as_ref() as *const _ as *const u8 == b.as_ref() as *const _ as *const u8,
         (Value::Array(a), Value::Array(b)) => std::rc::Rc::ptr_eq(a, b),
         (Value::IntArray(a), Value::IntArray(b)) => std::rc::Rc::ptr_eq(a, b),
         _ => false,

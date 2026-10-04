@@ -56,13 +56,12 @@ test("negating negative zero produces positive zero", () => {
 
 test("a dynamic Number uses unary negation", () => {
   const value = new Sem.NeutVar(qualified("Fixture", "number"));
-  const result = apply(dictionary("Data.Ring", "ringNumber"), value);
-  assert.deepStrictEqual(result, new Sem.NeutPrimOp(new S.Op1(S.OpNumberNegate.value, value)));
+  assert.deepStrictEqual(apply(dictionary("Data.Ring", "ringNumber"), value),
+    new Sem.NeutPrimOp(new S.Op1(S.OpNumberNegate.value, value)));
 });
 
 test("the Int dictionary uses integer negation", () => {
-  const result = apply(dictionary("Data.Ring", "ringInt"), integer(42));
-  assert.deepStrictEqual(result, integer(-42));
+  assert.deepStrictEqual(apply(dictionary("Data.Ring", "ringInt"), integer(42)), integer(-42));
   const value = new Sem.NeutVar(qualified("Fixture", "integer"));
   assert.deepStrictEqual(apply(dictionary("Data.Ring", "ringInt"), value),
     new Sem.NeutPrimOp(new S.Op1(S.OpIntNegate.value, value)));

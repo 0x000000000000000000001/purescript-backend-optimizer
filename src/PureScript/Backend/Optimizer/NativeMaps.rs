@@ -20,9 +20,35 @@ fn purust_compare_string(a: &Value, b: &Value) -> KeyOrdering {
 fn purust_compare_int(a: &Value, b: &Value) -> KeyOrdering {
     a.unwrap_int().cmp(&b.unwrap_int())
 }
+// Keys arrive either as a legacy nested Class(Rc<Qualified>) or as a shared
+// owner erased unsized by the generator. Keep the borrow: comparisons must not
+// touch a refcount.
+enum PurustQualifiedRef<'a> {
+    Nested(&'a Rc<Qualified>),
+    Shared(&'a Qualified),
+}
+impl PurustQualifiedRef<'_> {
+    fn as_ref(&self) -> &Qualified {
+        match self {
+            PurustQualifiedRef::Nested(value) => value.as_ref(),
+            PurustQualifiedRef::Shared(value) => value,
+        }
+    }
+}
+fn purust_qualified_ref(value: &Value) -> PurustQualifiedRef<'_> {
+    match value.resolve() {
+        Value::Class(payload) => PurustQualifiedRef::Nested(
+            payload.downcast_ref::<Rc<Qualified>>().expect("Expected a Qualified map key")),
+        Value::ClassShared(payload) => PurustQualifiedRef::Shared(
+            payload.downcast_ref::<Qualified>().expect("Expected a Qualified map key")),
+        _ => panic!("Expected a Qualified map key"),
+    }
+}
 fn purust_compare_qualified(a: &Value, b: &Value) -> KeyOrdering {
-    let Qualified::Qualified(am, ai) = a.unwrap_class::<Rc<Qualified>>().as_ref();
-    let Qualified::Qualified(bm, bi) = b.unwrap_class::<Rc<Qualified>>().as_ref();
+    let a = purust_qualified_ref(a);
+    let b = purust_qualified_ref(b);
+    let Qualified::Qualified(am, ai) = a.as_ref();
+    let Qualified::Qualified(bm, bi) = b.as_ref();
     let module = match (am.as_ref(), bm.as_ref()) {
         (Maybe::Nothing, Maybe::Nothing) => KeyOrdering::Equal,
         (Maybe::Nothing, _) => KeyOrdering::Less,

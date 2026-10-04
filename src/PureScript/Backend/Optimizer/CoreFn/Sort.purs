@@ -87,5 +87,9 @@ resumePull (Pull { resume }) = resume
 sortModules :: forall f a. Foldable f => f (Module a) -> List (Module a)
 sortModules init = do
   let modIndex = foldr (\m -> Map.insert (moduleName m) (Tuple false m)) Map.empty init
-  let modStk = foldr (List.Cons <<< Right <<< moduleName) List.Nil init
+  -- Filesystem enumeration is host-dependent. Visit roots in module-name
+  -- order, as emptyPull does, so unrelated modules get stable ranks too.
+  -- PBO's predecessor visibility (including specialized references) depends
+  -- on these ranks, even when both traversals are valid topological orders.
+  let modStk = foldr (List.Cons <<< Right <<< moduleName <<< snd) List.Nil modIndex
   runSort modIndex modStk

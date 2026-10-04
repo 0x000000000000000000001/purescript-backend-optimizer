@@ -81,6 +81,10 @@ import PureScript.Backend.Optimizer.Syntax as Syn
 import PureScript.Backend.Optimizer.TypeSubstitution as TypeSubstitution
 import PureScript.Backend.Optimizer.Utils (foldl1Array, foldr1Array)
 
+-- Keep this primitive across compiler bootstraps. Specializing the generic
+-- Ring dictionary can expose `zero - a`, which loses the sign when a is +0.
+foreign import negateNumber :: Number -> Number
+
 -- | Alias pour un tableau d'arguments appliqués séquentiellement (l'épine).
 type Spine a = Array a
 
@@ -931,7 +935,7 @@ evalPrimOp env = case _ of
             liftInt (negate a)
       OpNumberNegate, _
         | NeutLit (LitNumber a) <- deref x ->
-            liftNumber (negate a)
+            liftNumber (negateNumber a)
       _, _ -> case unwrapSemTyped x of
         SemRef ref spine sem ->
           evalRef env ref spine (ExternPrimOp op1) sem

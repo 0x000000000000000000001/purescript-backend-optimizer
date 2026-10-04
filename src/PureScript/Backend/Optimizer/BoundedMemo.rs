@@ -27,6 +27,18 @@ fn purust_memo_key(value: &Value) -> Option<PurustMemoKey> {
                 K::Pointer(0, Rc::as_ptr(v) as *const () as usize)
             }
         },
+        Value::ClassShared(v) => {
+            // The owner is stored unsized: its data address is the shared tree
+            // identity, matching the nested Class key above. Entries retain the
+            // Values, so the allocation cannot be reused while cached.
+            if let Some(tree) = v.downcast_ref::<Purs_PureScript_Backend_Optimizer_CoreFn::ExprType>() {
+                K::Pointer(3, tree as *const _ as usize)
+            } else if let Some(tree) = v.downcast_ref::<Purs_PureScript_Backend_Optimizer_Syntax::BackendSyntax>() {
+                K::Pointer(4, tree as *const _ as usize)
+            } else {
+                K::Pointer(0, Rc::as_ptr(v) as *const () as usize)
+            }
+        },
         Value::Array(v) => K::Pointer(1, Rc::as_ptr(v) as usize),
         Value::IntArray(v) => K::Pointer(2, Rc::as_ptr(v) as usize),
         _ => return None,

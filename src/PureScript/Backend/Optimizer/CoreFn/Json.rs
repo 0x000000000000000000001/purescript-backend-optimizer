@@ -659,7 +659,10 @@ mod purust_module {
                 let expression = expr(module, table, &obj.get("expression")?)?;
                 let type_argument = int(&obj.get("typeArgument")?)?;
                 let entry = table_entry(table, type_argument)?;
-                let ty = entry.unwrap_class::<Rc<ExprType>>().clone();
+                // Type-table entries are shared owners, erased unsized by the
+                // generator and nested by legacy Class boxes; the helper reads
+                // both forms.
+                let ty = entry.unwrap_class_shared::<ExprType>();
                 Expr::ExprTypeApp(annotation, expression, ty)
             }
             "Case" => {
@@ -869,14 +872,15 @@ pub fn PureScript_Backend_Optimizer_CoreFn_Json_decodeArrayImpl(
     for (index, item) in items.enumerate() {
         // Exactly one callback per element, in order.
         let decoded = decoder(item);
-        let Value::Class(payload) = decoded.resolve() else { panic!("Expected Either") };
-        let either = payload.downcast_ref::<Rc<Purs_Data_Either::Either>>().expect("Expected Either");
+        // Decoder callbacks may return either carrier: nested Class (legacy)
+        // or the unsized shared owner emitted by the generator.
+        let either = decoded.unwrap_class_shared::<Purs_Data_Either::Either>();
         match either.as_ref() {
             // Stop at the first Left and wrap it exactly like decodeArrayPS.
             // The fallback is never re-run here: the callback may be expensive
             // or effectful and every element is decoded at most once.
             Purs_Data_Either::Either::Left(error) => {
-                let error = error.unwrap_class::<Rc<Purs_Data_Argonaut_Decode_Error::JsonDecodeError>>().clone();
+                let error = error.unwrap_class_shared::<Purs_Data_Argonaut_Decode_Error::JsonDecodeError>();
                 let at_index = Value::Class(Rc::new(Rc::new(
                     Purs_Data_Argonaut_Decode_Error::JsonDecodeError::AtIndex(index as i64, error))));
                 return Value::Class(Rc::new(Rc::new(Purs_Data_Either::Either::Left(at_index))));

@@ -44,7 +44,12 @@ struct PurustUsageChecker {
 
 fn purust_usage_class<T: std::any::Any + 'static>(value: &Value) -> Option<&T> {
     match value.resolve() {
-        Value::Class(payload) => payload.downcast_ref::<T>(),
+        // Nested legacy Class boxes share an Rc payload; shared owners are
+        // erased unsized by the generator.
+        Value::Class(payload) => payload
+            .downcast_ref::<Rc<T>>()
+            .map(|node| &**node),
+        Value::ClassShared(payload) => payload.downcast_ref::<T>(),
         _ => None,
     }
 }
@@ -53,11 +58,11 @@ fn purust_usage_node<T: std::any::Any + 'static>(value: &Value) -> Result<&T, Pu
     purust_usage_class::<T>(value).ok_or(PurustUsageError::Malformed)
 }
 
-// `Maybe` values are boxed as `Value::Class(Rc<Maybe>)` in every generated and
-// decoded position.
+// `Maybe` values are boxed as `Value::Class(Rc<Maybe>)` by legacy/native
+// decoders and as `Value::ClassShared` (owner erased unsized) by the generator.
 fn purust_usage_maybe(value: &Value) -> Option<Option<&Value>> {
-    let maybe = purust_usage_class::<Rc<Maybe>>(value)?;
-    Some(match maybe.as_ref() {
+    let maybe = purust_usage_class::<Maybe>(value)?;
+    Some(match maybe {
         Maybe::Nothing => None,
         Maybe::Just(item) => Some(item),
     })
@@ -163,8 +168,8 @@ fn purust_usage_for_each_literal_value(
         }
         Literal::LitRecord(entries) => {
             for entry in purust_usage_array(entries)?.iter() {
-                let prop = purust_usage_node::<Rc<Prop>>(entry)?;
-                match prop.as_ref() {
+                let prop = purust_usage_node::<Prop>(entry)?;
+                match prop {
                     Prop::Prop(_, value) => visit(value)?,
                 }
             }
@@ -212,7 +217,7 @@ impl PurustUsageChecker {
     }
 
     fn expression_value(&mut self, value: &Value) -> Result<(), PurustUsageError> {
-        let node = purust_usage_node::<Rc<Expr>>(value)?;
+        let node = purust_usage_node::<Expr>(value)?;
         self.expression(node)
     }
 
@@ -262,8 +267,8 @@ impl PurustUsageChecker {
                 self.plain(ann)?;
                 self.expression(expression)?;
                 for field in purust_usage_array(fields)?.iter() {
-                    let prop = purust_usage_node::<Rc<Prop>>(field)?;
-                    match prop.as_ref() {
+                    let prop = purust_usage_node::<Prop>(field)?;
+                    match prop {
                         Prop::Prop(_, value) => self.expression_value(value)?,
                     }
                 }
@@ -312,8 +317,8 @@ impl PurustUsageChecker {
 
     fn bindings(&mut self, group: &Value) -> Result<(), PurustUsageError> {
         for item in purust_usage_array(group)?.iter() {
-            let node = purust_usage_node::<Rc<Bind>>(item)?;
-            match node.as_ref() {
+            let node = purust_usage_node::<Bind>(item)?;
+            match node {
                 Bind::NonRec(binding) => {
                     let (ann, ident, expression) = match binding.as_ref() {
                         Binding::Binding(ann, ident, expression) => (ann, ident, expression),
@@ -328,15 +333,15 @@ impl PurustUsageChecker {
                     // Rec: every annotation registers first, then every
                     // expression sees the complete group.
                     for binding in items.iter() {
-                        let node = purust_usage_node::<Rc<Binding>>(binding)?;
-                        let (ann, ident) = match node.as_ref() {
+                        let node = purust_usage_node::<Binding>(binding)?;
+                        let (ann, ident) = match node {
                             Binding::Binding(ann, ident, _) => (ann, ident),
                         };
                         self.register(ann, ident)?;
                     }
                     for binding in items.iter() {
-                        let node = purust_usage_node::<Rc<Binding>>(binding)?;
-                        let expression = match node.as_ref() {
+                        let node = purust_usage_node::<Binding>(binding)?;
+                        let expression = match node {
                             Binding::Binding(_, _, expression) => expression,
                         };
                         self.expression(expression)?;
@@ -348,8 +353,8 @@ impl PurustUsageChecker {
     }
 
     fn alternative(&mut self, alternative: &Value) -> Result<(), PurustUsageError> {
-        let node = purust_usage_node::<Rc<CaseAlternative>>(alternative)?;
-        let (patterns, result) = match node.as_ref() {
+        let node = purust_usage_node::<CaseAlternative>(alternative)?;
+        let (patterns, result) = match node {
             CaseAlternative::CaseAlternative(patterns, result) => (patterns, result),
         };
         for pattern in purust_usage_array(patterns)?.iter() {
@@ -359,8 +364,8 @@ impl PurustUsageChecker {
             CaseGuard::Unconditional(expression) => self.expression(expression),
             CaseGuard::Guarded(guards) => {
                 for guard in purust_usage_array(guards)?.iter() {
-                    let node = purust_usage_node::<Rc<Guard>>(guard)?;
-                    let (condition, expression) = match node.as_ref() {
+                    let node = purust_usage_node::<Guard>(guard)?;
+                    let (condition, expression) = match node {
                         Guard::Guard(condition, expression) => (condition, expression),
                     };
                     self.expression(condition)?;
@@ -372,7 +377,7 @@ impl PurustUsageChecker {
     }
 
     fn binder_value(&mut self, value: &Value) -> Result<(), PurustUsageError> {
-        let node = purust_usage_node::<Rc<Binder>>(value)?;
+        let node = purust_usage_node::<Binder>(value)?;
         self.binder(node)
     }
 
@@ -405,7 +410,7 @@ impl PurustUsageChecker {
             Bind::NonRec(binding) => self.top_binding(binding),
             Bind::Rec(group) => {
                 for binding in purust_usage_array(group)?.iter() {
-                    let node = purust_usage_node::<Rc<Binding>>(binding)?;
+                    let node = purust_usage_node::<Binding>(binding)?;
                     self.top_binding(node)?;
                 }
                 Ok(())
@@ -443,13 +448,13 @@ impl PurustUsageChecker {
         self.module_name = name.clone();
         // Imports cannot carry facts: only `plain` runs for each of them.
         for import in purust_usage_array(imports)?.iter() {
-            let node = purust_usage_node::<Rc<Import>>(import)?;
-            match node.as_ref() {
+            let node = purust_usage_node::<Import>(import)?;
+            match node {
                 Import::Import(ann, _) => self.plain(ann)?,
             }
         }
         for bind in purust_usage_array(decls)?.iter() {
-            let node = purust_usage_node::<Rc<Bind>>(bind)?;
+            let node = purust_usage_node::<Bind>(bind)?;
             self.top(node)?;
         }
         Ok(())
