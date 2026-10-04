@@ -37,6 +37,13 @@ function chain(length, end = "leaf") {
   return insert(`Chain.${end}`)(new C.Binding(ann(ii), end, identity))(globals);
 }
 
+// Reset every caller set to the seed caller while keeping keys, instantiations
+// and substitution identities: a legitimate initial map whose caller
+// contributions have not propagated yet.
+const shrinkCallers = map => entries(map).reduce((outer, { value0: name, value1: instantiations }) =>
+  insert(name)(entries(instantiations).reduce((inner, { value0: key, value1: info }) =>
+    insert(key)({ ...info, callers: Set.singleton("Caller") })(inner), M.empty))(outer), M.empty);
+
 function normalize(map) {
   return entries(map).map(({ value0: name, value1: instantiations }) => [name,
     entries(instantiations).map(({ value0: key, value1: info }) => [key, {
@@ -106,6 +113,38 @@ test("out-of-order jobs discover the same transitive fixed point and reuse stabl
   assert.ok(rounds.length > 2, "exercise a genuine multi-round fixed point");
   assert.ok(rounds.some(round => round.count > 1), "exercise changed completion order");
   assert.ok(rounds.some(round => round.reused > 0), "exercise contribution-cache reuse across rounds");
+});
+
+test("key-complete map with pending callers ends on an all-reused round", async () => {
+  const globals = chain(8);
+  const completed = Mono.transitiveCollect(globals)(initial);
+  const seeded = shrinkCallers(completed);
+  const { actual, rounds } = await collect(globals, seeded);
+  const specKeys = map => normalize(map).map(([name, entries]) => [name, entries.map(([key]) => key)]);
+  assert.deepEqual(specKeys(actual), specKeys(completed),
+    "pending callers must close on the same specializations");
+  assert.equal(rounds.length, 2, "one fresh round, then one cache-only round");
+  assert.equal(rounds[0].reused, 0, "the first round computes every entry");
+  const terminal = rounds.at(-1);
+  assert.ok(terminal.count > 0 && terminal.reused === terminal.count,
+    "the terminal round must be served entirely from the contribution cache");
+});
+
+test("entirely dead map dispatches no job and returns the input unchanged", async () => {
+  const identity = new C.ExprAbs(ann(ii), "x", new C.ExprVar(ann(int), new C.Qualified(nothing, "x")));
+  let globals = chain(5);
+  globals = insert("Chain.typedOnly")(new C.Binding(ann(ii), "typedOnly", identity))(globals);
+  globals = insert("Chain.noCallers")(new C.Binding(ann(ii), "noCallers", identity))(globals);
+  // A name without a binding, an instantiation type still carrying a variable
+  // and an entry without callers: every guard that can only return Nothing.
+  const dead = input => insert("Chain.typedOnly")(singleton("seed")({ ...seedInfo, instType: new C.TypeVar("a") }))(
+    insert("Chain.noCallers")(singleton("seed")({ ...seedInfo, callers: Set.empty }))(
+    insert("Data.Ring.negate")(singleton("seed")(seedInfo))(input)));
+  const before = dead(M.empty);
+  const { actual, rounds } = await collect(globals, before);
+  assert.deepEqual(normalize(actual), normalize(before), "dead entries must be returned unchanged");
+  assert.equal(rounds.length, 1, "a fully dead map must terminate in one round");
+  assert.equal(rounds[0].count, 0, "no job may be dispatched for dead entries");
 });
 
 const typeVariable = new C.TypeVar("a");

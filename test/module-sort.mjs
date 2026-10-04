@@ -1,4 +1,4 @@
-// After building Purust: node test/module-sort.mjs ../purust/purust/output
+// After building gopurs: node test/module-sort.mjs ../gopurs/gopurs/output
 import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';

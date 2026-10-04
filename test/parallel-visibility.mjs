@@ -16,11 +16,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const output = process.argv[2] ? resolve(process.argv[2])
   : fileURLToPath(new URL("../output/", import.meta.url));
 const load = name => import(pathToFileURL(resolve(output, name, "index.js")));
-const [B, C, Convert, Cache, Maybe, Map, Set, List, Foldable, Ord, Ref, Syntax, Tuple, EffectClass] = await Promise.all([
+const [B, C, Convert, Cache, Maybe, Map, Set, List, Foldable, Ord, Ref, Syntax, Tuple, EffectClass, S, U] = await Promise.all([
   "PureScript.Backend.Optimizer.Builder", "PureScript.Backend.Optimizer.CoreFn",
   "PureScript.Backend.Optimizer.Convert", "PureScript.Backend.Optimizer.Cache",
   "Data.Maybe", "Data.Map", "Data.Set", "Data.List", "Data.Foldable", "Data.Ord",
   "Effect.Ref", "PureScript.Backend.Optimizer.Syntax", "Data.Tuple", "Effect.Class",
+  "PureScript.Backend.Optimizer.Semantics", "Data.Unfoldable",
 ].map(load));
 const nothing = Maybe.Nothing.value;
 const externMissing = Convert.ExternMissing.value;
@@ -35,8 +36,8 @@ const moduleOf = (name, entries, comments = []) => ({
   decls: entries.map(([ident, expr]) => new C.NonRec(new C.Binding(ann, ident, expr))),
 });
 
-const options = collect => ({
-  directives: Map.empty,
+const options = (collect, directives = Map.empty) => ({
+  directives,
   analyzeCustom: () => () => nothing,
   foreignSemantics: Map.empty,
   traceIdents: Set.empty,
@@ -48,9 +49,9 @@ const options = collect => ({
   },
 });
 
-const runReference = modules => {
+const runReference = (modules, directives = Map.empty) => {
   const collect = [];
-  B.buildModules(EffectClass.monadEffectEffect)(options(collect))(List.fromFoldable(Foldable.foldableArray)(modules))();
+  B.buildModules(EffectClass.monadEffectEffect)(options(collect, directives))(List.fromFoldable(Foldable.foldableArray)(modules))();
   return collect;
 };
 
@@ -75,9 +76,9 @@ const makeScheduler = order => {
   };
 };
 
-const runParallel = (modules, order, jobs = 4) => {
+const runParallel = (modules, order, jobs = 4, directives = Map.empty) => {
   const collect = [];
-  B.buildModulesParallel(EffectClass.monadEffectEffect)({ jobs, scheduler: makeScheduler(order), onStats: Maybe.Nothing.value })(options(collect))(List.fromFoldable(Foldable.foldableArray)(modules))();
+  B.buildModulesParallel(EffectClass.monadEffectEffect)({ jobs, scheduler: makeScheduler(order), onStats: Maybe.Nothing.value })(options(collect, directives))(List.fromFoldable(Foldable.foldableArray)(modules))();
   return collect;
 };
 
@@ -90,6 +91,13 @@ const bindingOf = (collected, module, ident) => {
   while (expression instanceof Syntax.Typed) expression = expression.value1;
   return expression;
 };
+
+const directivesOf = collected => collected.map(entry => [entry.name,
+  Map.toUnfoldable(U.unfoldableArray)(entry.backendMod.directives).map(({ value0: ref, value1: inner }) => [
+    ref.value0,
+    Map.toUnfoldable(U.unfoldableArray)(inner).map(({ value0: key, value1: value }) => [key, value]),
+  ]),
+]);
 
 const isolatedPurmeta = t => {
   const previous = process.cwd();
@@ -165,5 +173,25 @@ test("parallel directive contributions match sequential accumulation", t => {
   for (const [module, ident] of [["B", "use"], ["C", "use"]]) {
     assert.ok(!(bindingOf(reference, module, ident) instanceof Syntax.Lit), `${module}.${ident} must keep the call`);
     assert.ok(!(bindingOf(parallel, module, ident) instanceof Syntax.Lit), `${module}.${ident} must keep the call in parallel`);
+  }
+});
+test("out-of-order completions preserve base and module directive precedence", t => {
+  isolatedPurmeta(t);
+  const inlineRef = value => Map.singleton(S.InlineRef.value)(value);
+  const base = Map.fromFoldable(S.ordEvalRef)(Foldable.foldableArray)([
+    new Tuple.Tuple(new S.EvalExtern(new C.Qualified(just("A"), "g")), inlineRef(S.InlineNever.value)),
+    new Tuple.Tuple(new S.EvalExtern(new C.Qualified(just("B"), "f")), inlineRef(S.InlineAlways.value)),
+  ]);
+  const modules = [
+    moduleOf("A", [["f", literal(1)], ["g", literal(2)]], [new C.LineComment("@inline export f never")]),
+    moduleOf("B", [["f", literal(3)], ["g", literal(4)]], [new C.LineComment("@inline export g always")]),
+    moduleOf("C", [["useA", variable("A", "g")], ["useB", variable("B", "f")]]),
+    moduleOf("D", [["useB", variable("B", "g")], ["useC", variable("C", "useA")]]),
+    moduleOf("E", [["useD", variable("D", "useC")]]),
+  ];
+  const reference = runReference(modules, base);
+  for (const order of ["eager", "lifo"]) {
+    const parallel = runParallel(modules, order, 3, base);
+    assert.deepEqual(directivesOf(parallel), directivesOf(reference), order);
   }
 });

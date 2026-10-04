@@ -30,6 +30,7 @@ import Prelude
 import Control.Monad.Rec.Class (class MonadRec, Step(..), tailRecM)
 import Data.Array as Array
 import Data.Foldable (foldl)
+import Data.FoldableWithIndex (foldrWithIndex)
 import Data.FunctorWithIndex (mapWithIndex)
 import Data.Identity (Identity(..))
 import Data.Map (Map)
@@ -76,6 +77,9 @@ type TransitiveResult = Maybe
 type TransitiveState =
   { prepared :: PreparedInstantiations
   , instantiations :: InstantiationMap
+  -- Caller sets only grow (merges union them), so the right-hand count of a
+  -- round is the left-hand count of the next one: no need to rescan the map.
+  , callers :: Int
   }
 
 -- Private identity guard for immutable compiler inputs, not semantic equality.
@@ -1316,96 +1320,123 @@ transitiveCollectWith
   -> InstantiationMap
   -> m InstantiationMap
 transitiveCollectWith runJobs globalAstMap initialMap =
-  tailRecM loop { prepared: Map.empty, instantiations: initialMap }
+  tailRecM loop
+    { prepared: Map.empty
+    , instantiations: initialMap
+    , callers: countCallers initialMap
+    }
   where
   loop :: TransitiveState -> m (Step TransitiveState InstantiationMap)
-  loop { prepared, instantiations: currentMap } = do
+  loop { prepared, instantiations: currentMap, callers: callers1 } = do
     let
       -- Foreign declarations have no AST body from which to emit a specialization.
       -- Keep their collected type information, but never embed nonexistent
       -- specialized foreign names in another specialization's static arguments.
       specializationMap = Map.filterKeys (\name -> Map.member name globalAstMap) currentMap
+      -- Only entries that can still contribute get a job. Foreign/intrinsic
+      -- names, typed-only instantiations and caller-less entries can only
+      -- return `Nothing`; filtering them here means skipped entries cost
+      -- neither the `definerMod` split nor a prepared-cache lookup, round
+      -- after round.
       jobs = Array.concatMap
         ( \(Tuple qualName typeMap) ->
-            map
-              (\(Tuple specKey info) _ -> collectEntry specializationMap prepared qualName specKey info)
-              (Map.toUnfoldable typeMap :: Array _)
+            case Map.lookup qualName globalAstMap of
+              Nothing -> []
+              Just binding ->
+                Array.mapMaybe
+                  ( \(Tuple specKey info) ->
+                      if hasTypeVariables info.instType || Set.isEmpty info.callers then Nothing
+                      else Just (\_ -> collectEntry specializationMap prepared binding qualName specKey info)
+                  )
+                  (Map.toUnfoldable typeMap :: Array _)
         )
         (Map.toUnfoldable currentMap :: Array _)
     results <- runJobs jobs
-    let
-      collected = Array.foldl mergeResult { instantiations: currentMap, prepared } results
-      newMap = collected.instantiations
+    if Array.all settledResult results then
+      -- Every contribution is `Nothing` or a reused cache hit, and a reused
+      -- contribution is exactly what `currentMap` already holds (it was merged
+      -- when first computed, dependency sizes still match and caller sets only
+      -- grow): `mergeResult` would be the identity. Skip the fold, the final
+      -- round's discarded merge and both caller scans.
+      pure (Done currentMap)
+    else do
+      let
+        collected = Array.foldl mergeResult
+          { prepared, instantiations: currentMap, callers: callers1 }
+          results
+        newMap = collected.instantiations
+        callers2 = countCallers newMap
+      pure $ if callers1 == callers2 then Done currentMap else Loop (collected { callers = callers2 })
 
-      countCallers m = Array.foldl
-        ( \acc (Tuple _ typeMap) ->
-            acc + Array.foldl (\a (Tuple _ info) -> a + Set.size info.callers) 0 (Map.toUnfoldable typeMap :: Array _)
-        )
-        0
-        (Map.toUnfoldable m :: Array _)
-      callers1 = countCallers currentMap
-      callers2 = countCallers newMap
-    pure $ if callers1 == callers2 then Done currentMap else Loop collected
+  -- `Nothing` jobs and replayed cache hits cannot change the map.
+  settledResult :: TransitiveResult -> Boolean
+  settledResult = case _ of
+    Nothing -> true
+    Just { reused } -> reused
 
-  collectEntry :: InstantiationMap -> PreparedInstantiations -> String -> String -> Instantiation -> TransitiveResult
-  collectEntry specializationMap prepared qualName specKey info =
+  collectEntry :: InstantiationMap -> PreparedInstantiations -> Binding Ann -> String -> String -> Instantiation -> TransitiveResult
+  collectEntry specializationMap prepared (Binding _ _ expr) qualName specKey info =
     let
       definerMod = case String.split (Pattern ".") qualName of
         parts -> String.joinWith "." (fromMaybe [] (Array.init parts))
 
-      genericExprOpt = Map.lookup qualName globalAstMap
+      stripForAlls = case _ of
+        ForAll _ b -> stripForAlls b
+        x -> x
+      astSubstFn t = substituteExprType info.subst (stripForAlls t)
+      cacheKey = Tuple qualName specKey
+      previous = case Map.lookup cacheKey prepared of
+        Just old | sameInstantiationInputs old.info info -> Just old
+        _ -> Nothing
+      reused = case previous of
+        Just cached | sameDependencySizes specializationMap cached.dependencies -> Just cached
+        _ -> Nothing
+      entry = case reused of
+        Just cached -> cached
+        _ ->
+          let
+            substitutedExpr = case previous of
+              Just cached -> cached.expr
+              Nothing ->
+                let
+                  exprWithDicts = applyStaticArgs info.dictArgs info.normalArgs expr
+                  resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
+                in rewriteExpr globalAstMap Map.empty Map.empty astSubstFn resolvedExpr
+            dependencies = case previous of
+              Just cached -> mapWithIndex (\name _ -> specializationCount specializationMap name) cached.dependencies
+              Nothing -> Map.fromFoldable (map (\name -> Tuple name (specializationCount specializationMap name)) (Set.toUnfoldable (collectDependencies substitutedExpr) :: Array String))
+            specializedExpr = monomorphizeExpr definerMod specializationMap Map.empty substitutedExpr
+          in
+            { info
+            , expr: substitutedExpr
+            , dependencies
+            , contribution: collectExpr globalAstMap definerMod Map.empty specializedExpr
+            }
     in
-      case genericExprOpt of
-        Just (Binding _ _ expr) ->
-          if hasTypeVariables info.instType || Set.isEmpty info.callers then Nothing
-          else
-            let
-              stripForAlls = case _ of
-                ForAll _ b -> stripForAlls b
-                x -> x
-              astSubstFn t = substituteExprType info.subst (stripForAlls t)
-              cacheKey = Tuple qualName specKey
-              previous = case Map.lookup cacheKey prepared of
-                Just old | sameInstantiationInputs old.info info -> Just old
-                _ -> Nothing
-              reused = case previous of
-                Just cached | sameDependencySizes specializationMap cached.dependencies -> Just cached
-                _ -> Nothing
-              entry = case reused of
-                Just cached -> cached
-                _ ->
-                  let
-                    substitutedExpr = case previous of
-                      Just cached -> cached.expr
-                      Nothing ->
-                        let
-                          exprWithDicts = applyStaticArgs info.dictArgs info.normalArgs expr
-                          resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
-                        in rewriteExpr globalAstMap Map.empty Map.empty astSubstFn resolvedExpr
-                    dependencies = case previous of
-                      Just cached -> mapWithIndex (\name _ -> specializationCount specializationMap name) cached.dependencies
-                      Nothing -> Map.fromFoldable (map (\name -> Tuple name (specializationCount specializationMap name)) (Set.toUnfoldable (collectDependencies substitutedExpr) :: Array String))
-                    specializedExpr = monomorphizeExpr definerMod specializationMap Map.empty substitutedExpr
-                  in
-                    { info
-                    , expr: substitutedExpr
-                    , dependencies
-                    , contribution: collectExpr globalAstMap definerMod Map.empty specializedExpr
-                    }
-            in
-              Just
-                { key: cacheKey
-                , entry
-                , reused: case reused of
-                    Just _ -> true
-                    Nothing -> false
-                }
-        Nothing -> Nothing
+      Just
+        { key: cacheKey
+        , entry
+        , reused: case reused of
+            Just _ -> true
+            Nothing -> false
+        }
 
+  -- Do not re-merge a contribution a previous round already merged: while its
+  -- dependency key sizes hold, the cached contribution is identical, and caller
+  -- sets only grow, so the union would be the identity.
   mergeResult :: TransitiveState -> TransitiveResult -> TransitiveState
   mergeResult acc = case _ of
     Nothing -> acc
-    Just { key, entry, reused } ->
-      { instantiations: mergeInstantiations acc.instantiations entry.contribution
-      , prepared: if reused then acc.prepared else Map.insert key entry acc.prepared
-      }
+    Just { key, entry, reused }
+      | reused -> acc
+      | otherwise ->
+          { instantiations: mergeInstantiations acc.instantiations entry.contribution
+          , prepared: Map.insert key entry acc.prepared
+          , callers: acc.callers
+          }
+
+  -- One indexed fold per map: no `Map.toUnfoldable` tuple array per round.
+  countCallers :: InstantiationMap -> Int
+  countCallers = foldrWithIndex
+    (\_ typeMap acc -> acc + foldrWithIndex (\_ info a -> a + Set.size info.callers) 0 typeMap)
+    0
