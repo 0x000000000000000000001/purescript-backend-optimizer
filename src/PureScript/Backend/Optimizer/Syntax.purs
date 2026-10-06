@@ -3,9 +3,10 @@ module PureScript.Backend.Optimizer.Syntax where
 import Prelude
 
 import Data.Array.NonEmpty (NonEmptyArray)
+import Data.Foldable as Foldable
 import Data.Maybe (Maybe)
 import Data.Newtype (class Newtype)
-import Data.Traversable (class Foldable, class Traversable, foldMap, foldlDefault, foldrDefault, sequenceDefault, traverse)
+import Data.Traversable (class Foldable, class Traversable, foldMap, sequenceDefault, traverse)
 import Data.Tuple (Tuple)
 import PureScript.Backend.Optimizer.CoreFn (ConstructorType, ExprType, Ident, Literal(..), Prop, ProperName, Qualified)
 
@@ -312,8 +313,67 @@ derive instance Eq a => Eq (BackendEffect a)
 derive instance Functor BackendSyntax
 
 instance Foldable BackendSyntax where
-  foldr a = foldrDefault a
-  foldl a = foldlDefault a
+  -- Traverse the immediate children directly. The generic defaults first build
+  -- a FreeMonoidTree, allocating temporary nodes for every syntax traversal.
+  -- Keep exactly the same child order as foldMap, including nested containers.
+  foldl f z = case _ of
+    Var _ -> z
+    Local _ _ -> z
+    Lit lit -> case lit of
+      LitArray as -> Foldable.foldl f z as
+      LitRecord as -> Foldable.foldl (Foldable.foldl f) z as
+      _ -> z
+    App a bs -> Foldable.foldl f (f z a) bs
+    TypeApp a _ -> f z a
+    Abs _ b -> f z b
+    UncurriedApp a bs -> Foldable.foldl f (f z a) bs
+    UncurriedAbs _ b -> f z b
+    UncurriedEffectApp a bs -> Foldable.foldl f (f z a) bs
+    UncurriedEffectAbs _ b -> f z b
+    Accessor a _ -> f z a
+    Update a bs -> Foldable.foldl (Foldable.foldl f) (f z a) bs
+    LetRec _ as b -> f (Foldable.foldl (Foldable.foldl f) z as) b
+    Let _ _ b c -> f (f z b) c
+    EffectBind _ _ b c -> f (f z b) c
+    EffectPure a -> f z a
+    EffectDefer a -> f z a
+    Branch as b -> f (Foldable.foldl (Foldable.foldl f) z as) b
+    PrimOp a -> Foldable.foldl f z a
+    PrimEffect a -> Foldable.foldl f z a
+    PrimUndefined -> z
+    CtorSaturated _ _ _ _ es -> Foldable.foldl (Foldable.foldl f) z es
+    CtorDef _ _ _ _ -> z
+    Fail _ -> z
+    Typed _ a -> f z a
+  foldr f z = case _ of
+    Var _ -> z
+    Local _ _ -> z
+    Lit lit -> case lit of
+      LitArray as -> Foldable.foldr f z as
+      LitRecord as -> Foldable.foldr (flip (Foldable.foldr f)) z as
+      _ -> z
+    App a bs -> f a (Foldable.foldr f z bs)
+    TypeApp a _ -> f a z
+    Abs _ b -> f b z
+    UncurriedApp a bs -> f a (Foldable.foldr f z bs)
+    UncurriedAbs _ b -> f b z
+    UncurriedEffectApp a bs -> f a (Foldable.foldr f z bs)
+    UncurriedEffectAbs _ b -> f b z
+    Accessor a _ -> f a z
+    Update a bs -> f a (Foldable.foldr (flip (Foldable.foldr f)) z bs)
+    LetRec _ as b -> Foldable.foldr (flip (Foldable.foldr f)) (f b z) as
+    Let _ _ b c -> f b (f c z)
+    EffectBind _ _ b c -> f b (f c z)
+    EffectPure a -> f a z
+    EffectDefer a -> f a z
+    Branch as b -> Foldable.foldr (flip (Foldable.foldr f)) (f b z) as
+    PrimOp a -> Foldable.foldr f z a
+    PrimEffect a -> Foldable.foldr f z a
+    PrimUndefined -> z
+    CtorSaturated _ _ _ _ es -> Foldable.foldr (flip (Foldable.foldr f)) z es
+    CtorDef _ _ _ _ -> z
+    Fail _ -> z
+    Typed _ a -> f a z
   foldMap f = case _ of
     Var _ -> mempty
     Local _ _ -> mempty
@@ -420,8 +480,12 @@ instance Traversable Pair where
 derive instance Functor BackendOperator
 
 instance Foldable BackendOperator where
-  foldr a = foldrDefault a
-  foldl a = foldlDefault a
+  foldl f z = case _ of
+    Op1 _ a -> f z a
+    Op2 _ a b -> f (f z a) b
+  foldr f z = case _ of
+    Op1 _ a -> f a z
+    Op2 _ a b -> f a (f b z)
   foldMap f = case _ of
     Op1 _ a -> f a
     Op2 _ a b -> f a <> f b
@@ -435,8 +499,14 @@ instance Traversable BackendOperator where
 derive instance Functor BackendEffect
 
 instance Foldable BackendEffect where
-  foldr a = foldrDefault a
-  foldl a = foldlDefault a
+  foldl f z = case _ of
+    EffectRefNew a -> f z a
+    EffectRefRead a -> f z a
+    EffectRefWrite a b -> f (f z a) b
+  foldr f z = case _ of
+    EffectRefNew a -> f a z
+    EffectRefRead a -> f a z
+    EffectRefWrite a b -> f a (f b z)
   foldMap f = case _ of
     EffectRefNew a -> f a
     EffectRefRead a -> f a

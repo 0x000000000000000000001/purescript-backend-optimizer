@@ -1,4 +1,13 @@
-import "reflect"
+import (
+	"reflect"
+	"gopurs/output/gopurs_runtime"
+)
+
+func EvaluateTracked(action gopurs_runtime.Value) gopurs_runtime.Value {
+	return gopurs_runtime.Func(func(_ gopurs_runtime.Value) gopurs_runtime.Value {
+		return gopurs_runtime.Apply(action, gopurs_runtime.Value{})
+	})
+}
 
 // Private guard for immutable compiler inputs. The native FFI bridge passes
 // opaque comparable values unchanged, including their pointer and numeric bits.

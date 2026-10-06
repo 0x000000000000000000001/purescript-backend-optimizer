@@ -28,10 +28,11 @@ async function variant(name, forceMiss) {
   const bundled = await build({
     stdin: {
       contents: source + `
-        const cacheChecks = { checks: 0, hits: 0, dependencyChecks: 0, dependencyHits: 0, dependencyMisses: 0 };
+        const cacheChecks = { checks: 0, hits: 0, dependencyChecks: 0, dependencyHits: 0, dependencyMisses: 0,
+          lookupChecks: 0, lookupHits: 0, lookupMisses: 0 };
         const originalInputsGuard = sameInstantiationInputs;
         sameInstantiationInputs = a => b => {
-          const same = originalInputsGuard(a)(b);
+          const same = ${forceMiss ? "false" : "originalInputsGuard(a)(b)"};
           cacheChecks.checks++;
           if (same) cacheChecks.hits++;
           return same;
@@ -43,6 +44,15 @@ async function variant(name, forceMiss) {
           cacheChecks[same ? "dependencyHits" : "dependencyMisses"]++;
           return same;
         };
+        ${source.includes("var sameLookupResults") ? `
+          const originalLookupGuard = sameLookupResults;
+          sameLookupResults = instantiations => lookups => {
+            const same = originalLookupGuard(instantiations)(lookups);
+            cacheChecks.lookupChecks++;
+            cacheChecks[same ? "lookupHits" : "lookupMisses"]++;
+            return same;
+          };
+        ` : ""}
         export { sameInstantiationInputs as inputsGuard,
           sameDependencySizes as dependencyGuard, collectDependencies as dependencies, cacheChecks };
       `,
@@ -58,12 +68,8 @@ async function variant(name, forceMiss) {
       name: "shared-dependencies-and-cache-miss-control",
       setup(plugin) {
         plugin.onResolve({ filter: /.*/ }, args => {
-          if (forceMiss && args.path === "./foreign.js") return { path: "identity", namespace: "cache-miss" };
-          return { path: pathToFileURL(resolve(args.resolveDir, args.path)).href, external: true };
+           return { path: pathToFileURL(resolve(args.resolveDir, args.path)).href, external: true };
         });
-        plugin.onLoad({ filter: /.*/, namespace: "cache-miss" }, () => ({
-          contents: "export const sameIdentity = _a => _b => false;", loader: "js",
-        }));
       },
     }],
   });
@@ -144,10 +150,12 @@ test("transitive cache keeps discovering specializations after earlier bodies hi
     assert.ok(names.includes(name), `must discover ${name}`);
   }
   assert.ok(cached.cacheChecks.hits > 0, "exercise cache reuse, not only cache misses");
-  assert.ok(cached.cacheChecks.dependencyHits > 0, "reuse complete contributions after dependencies stabilize");
+  assert.ok(cached.cacheChecks.dependencyHits + cached.cacheChecks.lookupHits > 0,
+    "reuse complete contributions when conservative or observed dependencies stabilize");
   assert.ok(cached.cacheChecks.dependencyMisses > 0, "newly discovered dependencies must invalidate contributions");
   assert.equal(reference.cacheChecks.hits, 0, "reference always recomputes the prefix");
   assert.equal(reference.cacheChecks.dependencyChecks, 0, "forced prefix misses also disable contribution reuse");
+  assert.equal(reference.cacheChecks.lookupChecks, 0, "forced prefix misses also disable observed-dependency reuse");
 });
 
 test("transitive cache is local to each call even when specialization inputs are reused", () => {
@@ -260,7 +268,7 @@ test("cached contributions preserve existing payloads and union callers on dupli
     insert("Chain.aSource")(singleton("seed")(seedInfo))(initial));
   const first = collectedCall(collectBoth(global, withoutPrior));
   assert.deepStrictEqual(first.normalArgs, [literal(1)], "the first contributing body supplies a new key's payload");
-  assert.ok(cached.cacheChecks.dependencyHits > 0);
+  assert.ok(cached.cacheChecks.dependencyHits + cached.cacheChecks.lookupHits > 0);
 });
 
 test("a newly specialized static argument invalidates the enclosing call's cached contribution", () => {
@@ -288,5 +296,5 @@ test("a newly specialized static argument invalidates the enclosing call's cache
   assert.ok(keys.some(key => key.includes("factory__")),
     "the changed static argument must produce the enclosing call's new specialization key");
   assert.ok(cached.cacheChecks.dependencyMisses > 0);
-  assert.ok(cached.cacheChecks.dependencyHits > 0);
+  assert.ok(cached.cacheChecks.dependencyHits + cached.cacheChecks.lookupHits > 0);
 });

@@ -22,6 +22,7 @@ module PureScript.Backend.Optimizer.Monomorphize
   , transitiveCollectWith
   , TransitiveResult
   , PreparedInstantiation
+  , SpecializationReads
   , applyStaticArgs
   ) where
 
@@ -42,6 +43,9 @@ import Data.Set (Set)
 import Data.Set as Set
 import Data.String.Pattern (Pattern(..))
 import Data.Tuple (Tuple(..))
+import Effect (Effect)
+import Effect.Ref as Ref
+import Effect.Unsafe (unsafePerformEffect)
 import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Module(..), ModuleName(..), Prop(..), Qualified(..))
 import PureScript.Backend.Optimizer.CoreFn.BindingGroups (sortBindingGroups)
 import PureScript.Backend.Optimizer.CoreFn.Usage (invalidateSourceUsageModule)
@@ -62,7 +66,7 @@ type InstantiationMap = Map String (Map String Instantiation)
 type PreparedInstantiation =
   { info :: Instantiation
   , expr :: Expr Ann
-  , dependencies :: Map String Int
+  , dependencies :: Tuple (Map String Int) SpecializationReads
   , contribution :: InstantiationMap
   }
 
@@ -846,7 +850,17 @@ collectFreeVarsAlt (CaseAlternative binders cg) =
     Set.difference used bound
 
 monomorphizeExpr :: String -> InstantiationMap -> Map Ident (Expr Ann) -> Expr Ann -> Expr Ann
-monomorphizeExpr modName instMap localDicts rootExpr = case rootExpr of
+monomorphizeExpr modName instMap = monomorphizeExprWith modName (specializationLookup instMap)
+
+-- A global lookup can establish absence before type substitution. For present
+-- globals the returned function answers membership, never reading payloads.
+type SpecializationLookup = String -> Maybe (String -> Boolean)
+
+specializationLookup :: InstantiationMap -> SpecializationLookup
+specializationLookup instMap name = (\types key -> Map.member key types) <$> Map.lookup name instMap
+
+monomorphizeExprWith :: String -> SpecializationLookup -> Map Ident (Expr Ann) -> Expr Ann -> Expr Ann
+monomorphizeExprWith modName lookup localDicts rootExpr = case rootExpr of
   ExprVar ann ident@(Qualified mbMod (Ident name)) ->
     case mbMod of
       Nothing -> case Map.lookup (Ident name) localDicts of
@@ -857,9 +871,9 @@ monomorphizeExpr modName instMap localDicts rootExpr = case rootExpr of
     let
       Ann ann = getExprAnn expr
       { f_var, spine } = collectAnnotatedSpine expr
-      f_var' = monomorphizeExpr modName instMap localDicts f_var
+      f_var' = monomorphizeExprWith modName lookup localDicts f_var
       annotatedSpine' = map (\(Tuple appAnn arg) -> Tuple appAnn case arg of
-        SpineApp e -> SpineApp (monomorphizeExpr modName instMap localDicts e)
+        SpineApp e -> SpineApp (monomorphizeExprWith modName lookup localDicts e)
         SpineTypeApp t -> SpineTypeApp t) spine
       spine' = map (\(Tuple _ arg) -> arg) annotatedSpine'
       transformedExpr = foldl applyAnnotatedSpine f_var' annotatedSpine'
@@ -868,7 +882,7 @@ monomorphizeExpr modName instMap localDicts rootExpr = case rootExpr of
       args' = getSpineArgs spine'
     in
       case f_var' of
-        ExprVar (Ann varAnn) (Qualified (Just mod) (Ident name)) ->
+        ExprVar (Ann varAnn) (Qualified (Just mod) (Ident name)) | Just hasSpecialization <- lookup (unwrap mod <> "." <> name) ->
           let
              genericType = fromMaybe Any varAnn.type
              subst = buildSubst genericType typeArgs
@@ -884,32 +898,30 @@ monomorphizeExpr modName instMap localDicts rootExpr = case rootExpr of
              if hasTypeVariables instType then
                transformedExpr
              else
-               case Map.lookup qualName instMap of
-                    Just typeMap ->
-                      let specKey = specializationKey instType dictArgs normalArgs
-                      in case Map.lookup specKey typeMap of
-                        Just _ ->
-                          let
-                             specializedName = Ident (name <> "__" <> hashString specKey)
-                             stripForAlls2 = case _ of
-                               ForAll _ b -> stripForAlls2 b
-                               x -> x
-                             -- varAnn binds the call site's type variables; info.subst
-                             -- belongs to the definition and may use different names.
-                             substFn t = stripStaticConstraints dictArgs (substituteExprType subst (stripForAlls2 t))
-                             newAnn = varAnn { type = map substFn varAnn.type }
-                             definerMod = case String.split (Pattern ".") qualName of
-                               parts -> String.joinWith "." (fromMaybe [] (Array.init parts))
-                             resolvedMod = Just (ModuleName definerMod)
-                             specializedVar = ExprVar (Ann newAnn) (Qualified resolvedMod specializedName)
-                          in
-                             rebuildSpecializedCall (Ann ann) specializedVar filteredArgs
-                        Nothing -> transformedExpr
-                    Nothing -> transformedExpr
+                -- Missing names cannot select a specialization. Probe the index
+                -- before substitution, type closure and argument partitioning.
+                let specKey = specializationKey instType dictArgs normalArgs
+                in if hasSpecialization specKey then
+                    let
+                       specializedName = Ident (name <> "__" <> hashString specKey)
+                       stripForAlls2 = case _ of
+                         ForAll _ b -> stripForAlls2 b
+                         x -> x
+                       -- varAnn binds the call site's type variables; info.subst
+                       -- belongs to the definition and may use different names.
+                       substFn t = stripStaticConstraints dictArgs (substituteExprType subst (stripForAlls2 t))
+                       newAnn = varAnn { type = map substFn varAnn.type }
+                       definerMod = case String.split (Pattern ".") qualName of
+                         parts -> String.joinWith "." (fromMaybe [] (Array.init parts))
+                       resolvedMod = Just (ModuleName definerMod)
+                       specializedVar = ExprVar (Ann newAnn) (Qualified resolvedMod specializedName)
+                    in
+                       rebuildSpecializedCall (Ann ann) specializedVar filteredArgs
+                else transformedExpr
         _ -> transformedExpr
 
-  ExprLit ann lit -> ExprLit ann (map (monomorphizeExpr modName instMap localDicts) lit)
-  ExprAbs ann id e -> ExprAbs ann id (monomorphizeExpr modName instMap localDicts e)
+  ExprLit ann lit -> ExprLit ann (map (monomorphizeExprWith modName lookup localDicts) lit)
+  ExprAbs ann id e -> ExprAbs ann id (monomorphizeExprWith modName lookup localDicts e)
   ExprLet ann binds e ->
     let
       newLocalDicts = Array.foldl
@@ -929,7 +941,7 @@ monomorphizeExpr modName instMap localDicts rootExpr = case rootExpr of
       
     in
       if Map.isEmpty localInstMap then
-        ExprLet ann (map (monomorphizeBindLocal modName instMap newLocalDicts) binds) (monomorphizeExpr modName instMap newLocalDicts e)
+        ExprLet ann (map (monomorphizeBindLocal modName lookup newLocalDicts) binds) (monomorphizeExprWith modName lookup newLocalDicts e)
       else
         let
           injectType ty expr =
@@ -1087,11 +1099,11 @@ monomorphizeExpr modName instMap localDicts rootExpr = case rootExpr of
           rewrittenBinds = map goBind processBinds.binds
           rewrittenE = go e
         in
-          ExprLet ann (map (monomorphizeBindLocal modName instMap newLocalDicts) rewrittenBinds) (monomorphizeExpr modName instMap newLocalDicts rewrittenE)
-  ExprCase ann exprs alts -> ExprCase ann (map (monomorphizeExpr modName instMap localDicts) exprs) (map (monomorphizeAlt modName instMap localDicts) alts)
+          ExprLet ann (map (monomorphizeBindLocal modName lookup newLocalDicts) rewrittenBinds) (monomorphizeExprWith modName lookup newLocalDicts rewrittenE)
+  ExprCase ann exprs alts -> ExprCase ann (map (monomorphizeExprWith modName lookup localDicts) exprs) (map (monomorphizeAlt modName lookup localDicts) alts)
   ExprConstructor ann t c ids -> ExprConstructor ann t c ids
-  ExprAccessor ann e prop -> ExprAccessor ann (monomorphizeExpr modName instMap localDicts e) prop
-  ExprUpdate ann e props -> ExprUpdate ann (monomorphizeExpr modName instMap localDicts e) (map (monomorphizeProp modName instMap localDicts) props)
+  ExprAccessor ann e prop -> ExprAccessor ann (monomorphizeExprWith modName lookup localDicts e) prop
+  ExprUpdate ann e props -> ExprUpdate ann (monomorphizeExprWith modName lookup localDicts e) (map (monomorphizeProp modName lookup localDicts) props)
   _ -> rootExpr
   where
   -- Keep the original head boundary and each application's TAST annotation.
@@ -1111,26 +1123,26 @@ monomorphizeExpr modName instMap localDicts rootExpr = case rootExpr of
   isAppOrTypeApp (ExprTypeApp _ _ _) = true
   isAppOrTypeApp _ = false
 
-monomorphizeBindLocal :: String -> InstantiationMap -> Map Ident (Expr Ann) -> Bind Ann -> Bind Ann
-monomorphizeBindLocal modName instMap localDicts (NonRec b) = NonRec (monomorphizeBindingLocal modName instMap localDicts b)
-monomorphizeBindLocal modName instMap localDicts (Rec bs) = Rec (map (monomorphizeBindingLocal modName instMap localDicts) bs)
+monomorphizeBindLocal :: String -> SpecializationLookup -> Map Ident (Expr Ann) -> Bind Ann -> Bind Ann
+monomorphizeBindLocal modName lookup localDicts (NonRec b) = NonRec (monomorphizeBindingLocal modName lookup localDicts b)
+monomorphizeBindLocal modName lookup localDicts (Rec bs) = Rec (map (monomorphizeBindingLocal modName lookup localDicts) bs)
 
-monomorphizeBindingLocal :: String -> InstantiationMap -> Map Ident (Expr Ann) -> Binding Ann -> Binding Ann
-monomorphizeBindingLocal modName instMap localDicts (Binding ann id e) = 
-  Binding ann id (monomorphizeExpr modName instMap localDicts e)
+monomorphizeBindingLocal :: String -> SpecializationLookup -> Map Ident (Expr Ann) -> Binding Ann -> Binding Ann
+monomorphizeBindingLocal modName lookup localDicts (Binding ann id e) =
+  Binding ann id (monomorphizeExprWith modName lookup localDicts e)
 
-monomorphizeAlt :: String -> InstantiationMap -> Map Ident (Expr Ann) -> CaseAlternative Ann -> CaseAlternative Ann
-monomorphizeAlt modName instMap localDicts (CaseAlternative binders cg) = CaseAlternative binders (monomorphizeCaseGuard modName instMap localDicts cg)
+monomorphizeAlt :: String -> SpecializationLookup -> Map Ident (Expr Ann) -> CaseAlternative Ann -> CaseAlternative Ann
+monomorphizeAlt modName lookup localDicts (CaseAlternative binders cg) = CaseAlternative binders (monomorphizeCaseGuard modName lookup localDicts cg)
 
-monomorphizeCaseGuard :: String -> InstantiationMap -> Map Ident (Expr Ann) -> CaseGuard Ann -> CaseGuard Ann
-monomorphizeCaseGuard modName instMap localDicts (Unconditional e) = Unconditional (monomorphizeExpr modName instMap localDicts e)
-monomorphizeCaseGuard modName instMap localDicts (Guarded guards) = Guarded (map (monomorphizeGuard modName instMap localDicts) guards)
+monomorphizeCaseGuard :: String -> SpecializationLookup -> Map Ident (Expr Ann) -> CaseGuard Ann -> CaseGuard Ann
+monomorphizeCaseGuard modName lookup localDicts (Unconditional e) = Unconditional (monomorphizeExprWith modName lookup localDicts e)
+monomorphizeCaseGuard modName lookup localDicts (Guarded guards) = Guarded (map (monomorphizeGuard modName lookup localDicts) guards)
 
-monomorphizeGuard :: String -> InstantiationMap -> Map Ident (Expr Ann) -> Guard Ann -> Guard Ann
-monomorphizeGuard modName instMap localDicts (Guard e1 e2) = Guard (monomorphizeExpr modName instMap localDicts e1) (monomorphizeExpr modName instMap localDicts e2)
+monomorphizeGuard :: String -> SpecializationLookup -> Map Ident (Expr Ann) -> Guard Ann -> Guard Ann
+monomorphizeGuard modName lookup localDicts (Guard e1 e2) = Guard (monomorphizeExprWith modName lookup localDicts e1) (monomorphizeExprWith modName lookup localDicts e2)
 
-monomorphizeProp :: String -> InstantiationMap -> Map Ident (Expr Ann) -> Prop (Expr Ann) -> Prop (Expr Ann)
-monomorphizeProp modName instMap localDicts (Prop p e) = Prop p (monomorphizeExpr modName instMap localDicts e)
+monomorphizeProp :: String -> SpecializationLookup -> Map Ident (Expr Ann) -> Prop (Expr Ann) -> Prop (Expr Ann)
+monomorphizeProp modName lookup localDicts (Prop p e) = Prop p (monomorphizeExprWith modName lookup localDicts e)
 
 rebuildSpecializedCall :: Ann -> Expr Ann -> Array (Expr Ann) -> Expr Ann
 rebuildSpecializedCall (Ann sourceAnn) f args = Array.foldl applyArgument f args
@@ -1305,6 +1317,54 @@ sameDependencySizes instantiations dependencies = Array.all
   (\(Tuple name size) -> specializationCount instantiations name == size)
   (Map.toUnfoldable dependencies :: Array _)
 
+-- Membership is monotone within this fixed point. Successful lookups remain
+-- successful; only a previously missing global or specialization can invalidate
+-- a cached result. Unrelated new keys under Inl/Inr must not invalidate a large
+-- generic representation just because its conservative dependency size changed.
+type SpecializationReads = Map String (Maybe (Set String))
+
+sameLookupResults :: InstantiationMap -> SpecializationReads -> Boolean
+sameLookupResults instantiations = foldrWithIndex
+  (\name misses valid -> valid && case misses of
+    Nothing -> not (Map.member name instantiations)
+    Just keys -> case Map.lookup name instantiations of
+      Nothing -> true
+      Just types -> foldl (\unchanged key -> unchanged && not (Map.member key types)) true keys)
+  true
+
+samePreparedDependencies :: InstantiationMap -> Tuple (Map String Int) SpecializationReads -> Boolean
+samePreparedDependencies instantiations (Tuple sizes lookups) =
+  sameDependencySizes instantiations sizes || sameLookupResults instantiations lookups
+
+-- Keep the entire tracked evaluation sequenced before reading observations.
+-- This opaque Effect boundary prevents pure inlining/arity raising from moving
+-- the recursive transform past the final Ref.read.
+foreign import evaluateTracked :: forall a. (Unit -> a) -> Effect a
+
+-- Reuse Tuple and the existing prepared-record field set. Adding a global
+-- runtime Value record variant perturbs otherwise unchanged later compiler
+-- phases under the frozen profile; this experiment isolates that layout cost.
+specializeTracked :: String -> InstantiationMap -> Expr Ann -> Tuple (Expr Ann) SpecializationReads
+specializeTracked modName instantiations original = unsafePerformEffect do
+  observed <- Ref.new Map.empty
+  let
+    lookup name = case Map.lookup name instantiations of
+      Nothing -> unsafePerformEffect do
+        Ref.modify_ (\seen -> if Map.member name seen then seen else Map.insert name Nothing seen) observed
+        pure Nothing
+      Just types -> Just \key ->
+        if Map.member key types then true
+        else unsafePerformEffect do
+          Ref.modify_ (\seen -> case Map.lookup name seen of
+            Just (Just keys) | Set.member key keys -> seen
+            Just (Just keys) -> Map.insert name (Just (Set.insert key keys)) seen
+            Just Nothing -> seen
+            Nothing -> Map.insert name (Just (Set.singleton key)) seen) observed
+          pure false
+  expr <- evaluateTracked (\_ -> monomorphizeExprWith modName lookup Map.empty original)
+  lookups <- Ref.read observed
+  pure (Tuple expr lookups)
+
 transitiveCollect :: Map String (Binding Ann) -> InstantiationMap -> InstantiationMap
 transitiveCollect globalAstMap initialMap =
   unwrap $ transitiveCollectWith (Identity <<< map (\job -> job unit)) globalAstMap initialMap
@@ -1389,7 +1449,7 @@ transitiveCollectWith runJobs globalAstMap initialMap =
         Just old | sameInstantiationInputs old.info info -> Just old
         _ -> Nothing
       reused = case previous of
-        Just cached | sameDependencySizes specializationMap cached.dependencies -> Just cached
+        Just cached | samePreparedDependencies specializationMap cached.dependencies -> Just cached
         _ -> Nothing
       entry = case reused of
         Just cached -> cached
@@ -1403,13 +1463,14 @@ transitiveCollectWith runJobs globalAstMap initialMap =
                   resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
                 in rewriteExpr globalAstMap Map.empty Map.empty astSubstFn resolvedExpr
             dependencies = case previous of
-              Just cached -> mapWithIndex (\name _ -> specializationCount specializationMap name) cached.dependencies
+              Just cached -> case cached.dependencies of
+                Tuple sizes _ -> mapWithIndex (\name _ -> specializationCount specializationMap name) sizes
               Nothing -> Map.fromFoldable (map (\name -> Tuple name (specializationCount specializationMap name)) (Set.toUnfoldable (collectDependencies substitutedExpr) :: Array String))
-            specializedExpr = monomorphizeExpr definerMod specializationMap Map.empty substitutedExpr
+            Tuple specializedExpr lookups = specializeTracked definerMod specializationMap substitutedExpr
           in
             { info
             , expr: substitutedExpr
-            , dependencies
+            , dependencies: Tuple dependencies lookups
             , contribution: collectExpr globalAstMap definerMod Map.empty specializedExpr
             }
     in

@@ -567,11 +567,11 @@ effectiveDirectives base accumulated contributions currentIndex =
     accumulated
     contributions
   where
-  removeContribution contrib acc = foldrWithIndex restore acc contrib
-
-  restore key _ acc = case Map.lookup key base of
-    Just value -> Map.insert key value acc
-    Nothing -> Map.delete key acc
+  -- The keys of a contribution form a module-local group. Remove them as one
+  -- persistent-map difference rather than repeatedly copying the search path
+  -- for every key. Defaults shadowed by that contribution must be restored.
+  removeContribution contrib acc =
+    Map.union (Map.intersection base contrib) (Map.difference acc contrib)
 
 -- | Vue de lecture des implémentations externes pour une tentative de
 -- | conversion.

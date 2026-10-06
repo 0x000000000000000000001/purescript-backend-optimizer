@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import { test } from "node:test";
+import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const output = process.argv[2] ? resolve(process.argv[2])
@@ -42,4 +43,36 @@ test("global specialization preserves the type of every intermediate application
   assert.deepEqual(result.value0.type, new Maybe.Just(int));
   assert.deepEqual(result.value1.value0.type, new Maybe.Just(fn([int], int)));
   assert.deepEqual(result.value1.value1.value0.type, new Maybe.Just(fn([int, int], int)));
+});
+
+test("shared annotation identities stay independent across differently typed specializations", () => {
+  const arrayA = new C.Array(a), packType = new C.ForAll(['a'], fn([a], arrayA));
+  const pack = new C.Binding(ann(packType), 'pack', new C.ExprAbs(ann(fn([a], arrayA)), 'item',
+    new C.ExprLit(ann(arrayA), new C.LitArray(Array.from({ length: 600 }, () => variable('item', a, true))))));
+  const types = [C.Int.value, C.String.value];
+  const callers = types.map((type, index) => {
+    const result = new C.Array(type), typeAt = fn([type], result);
+    const apply = new C.ExprApp(ann(result),
+      new C.ExprTypeApp(ann(typeAt), variable('pack', packType), type), variable('value', type, true));
+    return new C.Binding(ann(typeAt), 'caller' + index, new C.ExprAbs(ann(typeAt), 'value', apply));
+  });
+  const bindings = [pack, ...callers];
+  const module = { name: 'Fixture', exports: callers.map(binding => binding.value1),
+    decls: bindings.map(binding => new C.NonRec(binding)) };
+  const before = JSON.stringify(module);
+  const globals = bindings.reduce((map, binding) =>
+    Map.insert(Ord.ordString)(`Fixture.${binding.value1}`)(binding)(map), Map.empty);
+  const instances = M.collectInstantiations(globals)(Map.empty)(module);
+  const rewritten = M.monomorphize(globals)(instances)(module);
+  const clones = rewritten.decls.flatMap(decl => decl instanceof C.NonRec ? [decl.value0] : decl.value0)
+    .filter(binding => binding.value1.startsWith('pack__'));
+  assert.equal(clones.length, 2);
+  for (const type of types) {
+    const clone = clones.find(binding => isDeepStrictEqual(binding.value0.type.value0, fn([type], new C.Array(type))));
+    assert.ok(clone, 'both substitutions must produce their own specialized declaration');
+    const values = clone.value2.value2.value1.value0;
+    assert.equal(values.length, 600);
+    for (const value of values) assert.deepEqual(value.value0.type, new Maybe.Just(type));
+  }
+  assert.equal(JSON.stringify(module), before, 'shared source annotations remain immutable');
 });

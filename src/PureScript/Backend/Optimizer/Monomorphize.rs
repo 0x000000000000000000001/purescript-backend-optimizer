@@ -15,3 +15,8 @@ pub fn PureScript_Backend_Optimizer_Monomorphize_sameIdentity(a: Value, b: Value
         _ => false,
     }
 }
+// Sequence one complete pure transform inside its owning Effect. Its private
+// lookup callbacks finish before the caller reads the recorded observations.
+pub fn PureScript_Backend_Optimizer_Monomorphize_evaluateTracked(action: Func1<(), Value>) -> Value {
+    Value::Func1(Func1::Shared(std::rc::Rc::new(move |_| action(()))))
+}

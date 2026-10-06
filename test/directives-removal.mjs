@@ -115,3 +115,21 @@ test("accumulation puis retrait des contributions en avance égale le préfixe n
     }
   }
 });
+
+test("wide contributions restore entire default entries across sparse finalized ranks", () => {
+  const defaults = innerMap([[inlineRef, inlineNever], [accessorPool[1], inlineAlways]]);
+  const replacement = innerMap([[accessorPool[2], inlineDefault]]);
+  const contribs = Array.from({ length: 37 }, (_, rank) => rank % 3 === 1 ? null :
+    outerMap(Array.from({ length: rank === 0 ? 1 : 101 }, (_, i) =>
+      [evalRef(`M${rank}`, `f${i}`), replacement])));
+  const base = outerMap(Array.from({ length: 37 }, (_, rank) => [evalRef(`M${rank}`, 'f0'), defaults]));
+  const contributions = contribsMap(contribs.flatMap((contrib, rank) => contrib ? [[rank, contrib]] : []));
+  const accumulated = naive(base, contribs, contribs.length);
+  const originalBase = serialize(base), originalAccumulated = serialize(accumulated);
+  for (const rank of [0, 1, 2, 17, 36, 37, 40]) {
+    assert.deepEqual(serialize(B.effectiveDirectives(base)(accumulated)(contributions)(rank)),
+      serialize(naive(base, contribs, rank)), `sparse current rank ${rank}`);
+  }
+  assert.deepEqual(serialize(base), originalBase);
+  assert.deepEqual(serialize(accumulated), originalAccumulated);
+});
