@@ -65,7 +65,6 @@ import Data.List as List
 import Data.Map (Map)
 import Data.Map as Map
 import Data.Maybe (Maybe(..))
-import Debug as Debug
 import Data.Monoid (power)
 import Data.Newtype (class Newtype, unwrap)
 import Data.Set as Set
@@ -73,7 +72,7 @@ import Data.String as String
 import Data.Tuple (Tuple(..), fst, snd)
 import Partial.Unsafe (unsafeCrashWith)
 import PureScript.Backend.Optimizer.Analysis (class HasAnalysis, BackendAnalysis(..), Capture(..), Complexity(..), ResultTerm(..), Usage(..), analysisOf, bound, bump, complex, updated, withRewrite)
-import PureScript.Backend.Optimizer.CoreFn (ConstructorType, ExprType(..), Ident(..), Literal(..), ModuleName(..), Prop(..), ProperName, Qualified(..), compareIdents, compareQualifiedIdent, eqIdents, eqQualifiedIdent, findProp, propKey, propValue)
+import PureScript.Backend.Optimizer.CoreFn (ConstructorType, ExprType(..), Ident(..), Literal(..), ModuleName, Prop(..), ProperName, Qualified(..), compareIdents, compareQualifiedIdent, eqIdents, eqQualifiedIdent, findProp, propKey, propValue)
 import PureScript.Backend.Optimizer.FfiSupport (compareIntImpl)
 import PureScript.Backend.Optimizer.NativeMaps (evalRefCompare, lookupEvalRefImpl)
 import PureScript.Backend.Optimizer.Syntax (class HasSyntax, BackendAccessor(..), BackendEffect, BackendOperator(..), BackendOperator1(..), BackendOperator2(..), BackendOperatorNum(..), BackendOperatorOrd(..), BackendSyntax(Var, Local, Lit, App, Abs, UncurriedApp, UncurriedAbs, UncurriedEffectApp, UncurriedEffectAbs, Accessor, Update, CtorSaturated, CtorDef, LetRec, Let, EffectBind, EffectPure, EffectDefer, Branch, PrimOp, PrimEffect, PrimUndefined, Fail, Typed), Level(..), Pair(..), syntaxOf)
@@ -1323,7 +1322,7 @@ evalExternFromImpl (Env e) qual (Tuple _ (ExternExpr _ expr@(NeutralExpr (Typed 
 -- instance member (`add semiringInt` becomes `intAdd`) instead of leaving a
 -- runtime dictionary dispatch, and sidesteps the generic-annotation rule below
 -- because the projection itself is not inlined.
-evalExternFromImpl env@(Env e) qual (Tuple _ (ExternExpr group expr)) spine
+evalExternFromImpl env qual (Tuple _ (ExternExpr group expr)) spine
   | Just member <- classAccessorField expr
   , Array.all isNotTypeApp spine
   , [ ExternApp args ] <- spine
