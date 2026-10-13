@@ -257,6 +257,7 @@ const extern = (body, directive = Sem.InlineAlways.value) => {
   const name = new C.Qualified(new Maybe.Just("Fixture"), "external");
   const env = {
     instantiateNeutral: cachedInstantiate,
+    lookupDirective: Sem.lookupDirective,
     currentModule: "Fixture", locals: Map.empty, localsSize: 0,
     evalExternRef: () => () => nothing,
     evalExternSpine: () => () => () => nothing,
@@ -423,6 +424,7 @@ test("imported constructors retain their module through quotation and later satu
   };
   const env = {
     instantiateNeutral: cachedInstantiate,
+    lookupDirective: Sem.lookupDirective,
     currentModule: module, locals: Map.empty, localsSize: 0, directives: Map.empty,
     evalExternRef: () => () => nothing,
     evalExternSpine: () => name => spine => name === imported && spine.length === 0

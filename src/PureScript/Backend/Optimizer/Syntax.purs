@@ -4,6 +4,7 @@ import Prelude
 
 import Data.Array.NonEmpty (NonEmptyArray)
 import Data.Foldable as Foldable
+import Data.Generic.Rep (class Generic)
 import Data.Maybe (Maybe)
 import Data.Newtype (class Newtype)
 import Data.Traversable (class Foldable, class Traversable, foldMap, sequenceDefault, traverse)
@@ -526,3 +527,14 @@ instance Traversable BackendEffect where
 -- | without needing to know exactly how the node `a` is wrapped.
 class HasSyntax a where
   syntaxOf :: a -> Maybe (BackendSyntax a)
+
+derive instance Generic (BackendSyntax a) _
+derive instance Generic Level _
+derive instance Generic (Pair a) _
+derive instance Generic BackendAccessor _
+derive instance Generic (BackendOperator a) _
+derive instance Generic BackendOperator1 _
+derive instance Generic BackendOperator2 _
+derive instance Generic BackendOperatorNum _
+derive instance Generic BackendOperatorOrd _
+derive instance Generic (BackendEffect a) _

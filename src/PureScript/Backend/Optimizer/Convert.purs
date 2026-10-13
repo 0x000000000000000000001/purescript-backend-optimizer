@@ -53,6 +53,7 @@ module PureScript.Backend.Optimizer.Convert
   , alignClassMemberAnnotations
   , toBackendModule
   , toBackendModuleWithLookup
+  , toBackendModuleWithLookups
   , lookupPurmetaImplementation
   ) where
 
@@ -86,9 +87,10 @@ import PureScript.Backend.Optimizer.Analysis (BackendAnalysis, analysisOf, analy
 import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), ClassDecl, Comment, ConstructorType(..), DataDecl, Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Meta(..), Module(..), ModuleName(..), Prop(..), ProperName(..), Qualified(..), ReExport, binderAnn, exprAnn, findProp, propKey, propValue, qualifiedModuleName, unQualified)
 import PureScript.Backend.Optimizer.Directives (DirectiveHeaderResult, parseDirectiveHeader)
 import PureScript.Backend.Optimizer.CoreFn.Usage (invalidateSourceUsageModule)
-import PureScript.Backend.Optimizer.NativeMaps (evalRefCompare, insertQualifiedIdentImpl, insertStringImpl, lookupEvalRefImpl, lookupQualifiedIdentImpl, lookupStringImpl, qualifiedIdentCompare, stringCompare)
+import PureScript.Backend.Optimizer.NativeMaps (insertQualifiedIdentImpl, insertStringImpl, lookupQualifiedIdentImpl, lookupStringImpl, qualifiedIdentCompare, stringCompare)
 import PureScript.Backend.Optimizer.Semantics (BackendExpr(..), BackendSemantics, Ctx(..), DataTypeMeta, Env(..), EvalRef(..), ExternImpl(..), ExternSpine(..), InlineAccessor(..), InlineDirective(..), InlineDirectiveMap, NeutralExpr(..), build, evalExternFromImpl, evalExternRefFromImpl, freeze, optimize, unwrapSemTyped)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
+import PureScript.Backend.Optimizer.Semantics as Semantics
 import PureScript.Backend.Optimizer.Substitute (substituteExprType)
 import PureScript.Backend.Optimizer.Syntax (BackendAccessor(..), BackendOperator(..), BackendOperator1(..), BackendOperator2(..), BackendOperatorOrd(..), BackendSyntax(Var, Local, Lit, App, Abs, UncurriedApp, UncurriedAbs, Accessor, Update, CtorDef, LetRec, Let, Branch, PrimOp, PrimUndefined, Fail, Typed), Level(..), Pair(..))
 import PureScript.Backend.Optimizer.Syntax as Syn
@@ -149,6 +151,7 @@ type PurmetaLookup = String -> String -> ExternLookup
 
 type ConvertEnv =
   { lookupPurmeta :: PurmetaLookup
+  , lookupDirective :: Semantics.DirectiveLookup
   | ConvertEnvFields
   }
 
@@ -161,9 +164,13 @@ toBackendModule = toBackendModuleWithLookup lookupPurmetaImplementation
 -- | one synchronous module conversion, during which purmeta stays unchanged.
 -- | Local implementations still change after each binding and remain uncached.
 toBackendModuleWithLookup :: PurmetaLookup -> Module Ann -> Record ConvertEnvFields -> Tuple OptimizationSteps BackendModule
-toBackendModuleWithLookup lookupPurmeta source env =
+toBackendModuleWithLookup lookupPurmeta = toBackendModuleWithLookups lookupPurmeta Semantics.lookupDirective
+
+toBackendModuleWithLookups :: PurmetaLookup -> Semantics.DirectiveLookup -> Module Ann -> Record ConvertEnvFields -> Tuple OptimizationSteps BackendModule
+toBackendModuleWithLookups lookupPurmeta lookupDirective source env =
   toBackendModuleWithoutSourceUsage (invalidateSourceUsageModule source)
     { lookupPurmeta
+    , lookupDirective
     , analyzeCustom: env.analyzeCustom
     , instantiateNeutral: env.instantiateNeutral
     , currentLevel: env.currentLevel
@@ -320,7 +327,7 @@ type OptimizationSteps = Array (Tuple (Qualified Ident) (NonEmptyArray BackendEx
 
 toTopLevelBackendBinding :: Array (Qualified Ident) -> ConvertEnv -> Binding Ann -> Accum ConvertEnv (Tuple Ident (WithDeps NeutralExpr))
 toTopLevelBackendBinding group env (Binding (Ann bindingAnn) ident cfn) = do
-  let evalEnv = Env { currentModule: env.currentModule, instantiateNeutral: env.instantiateNeutral, evalExternRef: makeExternEvalRef group env, evalExternSpine: makeExternEvalSpine group env, locals: Map.empty, localsSize: 0, directives: env.directives }
+  let evalEnv = Env { currentModule: env.currentModule, instantiateNeutral: env.instantiateNeutral, evalExternRef: makeExternEvalRef group env, evalExternSpine: makeExternEvalSpine group env, locals: Map.empty, localsSize: 0, directives: env.directives, lookupDirective: env.lookupDirective }
   let qualifiedIdent = Qualified (Just env.currentModule) ident
   let backendExpr = toBackendExpr cfn env
   let enableTracing = Set.member qualifiedIdent env.traceIdents
@@ -341,7 +348,7 @@ toTopLevelBackendBinding group env (Binding (Ann bindingAnn) ident cfn) = do
       , moduleImplementations = insertQualifiedIdentImpl qualifiedIdentCompare qualifiedIdent impl env.moduleImplementations
       , optimizationSteps = maybe env.optimizationSteps (Array.snoc env.optimizationSteps <<< Tuple qualifiedIdent) $ NonEmptyArray.fromArray mbSteps
       , directives =
-          case inferTransitiveDirective env.directives (unwrap (fst impl)).size (snd impl) backendExpr cfn of
+          case inferTransitiveDirective env.lookupDirective env.directives (unwrap (fst impl)).size (snd impl) backendExpr cfn of
             Just dirs ->
               Map.alter
                 case _ of
@@ -363,12 +370,12 @@ toTopLevelBackendBinding group env (Binding (Ann bindingAnn) ident cfn) = do
 maxInlineDictionaryMemberSize :: Int
 maxInlineDictionaryMemberSize = 64
 
-inferTransitiveDirective :: InlineDirectiveMap -> Int -> ExternImpl -> BackendExpr -> Expr Ann -> Maybe (Map InlineAccessor InlineDirective)
-inferTransitiveDirective directives dictSize impl backendExpr cfn = fromImpl <|> fromBackendExpr
+inferTransitiveDirective :: Semantics.DirectiveLookup -> InlineDirectiveMap -> Int -> ExternImpl -> BackendExpr -> Expr Ann -> Maybe (Map InlineAccessor InlineDirective)
+inferTransitiveDirective lookupDirective directives dictSize impl backendExpr cfn = fromImpl <|> fromBackendExpr
   where
   fromImpl = case impl of
     ExternExpr _ (NeutralExpr (App (NeutralExpr (Var qual)) args)) ->
-      case lookupEvalRefImpl evalRefCompare compare (EvalExtern qual) directives of
+      case lookupDirective (EvalExtern qual) directives of
         Just dirs -> do
           let
             newDirs = foldrWithIndex
@@ -392,7 +399,7 @@ inferTransitiveDirective directives dictSize impl backendExpr cfn = fromImpl <|>
         _ ->
           Nothing
     ExternExpr _ (NeutralExpr (Accessor (NeutralExpr (App (NeutralExpr (Var qual)) _)) (GetProp prop))) ->
-      case lookupEvalRefImpl evalRefCompare compare (EvalExtern qual) directives >>= Map.lookup (InlineSpineProp prop) of
+      case lookupDirective (EvalExtern qual) directives >>= Map.lookup (InlineSpineProp prop) of
         Just (InlineArity n) ->
           Just $ Map.singleton InlineRef (InlineArity n)
         _ ->
@@ -438,7 +445,7 @@ inferTransitiveDirective directives dictSize impl backendExpr cfn = fromImpl <|>
           dirs -> Just $ Map.fromFoldable dirs
     _ -> case backendExpr of
       ExprSyntax _ (App (ExprSyntax _ (Var qual)) args) ->
-        case lookupEvalRefImpl evalRefCompare compare (EvalExtern qual) directives >>= Map.lookup InlineRef of
+        case lookupDirective (EvalExtern qual) directives >>= Map.lookup InlineRef of
           Just (InlineArity n)
             | arity <- NonEmptyArray.length args
             , arity >= n ->

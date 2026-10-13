@@ -21,6 +21,7 @@ import Prelude
 
 import Data.Array as Array
 import Data.Array.NonEmpty as NonEmptyArray
+import Data.Generic.Rep (class Generic)
 import Data.Map (Map)
 import Data.Map as Map
 import Data.Maybe (Maybe(..))
@@ -115,6 +116,12 @@ newtype BackendAnalysis = BackendAnalysis
   }
 
 derive instance Newtype BackendAnalysis _
+
+derive instance Generic Capture _
+derive instance Generic Usage _
+derive instance Generic Complexity _
+derive instance Generic ResultTerm _
+derive instance Generic BackendAnalysis _
 
 instance Semigroup BackendAnalysis where
   append (BackendAnalysis a) (BackendAnalysis b) = BackendAnalysis

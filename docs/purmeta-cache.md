@@ -7,16 +7,20 @@ JavaScript implementation in `src/PureScript/Backend/Optimizer/Cache.js`.
 
 ## Directory and ownership
 
-The path is `.purmeta/<ModuleName>.purmeta`, relative to the process's working
-directory at each operation. Dotted names stay dotted: module `Data.Map` uses
-`.purmeta/Data.Map.purmeta`. The writer creates `.purmeta` on demand.
+The default path is `.purmeta/<ModuleName>.purmeta`, relative to the process's
+working directory at each operation. `GOPURS_PURMETA_DIRECTORY` overrides the
+scratch directory; gopurs sets it to an absolute private directory for each
+compiler invocation. Dotted names stay dotted: module `Data.Map` uses
+`Data.Map.purmeta`. The writer creates the scratch directory on demand; its
+parent must already exist.
 
 The directory is independent of the frontend's input/output directory, main
-selection and RAM budget. There is no directory option in this API. Names come
+selection and RAM budget. Names come
 from the compiler's module names; this is not a general file-path API.
 
-A publication scope requires a stable working directory and exclusive ownership
-of its scratch files. Independent builds sharing a directory must run serially;
+A publication scope requires a stable working/scratch directory and exclusive
+ownership of its scratch files. Keep the environment override stable throughout
+the scope. Independent builds sharing a scratch directory must run serially;
 the cache state is process-global, keyed only by module name. After changing
 projects or working directories, callers start a new scope with
 `beginPurmetaBuild`. PBO's parallel builder coordinates one build and is distinct
@@ -95,6 +99,34 @@ module. The membership set records **publication**, not an independent content
 verification. Module names, matching mtimes and a decodable old file do not
 replace that validation. Specialization names and accumulated optimizer state
 must belong to the current build.
+
+`buildModulesWithReuse` and `buildModulesParallelWithReuse` additionally accept a
+consumer callback for validated restored modules. It runs at the same canonical
+codegen boundary as a fresh module, after pending earlier modules have settled.
+An `onSkipModule` lookup can be speculative; it must not itself publish codegen
+state. The historical entry points use a no-op reuse callback and retain their
+existing behavior. `test/parallel-visibility.mjs` checks mixed cached/fresh builds,
+directive contributions and canonical callback order under LIFO completions.
+
+The experimental `buildModulesWithObservation` and
+`buildModulesParallelWithObservation` accept an optional `BuildObservation`.
+Its lookup receives immutable rank-filtered implementation/directive views and
+an effect reporting pending predecessors. `Observation.create` records external
+implementation presence/absence and the initial value of each external directive
+read, before conversion-local overrides. `Convert.toBackendModuleWithLookups`
+and the semantic `Env.lookupDirective` route the actual consultations through
+these attempt-local callbacks; historical conversion entry points supply the
+ordinary directive lookup. A directive-only read also defers an unfinished
+predecessor. Only final fresh attempts publish reads, immediately before their
+canonical codegen callback. The gopurs producer validates the values behind these
+reads when its conservative prefix changes; the observations alone grant no hit.
+`test/optimizer-observation.mjs` covers initial overrides, absent/later references,
+forced private inlines, pending directive-only lookups and canonical publication.
+
+The gopurs lot-04 producer uses a separate, typed portable format for persistent
+artifacts. `Generic` instances in CoreFn, Syntax, Analysis and Semantics expose
+named business constructors for that codec; they do not change `.purmeta` bytes
+or authorize restoration by themselves.
 
 ### Failure behavior
 

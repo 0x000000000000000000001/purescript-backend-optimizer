@@ -23,6 +23,8 @@ module PureScript.Backend.Optimizer.Semantics
   , InlineAccessor(..)
   , InlineDirective(..)
   , InlineDirectiveMap
+  , DirectiveLookup
+  , lookupDirective
   , insertDirective
   , ExternImpl(..)
   , BackendSemantics(..)
@@ -50,6 +52,7 @@ module PureScript.Backend.Optimizer.Semantics
   ) where
 
 import Prelude
+import Data.Generic.Rep (class Generic)
 
 import Control.Alternative (guard)
 import Data.Array as Array
@@ -289,8 +292,15 @@ data InlineDirective
   | InlineAlways
   | InlineArity Int
 
+derive instance Eq InlineDirective
+
 -- | Dictionnaire liant les références à leurs directives d'inlining respectives.
 type InlineDirectiveMap = Map EvalRef (Map InlineAccessor InlineDirective)
+
+type DirectiveLookup = EvalRef -> InlineDirectiveMap -> Maybe (Map InlineAccessor InlineDirective)
+
+lookupDirective :: DirectiveLookup
+lookupDirective = lookupEvalRefImpl evalRefCompare compare
 
 -- | L'environnement d'évaluation, transportant les variables locales et la configuration d'inlining.
 newtype Env = Env
@@ -301,6 +311,7 @@ newtype Env = Env
   , evalExternRef :: Env -> Qualified Ident -> Maybe BackendSemantics
   , evalExternSpine :: Env -> Qualified Ident -> Array ExternSpine -> Maybe BackendSemantics
   , directives :: InlineDirectiveMap
+  , lookupDirective :: DirectiveLookup
   }
 
 derive instance Newtype Env _
@@ -1303,7 +1314,7 @@ memberResolved = go
 evalExternFromImpl :: Env -> Qualified Ident -> Tuple BackendAnalysis ExternImpl -> Array ExternSpine -> Maybe BackendSemantics
 evalExternFromImpl (Env e) qual (Tuple _ (ExternExpr _ _)) spine
   | Just { head: ExternTypeApp _ } <- Array.uncons spine
-  , Just InlineNever <- lookupEvalRefImpl evalRefCompare compare (EvalExtern qual) e.directives >>= Map.lookup InlineRef =
+  , Just InlineNever <- e.lookupDirective (EvalExtern qual) e.directives >>= Map.lookup InlineRef =
       Just $ neutralSpine (NeutStop qual) spine
 evalExternFromImpl env@(Env e) qual (Tuple analysis (ExternExpr group expr)) spine
   | Just { head: ExternTypeApp ty, tail } <- Array.uncons spine
@@ -1313,7 +1324,7 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis (ExternExpr group expr)) spi
 -- the annotated body, so no uninstantiated callee type enters the caller.
 evalExternFromImpl (Env e) qual (Tuple _ (ExternExpr _ expr@(NeutralExpr (Typed (ForAll _ _) _)))) spine@[ ExternApp [ arg ] ]
   | isIdentityImplementation expr =
-      case lookupEvalRefImpl evalRefCompare compare (EvalExtern qual) e.directives >>= Map.lookup InlineRef of
+      case e.lookupDirective (EvalExtern qual) e.directives >>= Map.lookup InlineRef of
         Just InlineNever -> Just $ neutralSpine (NeutStop qual) spine
         Just (InlineArity n) | n > 1 -> Nothing
         _ -> Just arg
@@ -1343,7 +1354,7 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case Array.fil
     case impl of
       ExternExpr group expr -> do
         let ref = EvalExtern qual
-        case lookupEvalRefImpl evalRefCompare compare ref e.directives >>= Map.lookup InlineRef of
+        case e.lookupDirective ref e.directives >>= Map.lookup InlineRef of
           Just InlineNever ->
             Just $ NeutStop qual
           Just InlineAlways ->
@@ -1366,7 +1377,7 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case Array.fil
     case impl of
       ExternExpr group expr -> do
         let ref = EvalExtern qual
-        case lookupEvalRefImpl evalRefCompare compare ref e.directives >>= Map.lookup (InlineProp prop) of
+        case e.lookupDirective ref e.directives >>= Map.lookup (InlineProp prop) of
           Just InlineNever ->
             Just $ neutralSpine (NeutStop qual) spine
           Just InlineAlways ->
@@ -1375,7 +1386,7 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case Array.fil
             Nothing
       ExternDict group props | Just (Tuple analysis' body) <- findProp prop props -> do
         let ref = EvalExtern qual
-        case lookupEvalRefImpl evalRefCompare compare ref e.directives >>= Map.lookup (InlineProp prop) of
+        case e.lookupDirective ref e.directives >>= Map.lookup (InlineProp prop) of
           Just InlineNever ->
             Just $ neutralSpine (NeutStop qual) spine
           Just InlineAlways ->
@@ -1392,7 +1403,7 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case Array.fil
     case impl of
       ExternExpr group expr -> do
         let ref = EvalExtern qual
-        case lookupEvalRefImpl evalRefCompare compare ref e.directives >>= Map.lookup (InlineProp prop) of
+        case e.lookupDirective ref e.directives >>= Map.lookup (InlineProp prop) of
           Just InlineNever ->
             Just $ neutralSpine (NeutStop qual) spine
           Just InlineAlways ->
@@ -1406,7 +1417,7 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case Array.fil
             Nothing
       ExternDict group props | Just (Tuple analysis' body) <- findProp prop props -> do
         let ref = EvalExtern qual
-        case lookupEvalRefImpl evalRefCompare compare ref e.directives >>= Map.lookup (InlineProp prop) of
+        case e.lookupDirective ref e.directives >>= Map.lookup (InlineProp prop) of
           Just InlineNever ->
             Just $ neutralSpine (NeutStop qual) spine
           Just InlineAlways ->
@@ -1426,7 +1437,7 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case Array.fil
     case impl of
       ExternExpr group expr -> do
         let ref = EvalExtern qual
-        case lookupEvalRefImpl evalRefCompare compare ref e.directives >>= Map.lookup InlineRef of
+        case e.lookupDirective ref e.directives >>= Map.lookup InlineRef of
           Just InlineNever ->
             Just $ neutralSpine (NeutStop qual) spine
           Just InlineAlways ->
@@ -1448,7 +1459,7 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case Array.fil
     case impl of
       ExternExpr group fn -> do
         let ref = EvalExtern qual
-        case lookupEvalRefImpl evalRefCompare compare ref e.directives >>= Map.lookup (InlineSpineProp prop) of
+        case e.lookupDirective ref e.directives >>= Map.lookup (InlineSpineProp prop) of
           Just InlineNever ->
             Just $ neutralSpine (NeutStop qual) spine
           Just InlineAlways ->
@@ -1461,7 +1472,7 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case Array.fil
     case impl of
       ExternExpr group fn -> do
         let ref = EvalExtern qual
-        case lookupEvalRefImpl evalRefCompare compare ref e.directives >>= Map.lookup (InlineSpineProp prop) of
+        case e.lookupDirective ref e.directives >>= Map.lookup (InlineSpineProp prop) of
           Just InlineNever ->
             Just $ neutralSpine (NeutStop qual) spine
           Just InlineAlways ->
@@ -1474,7 +1485,7 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case Array.fil
     case impl of
       ExternExpr group fn -> do
         let ref = EvalExtern qual
-        case lookupEvalRefImpl evalRefCompare compare ref e.directives >>= Map.lookup (InlineSpineProp prop) of
+        case e.lookupDirective ref e.directives >>= Map.lookup (InlineSpineProp prop) of
           Just InlineNever ->
             Just $ neutralSpine (NeutStop qual) spine
           Just InlineAlways ->
@@ -1489,7 +1500,7 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case Array.fil
     case impl of
       ExternExpr group fn -> do
         let ref = EvalExtern qual
-        case lookupEvalRefImpl evalRefCompare compare ref e.directives >>= Map.lookup (InlineSpineProp prop) of
+        case e.lookupDirective ref e.directives >>= Map.lookup (InlineSpineProp prop) of
           Just InlineNever ->
             Just $ neutralSpine (NeutStop qual) spine
           Just InlineAlways ->
@@ -1504,13 +1515,13 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case Array.fil
     case impl of
       ExternExpr group expr -> do
         let ref = EvalExtern qual
-        case lookupEvalRefImpl evalRefCompare compare ref e.directives >>= Map.lookup (InlineProp prop) of
+        case e.lookupDirective ref e.directives >>= Map.lookup (InlineProp prop) of
           Just InlineAlways ->
             Just $ evalSpine env (eval (envForGroup env ref (InlineProp prop) group) expr) spine
           _ -> Nothing
       ExternDict group props | Just (Tuple _ body) <- findProp prop props -> do
         let ref = EvalExtern qual
-        case lookupEvalRefImpl evalRefCompare compare ref e.directives >>= Map.lookup (InlineProp prop) of
+        case e.lookupDirective ref e.directives >>= Map.lookup (InlineProp prop) of
           Just InlineAlways ->
             Just $ evalSpine env (eval (envForGroup env ref (InlineProp prop) group) body) tail
           _ -> Nothing
@@ -1521,7 +1532,7 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case Array.fil
         case impl of
           ExternExpr group fn -> do
             let ref = EvalExtern qual
-            case lookupEvalRefImpl evalRefCompare compare ref e.directives >>= Map.lookup (InlineSpineProp prop) of
+            case e.lookupDirective ref e.directives >>= Map.lookup (InlineSpineProp prop) of
               Just InlineAlways ->
                 Just $ evalSpine env (eval (envForGroup env ref (InlineSpineProp prop) group) fn) spine
               _ -> Nothing
@@ -1530,7 +1541,7 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case Array.fil
     case impl of
       ExternExpr group expr -> do
         let ref = EvalExtern qual
-        case lookupEvalRefImpl evalRefCompare compare ref e.directives >>= Map.lookup InlineRef of
+        case e.lookupDirective ref e.directives >>= Map.lookup InlineRef of
           Just InlineAlways ->
             Just $ evalSpine env (eval (envForGroup env ref InlineRef group) expr) spine
           _ -> Nothing
@@ -2158,6 +2169,12 @@ isKnownEffect = syntaxOf >>> case _ of
 newtype NeutralExpr = NeutralExpr (BackendSyntax NeutralExpr)
 
 derive instance Newtype NeutralExpr _
+
+derive instance Generic ExternImpl _
+derive instance Generic EvalRef _
+derive instance Generic InlineAccessor _
+derive instance Generic InlineDirective _
+derive instance Generic NeutralExpr _
 
 -- | Le point d'entrée principal de l'optimisation pour une fonction donnée. Orchestre l'évaluation partielle, l'inlining et la réification (quote).
 optimize :: Boolean -> Ctx -> Env -> Qualified Ident -> Int -> BackendExpr -> Tuple (Array BackendExpr) BackendExpr

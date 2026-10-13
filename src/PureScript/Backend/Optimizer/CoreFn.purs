@@ -52,6 +52,7 @@ import Prelude
 
 import Data.Array as Array
 import Data.Foldable (class Foldable, foldMap, foldlDefault, foldrDefault)
+import Data.Generic.Rep (class Generic)
 import Data.Map (Map)
 import Data.Maybe (Maybe(..))
 import Data.Newtype (class Newtype)
@@ -638,3 +639,28 @@ binderAnn = case _ of
   BinderNamed a _ _ -> a
   BinderLit a _ -> a
   BinderConstructor a _ _ _ -> a
+
+-- Structural, named constructors for the portable build-cache codec. These
+-- representations are independent of JavaScript/Go runtime constructor tags.
+derive instance Generic Ident _
+derive instance Generic ModuleName _
+derive instance Generic ProperName _
+derive instance Generic (Qualified a) _
+derive instance Generic Ann _
+derive instance Generic SourceBindingId _
+derive instance Generic ExprType _
+derive instance Generic Meta _
+derive instance Generic ConstructorType _
+derive instance Generic Comment _
+derive instance Generic (Module a) _
+derive instance Generic (Import a) _
+derive instance Generic ReExport _
+derive instance Generic (Bind a) _
+derive instance Generic (Binding a) _
+derive instance Generic (Expr a) _
+derive instance Generic (CaseAlternative a) _
+derive instance Generic (CaseGuard a) _
+derive instance Generic (Guard a) _
+derive instance Generic (Prop a) _
+derive instance Generic (Literal a) _
+derive instance Generic (Binder a) _

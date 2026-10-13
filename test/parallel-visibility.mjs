@@ -195,3 +195,35 @@ test("out-of-order completions preserve base and module directive precedence", t
     assert.deepEqual(directivesOf(parallel), directivesOf(reference), order);
   }
 });
+
+test("cached contributions reach the consumer only at canonical codegen barriers", t => {
+  isolatedPurmeta(t);
+  const modules = [
+    moduleOf("A", [["f", literal(9)]], [new C.LineComment("@inline export f never")]),
+    moduleOf("B", [["use", variable("A", "f")]]),
+    moduleOf("C", [["value", literal(7)]]),
+    moduleOf("D", [["use", variable("C", "value")]]),
+  ];
+  const reference = runReference(modules);
+  const list = List.fromFoldable(Foldable.foldableArray)(modules);
+  for (const order of ["sequential", "eager", "lifo"]) {
+    const collected = [], reused = [];
+    const opts = options(collected);
+    opts.onSkipModule = () => mod => () => ["A", "C"].includes(mod.name)
+      ? just(reference.find(entry => entry.name === mod.name).backendMod) : nothing;
+    const onReuse = () => mod => backendMod => () => {
+      reused.push(mod.name);
+      collected.push({ name: mod.name, backendMod, steps: [] });
+    };
+    if (order === "sequential") B.buildModulesWithReuse(EffectClass.monadEffectEffect)(onReuse)(opts)(list)();
+    else B.buildModulesParallelWithReuse(EffectClass.monadEffectEffect)(onReuse)({ jobs: 4, scheduler: makeScheduler(order), onStats: nothing })(opts)(list)();
+    assert.deepEqual(reused, ["A", "C"], order);
+    assert.deepEqual(collected.map(({ name, backendMod }) => ({ name, backendMod })),
+      reference.map(({ name, backendMod }) => ({ name, backendMod })), order);
+  }
+  const legacy = [];
+  const opts = options(legacy);
+  opts.onSkipModule = () => mod => () => just(reference.find(entry => entry.name === mod.name).backendMod);
+  B.buildModules(EffectClass.monadEffectEffect)(opts)(list)();
+  assert.deepEqual(legacy, [], "the historical skip API still omits codegen");
+});

@@ -19,7 +19,12 @@ module PureScript.Backend.Optimizer.Builder
   , JobScheduler
   , ParallelStats
   , buildModules
+  , buildModulesWithReuse
+  , BuildObservation
+  , buildModulesWithObservation
   , buildModulesParallel
+  , buildModulesParallelWithReuse
+  , buildModulesParallelWithObservation
   , createRankLookup
   , effectiveDirectives
   ) where
@@ -45,12 +50,14 @@ import Effect.Unsafe (unsafePerformEffect)
 import PureScript.Backend.Optimizer.Analysis (BackendAnalysis)
 import PureScript.Backend.Optimizer.BoundedMemo (createBoundedMemo, createStringMemo)
 import PureScript.Backend.Optimizer.Cache (beginPurmetaBuild, nowMillis, trimPurmetaCache, writePurmetaSync)
-import PureScript.Backend.Optimizer.Convert (BackendImplementations, BackendModule, ExternLookup(..), OptimizationSteps, PurmetaLookup, lookupPurmetaImplementation, toBackendModuleWithLookup)
+import PureScript.Backend.Optimizer.Convert (BackendImplementations, BackendModule, ExternLookup(..), OptimizationSteps, PurmetaLookup, lookupPurmetaImplementation, toBackendModuleWithLookups)
 import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Expr(..), Guard(..), Ident(..), Literal(..), Module(..), ModuleName(..), Prop(..), Qualified(..))
 import PureScript.Backend.Optimizer.CoreFn as CoreFn
 import PureScript.Backend.Optimizer.NativeMaps (evalRefCompare, insertEvalRefImpl, lookupQualifiedIdentImpl, memberEvalRefImpl, qualifiedIdentCompare)
 import PureScript.Backend.Optimizer.Semantics (BackendExpr, Ctx, EvalRef(..), ExternImpl, InlineAccessor(..), InlineDirective(..), InlineDirectiveMap, instantiateNeutralType)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
+import PureScript.Backend.Optimizer.Semantics as Semantics
+import PureScript.Backend.Optimizer.Observation as Observation
 import PureScript.Backend.Optimizer.Syntax (BackendSyntax)
 
 type BuildEnv =
@@ -68,6 +75,13 @@ type BuildOptions m =
   , onCodegenModule :: BuildEnv -> Module Ann -> BackendModule -> OptimizationSteps -> m Unit
   , traceIdents :: Set (Qualified Ident)
   , rewriteLimit :: Int
+  }
+
+-- Observations are attempt-local; only finalized fresh jobs publish them, at
+-- the same canonical boundary as codegen. The historical skip APIs use Nothing.
+type BuildObservation m =
+  { onSkipModule :: BuildEnv -> Module Ann -> Observation.View -> m (Maybe BackendModule)
+  , onReads :: BuildEnv -> Module Ann -> Observation.Reads -> m Unit
   }
 
 -- | Résultat d'une conversion de module exécutée dans un worker.
@@ -113,7 +127,23 @@ type ParallelStats =
 -- | See `PureScript.Backend.Optimizer.CoreFn.Sort.sortModules`.
 
 buildModules :: forall m. MonadEffect m => BuildOptions m -> List (Module Ann) -> m Unit
-buildModules options coreFnModules = do
+buildModules = buildModulesWithReuse (\_ _ _ -> pure unit)
+
+-- Cache consumers can restore codegen contributions at exactly the same
+-- canonical boundary as a fresh module. The historical API keeps its skip
+-- semantics; speculative onSkipModule calls never perform publication.
+buildModulesWithReuse
+  :: forall m. MonadEffect m
+  => (BuildEnv -> Module Ann -> BackendModule -> m Unit)
+  -> BuildOptions m -> List (Module Ann) -> m Unit
+buildModulesWithReuse = buildModulesWithObservation Nothing
+
+buildModulesWithObservation
+  :: forall m. MonadEffect m
+  => Maybe (BuildObservation m)
+  -> (BuildEnv -> Module Ann -> BackendModule -> m Unit)
+  -> BuildOptions m -> List (Module Ann) -> m Unit
+buildModulesWithObservation observer onReuse options coreFnModules = do
   liftEffect beginPurmetaBuild
   void $ go { directives: options.directives, implementations: Map.empty, moduleIndex: 0, exports: Map.empty, privateGlobals: Set.empty } coreFnModules
   where
@@ -123,7 +153,14 @@ buildModules options coreFnModules = do
   go ( { directives, implementations, moduleIndex, exports, privateGlobals } ) (Cons coreFnModule remainingModules) = do
     let buildEnv = { implementations, moduleCount, moduleIndex }
     coreFnModule'@(Module { name, exports: modExportsArray }) <- options.onPrepareModule buildEnv coreFnModule
-    mbCachedMod <- options.onSkipModule buildEnv coreFnModule'
+    lookupRaw <- liftEffect $ createStringMemo 512 (mkFn2 lookupPurmetaImplementation)
+    let forcedDirectives = forcePrivateInlines (Set.union privateGlobals (untypedPrivateGlobals coreFnModule')) directives
+    observed <- case observer of
+      Nothing -> pure Nothing
+      Just _ -> Just <$> liftEffect (Observation.create name lookupRaw forcedDirectives (\_ -> pure unit) (pure false))
+    mbCachedMod <- case observer, observed of
+      Just callbacks, Just inputs -> callbacks.onSkipModule buildEnv coreFnModule' inputs.view
+      _, _ -> options.onSkipModule buildEnv coreFnModule'
 
     let
       modExports = Set.fromFoldable modExportsArray
@@ -133,6 +170,7 @@ buildModules options coreFnModules = do
       Just cachedMod -> do
         let
           newDirectives = foldrWithIndex (insertEvalRefImpl evalRefCompare compare) directives cachedMod.directives
+        onReuse (buildEnv { implementations = cachedMod.implementations }) coreFnModule' cachedMod
         liftEffect $ writePurmetaSync name cachedMod.implementations
         liftEffect trimPurmetaCache
 
@@ -148,11 +186,14 @@ buildModules options coreFnModules = do
         -- Each module owns its caches. Purmeta is unchanged during conversion;
         -- local implementations and directives remain live as bindings advance.
         instantiate <- liftEffect $ createBoundedMemo 512 (mkFn2 instantiateNeutralType)
-        lookupRaw <- liftEffect $ createStringMemo 512 (mkFn2 lookupPurmetaImplementation)
-        let lookupPurmeta = lookupRaw
-        let forcedDirectives = forcePrivateInlines (Set.union privateGlobals (untypedPrivateGlobals coreFnModule')) directives
+        let lookupPurmeta = case observed of
+              Nothing -> lookupRaw
+              Just inputs -> inputs.implementation
+            lookupDirective = case observed of
+              Nothing -> Semantics.lookupDirective
+              Just inputs -> inputs.directive
         let
-          Tuple optimizationSteps backendMod = toBackendModuleWithLookup lookupPurmeta coreFnModule'
+          Tuple optimizationSteps backendMod = toBackendModuleWithLookups lookupPurmeta lookupDirective coreFnModule'
             { analyzeCustom: options.analyzeCustom
             , currentModule: name
             , instantiateNeutral: instantiate
@@ -171,6 +212,11 @@ buildModules options coreFnModules = do
           -- and the directives published by every module converted so far.
           newDirectives = foldrWithIndex (insertEvalRefImpl evalRefCompare compare) directives backendMod.directives
 
+        case observer, observed of
+          Just callbacks, Just inputs -> do
+            reads <- liftEffect inputs.read
+            callbacks.onReads (buildEnv { implementations = backendMod.implementations }) coreFnModule' reads
+          _, _ -> pure unit
         options.onCodegenModule (buildEnv { implementations = backendMod.implementations }) coreFnModule' backendMod optimizationSteps
 
         -- Write this module's implementations to disk
@@ -246,9 +292,25 @@ buildModulesParallel
   -> BuildOptions m
   -> List (Module Ann)
   -> m Unit
-buildModulesParallel runner options coreFnModules = do
+buildModulesParallel = buildModulesParallelWithReuse (\_ _ _ -> pure unit)
+
+buildModulesParallelWithReuse
+  :: forall m. MonadEffect m
+  => (BuildEnv -> Module Ann -> BackendModule -> m Unit)
+  -> { jobs :: Int, scheduler :: JobScheduler m, onStats :: Maybe (ParallelStats -> m Unit) }
+  -> BuildOptions m -> List (Module Ann) -> m Unit
+buildModulesParallelWithReuse = buildModulesParallelWithObservation Nothing
+
+buildModulesParallelWithObservation
+  :: forall m. MonadEffect m
+  => Maybe (BuildObservation m)
+  -> (BuildEnv -> Module Ann -> BackendModule -> m Unit)
+  -> { jobs :: Int, scheduler :: JobScheduler m, onStats :: Maybe (ParallelStats -> m Unit) }
+  -> BuildOptions m -> List (Module Ann) -> m Unit
+buildModulesParallelWithObservation observer onReuse runner options coreFnModules = do
   liftEffect beginPurmetaBuild
-  go initialState
+  observations <- liftEffect (Ref.new Map.empty)
+  go (initialState observations)
   where
   modules = Array.fromFoldable coreFnModules
   moduleCount = Array.length modules
@@ -304,8 +366,9 @@ buildModulesParallel runner options coreFnModules = do
     (Map.fromFoldable $ Array.mapWithIndex (\i _ -> Tuple i []) modules)
     (Map.toUnfoldable deps :: Array _)
 
-  initialState =
-    { pending: Map.fromFoldable (Array.mapWithIndex (\i m -> Tuple i m) modules)
+  initialState observations =
+    { observations
+    , pending: Map.fromFoldable (Array.mapWithIndex (\i m -> Tuple i m) modules)
     , depsLeft: depsLeft0
     , ready: Set.fromFoldable $ Array.mapMaybe
         (\(Tuple i n) -> if n == 0 then Just i else Nothing)
@@ -355,7 +418,22 @@ buildModulesParallel runner options coreFnModules = do
     Nothing -> pure st
     Just job -> do
       started <- liftEffect nowMillis
-      when (not job.cached) $
+      if job.cached then
+        onReuse
+          { implementations: job.backendMod.implementations, moduleCount, moduleIndex: job.index }
+          job.coreFnModule
+          job.backendMod
+      else do
+        case observer of
+          Just callbacks -> do
+            completed <- liftEffect (Ref.read st.observations)
+            case Map.lookup job.index completed of
+              Just reads -> callbacks.onReads
+                { implementations: job.backendMod.implementations, moduleCount, moduleIndex: job.index }
+                job.coreFnModule reads
+              Nothing -> pure unit
+            liftEffect (Ref.modify_ (Map.delete job.index) st.observations)
+          Nothing -> pure unit
         options.onCodegenModule
           { implementations: job.backendMod.implementations, moduleCount, moduleIndex: job.index }
           job.coreFnModule
@@ -445,7 +523,6 @@ buildModulesParallel runner options coreFnModules = do
     let directives = effectiveDirectives options.directives st.accumulated st.contributions i
     let buildEnv = { implementations: Map.empty, moduleCount, moduleIndex: i }
     prepared@(Module m) <- options.onPrepareModule buildEnv coreFnModule
-    mbCached <- options.onSkipModule buildEnv prepared
     -- Match the sequential builder's forced inlining of untyped private
     -- bindings, including the current prepared module. Only finalized lower
     -- ranks are visible; lookup of an unfinished predecessor defers the job.
@@ -454,21 +531,37 @@ buildModulesParallel runner options coreFnModules = do
           (untypedPrivateGlobals prepared)
           st.privateGlobals
     let forcedDirectives = forcePrivateInlines privateGlobals directives
+    let awaitModule (ModuleName name) = case Map.lookup name indexByName of
+          Just other | other < i && not (Map.member other st.finalized) -> Ref.modify_ (Set.insert other) pendingRef
+          _ -> pure unit
+    observed <- case observer of
+      Nothing -> pure Nothing
+      Just _ -> Just <$> liftEffect (Observation.create m.name lookupRaw forcedDirectives awaitModule (not <<< Set.isEmpty <$> Ref.read pendingRef))
+    mbCached <- case observer, observed of
+      Just callbacks, Just inputs -> callbacks.onSkipModule buildEnv prepared inputs.view
+      _, _ -> options.onSkipModule buildEnv prepared
     case mbCached of
-      Just cached -> pure
-        { index: i
-        , coreFnModule: prepared
-        , backendMod: cached
-        , steps: []
-        , cached: true
-        , pendingDeps: Set.empty
-        , attemptMillis: 0.0
-        }
+      Just cached -> do
+        pending <- liftEffect (Ref.read pendingRef)
+        pure
+          { index: i
+          , coreFnModule: prepared
+          , backendMod: cached
+          , steps: []
+          , cached: true
+          , pendingDeps: pending
+          , attemptMillis: 0.0
+          }
       Nothing -> do
         instantiate <- liftEffect $ createBoundedMemo 512 (mkFn2 instantiateNeutralType)
-        let lookupPurmeta = lookupRaw
+        let lookupPurmeta = case observed of
+              Nothing -> lookupRaw
+              Just inputs -> inputs.implementation
+            lookupDirective = case observed of
+              Nothing -> Semantics.lookupDirective
+              Just inputs -> inputs.directive
         let
-          Tuple steps backendMod = toBackendModuleWithLookup lookupPurmeta prepared
+          Tuple steps backendMod = toBackendModuleWithLookups lookupPurmeta lookupDirective prepared
             { analyzeCustom: options.analyzeCustom
             , currentModule: m.name
             , instantiateNeutral: instantiate
@@ -484,6 +577,11 @@ buildModulesParallel runner options coreFnModules = do
             , optimizationSteps: []
             }
         pending <- liftEffect (Ref.read pendingRef)
+        when (Set.isEmpty pending) $ case observed of
+          Just inputs -> do
+            reads <- liftEffect inputs.read
+            liftEffect (Ref.modify_ (Map.insert i reads) st.observations)
+          Nothing -> pure unit
         attemptEnded <- liftEffect nowMillis
         pure
           { index: i
@@ -525,7 +623,8 @@ buildModulesParallel runner options coreFnModules = do
           (\c -> Map.lookup c depsLeft'' == Just 0 && not (Map.member c woken.waiting))
           childIndices
       flushCodegen
-        { pending: Map.delete result.index st.pending
+        { observations: st.observations
+        , pending: Map.delete result.index st.pending
         , depsLeft: depsLeft''
         , ready: foldl (flip Set.insert)
             (Set.union (Set.delete result.index st.ready) woken.ready)
