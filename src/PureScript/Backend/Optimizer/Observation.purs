@@ -1,4 +1,4 @@
-module PureScript.Backend.Optimizer.Observation (Reads, View, Observation, create) where
+module PureScript.Backend.Optimizer.Observation (Reads, View, Observation, create, createWithAvailability) where
 
 import Prelude
 
@@ -22,6 +22,9 @@ type Reads =
 -- unfinished predecessors, even when InlineNever prevents an implementation read.
 type View =
   { implementation :: PurmetaLookup
+  -- True only for a strictly earlier, finalized owner in this attempt's
+  -- immutable snapshot. This does not load its implementation contribution.
+  , availableOwner :: String -> Boolean
   , directive :: Qualified Ident -> Maybe (Map InlineAccessor InlineDirective)
   , pending :: Effect Boolean
   }
@@ -34,7 +37,10 @@ type Observation =
   }
 
 create :: ModuleName -> PurmetaLookup -> InlineDirectiveMap -> (ModuleName -> Effect Unit) -> Effect Boolean -> Effect Observation
-create current raw implementationsDirectives awaitModule pending = do
+create = createWithAvailability (const false)
+
+createWithAvailability :: (String -> Boolean) -> ModuleName -> PurmetaLookup -> InlineDirectiveMap -> (ModuleName -> Effect Unit) -> Effect Boolean -> Effect Observation
+createWithAvailability availableOwner current raw implementationsDirectives awaitModule pending = do
   reads <- Ref.new { implementations: Map.empty, directives: Map.empty }
   let
     initial qual@(Qualified owner _) = unsafePerformEffect do
@@ -62,4 +68,4 @@ create current raw implementationsDirectives awaitModule pending = do
             Ref.modify_ (\state -> state { directives = Map.insert qual value state.directives }) reads
         _ -> pure unit
       pure (Semantics.lookupDirective ref actual)
-  pure { view: { implementation: raw, directive: initial, pending }, implementation, directive, read: Ref.read reads }
+  pure { view: { implementation: raw, availableOwner, directive: initial, pending }, implementation, directive, read: Ref.read reads }

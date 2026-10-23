@@ -575,9 +575,12 @@ buildModulesParallelWithLazyPreparation prepareFresh loadCached observer onReuse
     let awaitModule (ModuleName name) = case Map.lookup name indexByName of
           Just other | other < i && not (Map.member other st.finalized) -> Ref.modify_ (Set.insert other) pendingRef
           _ -> pure unit
+    let availableOwner name = case Map.lookup name indexByName of
+          Just other -> other < i && Map.member other st.finalized
+          Nothing -> false
     observed <- case observer of
       Nothing -> pure Nothing
-      Just _ -> Just <$> liftEffect (Observation.create m.name lookupRaw forcedDirectives awaitModule (not <<< Set.isEmpty <$> Ref.read pendingRef))
+      Just _ -> Just <$> liftEffect (Observation.createWithAvailability availableOwner m.name lookupRaw forcedDirectives awaitModule (not <<< Set.isEmpty <$> Ref.read pendingRef))
     mbCached <- case observer, observed of
       Just callbacks, Just inputs -> callbacks.onSkipModule buildEnv prepared inputs.view
       _, _ -> options.onSkipModule buildEnv prepared
