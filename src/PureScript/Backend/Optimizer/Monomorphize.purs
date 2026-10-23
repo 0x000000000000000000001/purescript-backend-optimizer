@@ -17,13 +17,20 @@ module PureScript.Backend.Optimizer.Monomorphize
   , getExprAnn
   , inferExprType
   , monomorphize
+  , monomorphizeWith
+  , monomorphizeWithReads
+  , SpecializationLookup
+  , specializationLookup
+  , specializationIndexLookup
   , extractFuncType
   , transitiveCollect
   , transitiveCollectWith
+  , transitiveCollectWithReads
   , TransitiveResult
   , PreparedInstantiation
   , SpecializationReads
   , applyStaticArgs
+  , normalizeInstantiation
   ) where
 
 import Prelude
@@ -46,7 +53,7 @@ import Data.Tuple (Tuple(..))
 import Effect (Effect)
 import Effect.Ref as Ref
 import Effect.Unsafe (unsafePerformEffect)
-import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Module(..), ModuleName(..), Prop(..), Qualified(..))
+import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Expr(..), ExprType(..), Guard(..), Ident(..), Literal(..), Module(..), ModuleName(..), Prop(..), Qualified(..), emptySpan)
 import PureScript.Backend.Optimizer.CoreFn.BindingGroups (sortBindingGroups)
 import PureScript.Backend.Optimizer.CoreFn.Usage (invalidateSourceUsageModule)
 import PureScript.Backend.Optimizer.FfiSupport (hashString)
@@ -68,6 +75,7 @@ type PreparedInstantiation =
   , expr :: Expr Ann
   , dependencies :: Tuple (Map String Int) SpecializationReads
   , contribution :: InstantiationMap
+  , bodyReads :: Set String
   }
 
 type PreparedInstantiations = Map (Tuple String String) PreparedInstantiation
@@ -115,6 +123,22 @@ isStatic = case _ of
   ExprLit _ _ -> false
   ExprConstructor _ _ _ _ -> false
   _ -> false
+
+-- | Final specialization inspects only static expressions and the types of
+-- | dynamic arguments (the latter matter when eta-expanding a dictionary).
+-- | Keep every argument position and arity while dropping unused dynamic trees.
+-- | This projection is for persisted final payloads, not source expressions.
+normalizeInstantiation :: Instantiation -> Instantiation
+normalizeInstantiation info = info
+  { dictArgs = map normalizeArgument info.dictArgs
+  , normalArgs = map normalizeArgument info.normalArgs
+  }
+  where
+  normalizeArgument arg
+    | isStatic arg = arg
+    | otherwise = ExprVar
+        (Ann { span: emptySpan, meta: Nothing, sourceUsage: Nothing, type: inferExprType arg })
+        (Qualified Nothing (Ident "__dynamic_argument"))
 
 defaultToAny :: ExprType -> ExprType
 defaultToAny = case _ of
@@ -472,7 +496,12 @@ mapAnn :: (ExprType -> ExprType) -> Ann -> Ann
 mapAnn f (Ann ann) = Ann (ann { type = map f ann.type })
 
 rewriteExpr :: Map String (Binding Ann) -> Map Ident (Expr Ann) -> Map String (Expr Ann) -> (ExprType -> ExprType) -> Expr Ann -> Expr Ann
-rewriteExpr globalAstMap = goLocals
+rewriteExpr globalAstMap = rewriteExprUsing (\name -> Map.lookup name globalAstMap)
+
+type BodyLookup = String -> Maybe (Binding Ann)
+
+rewriteExprUsing :: BodyLookup -> Map Ident (Expr Ann) -> Map String (Expr Ann) -> (ExprType -> ExprType) -> Expr Ann -> Expr Ann
+rewriteExprUsing lookupBody = goLocals
   where
   goLocals locals globalSubst f = go
     where
@@ -570,7 +599,7 @@ rewriteExpr globalAstMap = goLocals
             let
               fullName = mn <> "." <> (\(Ident n) -> n) ident
             in
-              case Map.lookup fullName globalAstMap of
+              case lookupBody fullName of
                 Just (Binding _ _ val) -> resolveDict (resolveGlobals mn Set.empty val)
                 Nothing -> Nothing
       ExprApp _ (ExprVar _ (Qualified _ (Ident ctorName))) arg | String.contains (Pattern "$Dict") ctorName -> resolveDict arg
@@ -716,14 +745,42 @@ getBindIdents = Array.concatMap case _ of
   Rec binds -> map (\(Binding _ id _) -> id) binds
 
 monomorphize :: Map String (Binding Ann) -> InstantiationMap -> Module Ann -> Module Ann
-monomorphize globalAstMap instMap (Module m) =
+monomorphize globalAstMap instMap = monomorphizeWith globalAstMap (specializationLookup instMap) instMap
+
+-- | Final rewriting reads the global specialization key index, while clone
+-- | generation reads payloads only for bindings defined in this module. The
+-- | caller must provide every own payload and a complete global lookup; omitting
+-- | either is not a conservative cache miss and can change generated calls.
+-- | Body lookup remains separate because dictionary unfolding reads definitions.
+monomorphizeWith :: Map String (Binding Ann) -> SpecializationLookup -> InstantiationMap -> Module Ann -> Module Ann
+monomorphizeWith globalAstMap = monomorphizeUsing (\name -> Map.lookup name globalAstMap)
+
+-- | Record every body lookup, including misses, used for clone generation and
+-- | dictionary unfolding. Each invocation owns its Ref, so parallel modules do
+-- | not share mutable observations.
+monomorphizeWithReads :: Map String (Binding Ann) -> SpecializationLookup -> InstantiationMap -> Module Ann -> Tuple (Module Ann) (Set String)
+monomorphizeWithReads globalAstMap lookup ownInstantiations mod =
+  trackBodyReads globalAstMap \lookupBody -> monomorphizeUsing lookupBody lookup ownInstantiations mod
+
+trackBodyReads :: forall a. Map String (Binding Ann) -> (BodyLookup -> a) -> Tuple a (Set String)
+trackBodyReads globalAstMap action = unsafePerformEffect do
+  observed <- Ref.new Set.empty
+  let lookupBody name = unsafePerformEffect do
+        Ref.modify_ (Set.insert name) observed
+        pure (Map.lookup name globalAstMap)
+  result <- evaluateTracked (\_ -> action lookupBody)
+  reads <- Ref.read observed
+  pure (Tuple result reads)
+
+monomorphizeUsing :: BodyLookup -> SpecializationLookup -> InstantiationMap -> Module Ann -> Module Ann
+monomorphizeUsing lookupBody lookup ownInstantiations (Module m) =
   let
     modNameStr = unwrap m.name
 
-    getInjectedBindsFor qualName = case Map.lookup qualName instMap of
+    getInjectedBindsFor qualName = case Map.lookup qualName ownInstantiations of
       Just typeMap ->
         let
-          processBinding = case Map.lookup qualName globalAstMap of
+          processBinding = case lookupBody qualName of
             Just (Binding ann (Ident name) expr) ->
               Array.mapMaybe
                 ( \(Tuple specKey info) ->
@@ -748,7 +805,7 @@ monomorphize globalAstMap instMap (Module m) =
 
                             -- Recursive calls need the same spine rewrite as other
                             -- calls, including removal of static dictionaries.
-                            specializedExpr = monomorphizeExpr modNameStr instMap Map.empty (rewriteExpr globalAstMap Map.empty Map.empty astSubstFn resolvedExpr)
+                            specializedExpr = monomorphizeExprWith modNameStr lookup Map.empty (rewriteExprUsing lookupBody Map.empty Map.empty astSubstFn resolvedExpr)
 
                             etaExpandedExpr = case specializedExpr of
                               ExprAbs _ _ _ -> specializedExpr
@@ -783,7 +840,7 @@ monomorphize globalAstMap instMap (Module m) =
 
     processDecl bind =
       let
-        originalBinds = monomorphizeBind modNameStr instMap Map.empty bind
+        originalBinds = monomorphizeBind modNameStr lookup Map.empty bind
         injectedBinds = case bind of
           NonRec (Binding _ (Ident name) _) -> getInjectedBindsFor (modNameStr <> "." <> name)
           Rec bindings -> Array.concatMap (\(Binding _ (Ident name) _) -> getInjectedBindsFor (modNameStr <> "." <> name)) bindings
@@ -796,15 +853,15 @@ monomorphize globalAstMap instMap (Module m) =
     -- identities. No source certificate survives this public boundary.
     invalidateSourceUsageModule $ Module (m { decls = finalDecls, exports = newIdents })
 
-monomorphizeBind :: String -> InstantiationMap -> Map Ident (Expr Ann) -> Bind Ann -> Array (Bind Ann)
-monomorphizeBind modName instMap localDicts (NonRec binding) =
-  [ NonRec (monomorphizeBinding modName instMap localDicts binding) ]
-monomorphizeBind modName instMap localDicts (Rec bindings) =
-  [ Rec (map (monomorphizeBinding modName instMap localDicts) bindings) ]
+monomorphizeBind :: String -> SpecializationLookup -> Map Ident (Expr Ann) -> Bind Ann -> Array (Bind Ann)
+monomorphizeBind modName lookup localDicts (NonRec binding) =
+  [ NonRec (monomorphizeBinding modName lookup localDicts binding) ]
+monomorphizeBind modName lookup localDicts (Rec bindings) =
+  [ Rec (map (monomorphizeBinding modName lookup localDicts) bindings) ]
 
-monomorphizeBinding :: String -> InstantiationMap -> Map Ident (Expr Ann) -> Binding Ann -> Binding Ann
-monomorphizeBinding modName instMap localDicts (Binding ann (Ident name) expr) =
-  Binding ann (Ident name) (monomorphizeExpr modName instMap localDicts (resolveGlobals modName Set.empty expr))
+monomorphizeBinding :: String -> SpecializationLookup -> Map Ident (Expr Ann) -> Binding Ann -> Binding Ann
+monomorphizeBinding modName lookup localDicts (Binding ann (Ident name) expr) =
+  Binding ann (Ident name) (monomorphizeExprWith modName lookup localDicts (resolveGlobals modName Set.empty expr))
 
 collectFreeVars :: Expr Ann -> Set Ident
 collectFreeVars = case _ of
@@ -849,15 +906,17 @@ collectFreeVarsAlt (CaseAlternative binders cg) =
   in
     Set.difference used bound
 
-monomorphizeExpr :: String -> InstantiationMap -> Map Ident (Expr Ann) -> Expr Ann -> Expr Ann
-monomorphizeExpr modName instMap = monomorphizeExprWith modName (specializationLookup instMap)
-
 -- A global lookup can establish absence before type substitution. For present
 -- globals the returned function answers membership, never reading payloads.
 type SpecializationLookup = String -> Maybe (String -> Boolean)
 
 specializationLookup :: InstantiationMap -> SpecializationLookup
 specializationLookup instMap name = (\types key -> Map.member key types) <$> Map.lookup name instMap
+
+-- | Compact persisted state can restore membership without decoding any
+-- | instantiation expressions belonging to foreign modules.
+specializationIndexLookup :: Map String (Set String) -> SpecializationLookup
+specializationIndexLookup index name = (\keys key -> Set.member key keys) <$> Map.lookup name index
 
 monomorphizeExprWith :: String -> SpecializationLookup -> Map Ident (Expr Ann) -> Expr Ann -> Expr Ann
 monomorphizeExprWith modName lookup localDicts rootExpr = case rootExpr of
@@ -1380,13 +1439,28 @@ transitiveCollectWith
   -> InstantiationMap
   -> m InstantiationMap
 transitiveCollectWith runJobs globalAstMap initialMap =
+  _.instantiations <$> transitiveCollectWithReads runJobs globalAstMap initialMap
+
+transitiveCollectWithReads
+  :: forall m
+   . MonadRec m
+  => (Array (Unit -> TransitiveResult) -> m (Array TransitiveResult))
+  -> Map String (Binding Ann)
+  -> InstantiationMap
+  -> m { instantiations :: InstantiationMap, bodyReads :: Set String }
+transitiveCollectWithReads runJobs globalAstMap initialMap =
   tailRecM loop
     { prepared: Map.empty
     , instantiations: initialMap
     , callers: countCallers initialMap
     }
   where
-  loop :: TransitiveState -> m (Step TransitiveState InstantiationMap)
+  finish instantiations prepared =
+    { instantiations
+    , bodyReads: foldl (\reads entry -> Set.union reads entry.bodyReads) Set.empty prepared
+    }
+
+  loop :: TransitiveState -> m (Step TransitiveState { instantiations :: InstantiationMap, bodyReads :: Set String })
   loop { prepared, instantiations: currentMap, callers: callers1 } = do
     let
       -- Foreign declarations have no AST body from which to emit a specialization.
@@ -1418,7 +1492,7 @@ transitiveCollectWith runJobs globalAstMap initialMap =
       -- when first computed, dependency sizes still match and caller sets only
       -- grow): `mergeResult` would be the identity. Skip the fold, the final
       -- round's discarded merge and both caller scans.
-      pure (Done currentMap)
+      pure (Done (finish currentMap prepared))
     else do
       let
         collected = Array.foldl mergeResult
@@ -1426,7 +1500,7 @@ transitiveCollectWith runJobs globalAstMap initialMap =
           results
         newMap = collected.instantiations
         callers2 = countCallers newMap
-      pure $ if callers1 == callers2 then Done currentMap else Loop (collected { callers = callers2 })
+      pure $ if callers1 == callers2 then Done (finish currentMap collected.prepared) else Loop (collected { callers = callers2 })
 
   -- `Nothing` jobs and replayed cache hits cannot change the map.
   settledResult :: TransitiveResult -> Boolean
@@ -1455,13 +1529,14 @@ transitiveCollectWith runJobs globalAstMap initialMap =
         Just cached -> cached
         _ ->
           let
-            substitutedExpr = case previous of
-              Just cached -> cached.expr
+            Tuple substitutedExpr bodyReads = case previous of
+              Just cached -> Tuple cached.expr cached.bodyReads
               Nothing ->
                 let
                   exprWithDicts = applyStaticArgs info.dictArgs info.normalArgs expr
                   resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
-                in rewriteExpr globalAstMap Map.empty Map.empty astSubstFn resolvedExpr
+                in trackBodyReads globalAstMap \lookupBody ->
+                    rewriteExprUsing lookupBody Map.empty Map.empty astSubstFn resolvedExpr
             dependencies = case previous of
               Just cached -> case cached.dependencies of
                 Tuple sizes _ -> mapWithIndex (\name _ -> specializationCount specializationMap name) sizes
@@ -1472,6 +1547,7 @@ transitiveCollectWith runJobs globalAstMap initialMap =
             , expr: substitutedExpr
             , dependencies: Tuple dependencies lookups
             , contribution: collectExpr globalAstMap definerMod Map.empty specializedExpr
+            , bodyReads
             }
     in
       Just

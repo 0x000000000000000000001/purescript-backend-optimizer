@@ -25,6 +25,8 @@ module PureScript.Backend.Optimizer.Builder
   , buildModulesParallel
   , buildModulesParallelWithReuse
   , buildModulesParallelWithObservation
+  , buildModulesParallelWithLazyContributions
+  , buildModulesParallelWithLazyPreparation
   , createRankLookup
   , effectiveDirectives
   ) where
@@ -45,6 +47,7 @@ import Data.Set (Set)
 import Data.Set as Set
 import Data.Tuple (Tuple(..))
 import Effect.Class (class MonadEffect, liftEffect)
+import Effect (Effect)
 import Effect.Ref as Ref
 import Effect.Unsafe (unsafePerformEffect)
 import PureScript.Backend.Optimizer.Analysis (BackendAnalysis)
@@ -307,7 +310,31 @@ buildModulesParallelWithObservation
   -> (BuildEnv -> Module Ann -> BackendModule -> m Unit)
   -> { jobs :: Int, scheduler :: JobScheduler m, onStats :: Maybe (ParallelStats -> m Unit) }
   -> BuildOptions m -> List (Module Ann) -> m Unit
-buildModulesParallelWithObservation observer onReuse runner options coreFnModules = do
+buildModulesParallelWithObservation = buildModulesParallelWithLazyContributions Nothing
+
+-- A restored module can supply its immutable implementation contribution on
+-- first read. Finality and canonical visibility are still checked before the
+-- loader runs; this never exposes a future module or an unfinished attempt.
+buildModulesParallelWithLazyContributions
+  :: forall m. MonadEffect m
+  => Maybe (String -> Effect BackendImplementations)
+  -> Maybe (BuildObservation m)
+  -> (BuildEnv -> Module Ann -> BackendModule -> m Unit)
+  -> { jobs :: Int, scheduler :: JobScheduler m, onStats :: Maybe (ParallelStats -> m Unit) }
+  -> BuildOptions m -> List (Module Ann) -> m Unit
+buildModulesParallelWithLazyContributions = buildModulesParallelWithLazyPreparation pure
+
+-- Restore the actual prepared AST only after both cache proofs have failed.
+-- Inert placeholders still carry the exact private-global and ordering facts.
+buildModulesParallelWithLazyPreparation
+  :: forall m. MonadEffect m
+  => (Module Ann -> m (Module Ann))
+  -> Maybe (String -> Effect BackendImplementations)
+  -> Maybe (BuildObservation m)
+  -> (BuildEnv -> Module Ann -> BackendModule -> m Unit)
+  -> { jobs :: Int, scheduler :: JobScheduler m, onStats :: Maybe (ParallelStats -> m Unit) }
+  -> BuildOptions m -> List (Module Ann) -> m Unit
+buildModulesParallelWithLazyPreparation prepareFresh loadCached observer onReuse runner options coreFnModules = do
   liftEffect beginPurmetaBuild
   observations <- liftEffect (Ref.new Map.empty)
   go (initialState observations)
@@ -513,8 +540,23 @@ buildModulesParallelWithObservation observer onReuse runner options coreFnModule
 
   mkJob st i coreFnModule _ = do
     attemptStarted <- liftEffect nowMillis
+    let buildEnv = { implementations: Map.empty, moduleCount, moduleIndex: i }
+    prepared <- options.onPrepareModule buildEnv coreFnModule
+    -- An exact cached contribution does not inspect the optimizer environment.
+    -- Avoid constructing all predecessor directives for these inert jobs.
+    early <- case loadCached of
+      Just _ -> options.onSkipModule buildEnv prepared
+      Nothing -> pure Nothing
+    case early of
+      Just cached -> pure
+        { index: i, coreFnModule: prepared, backendMod: cached, steps: []
+        , cached: true, pendingDeps: Set.empty, attemptMillis: 0.0
+        }
+      Nothing -> mkUncachedJob st i prepared attemptStarted
+
+  mkUncachedJob st i prepared@(Module m) attemptStarted = do
     pendingRef <- liftEffect (Ref.new Set.empty)
-    lookupRaw <- createRankLookup
+    lookupRaw <- createLazyRankLookup
       { indexByName
       , currentIndex: i
       , finalized: st.finalized
@@ -522,7 +564,6 @@ buildModulesParallelWithObservation observer onReuse runner options coreFnModule
       pendingRef
     let directives = effectiveDirectives options.directives st.accumulated st.contributions i
     let buildEnv = { implementations: Map.empty, moduleCount, moduleIndex: i }
-    prepared@(Module m) <- options.onPrepareModule buildEnv coreFnModule
     -- Match the sequential builder's forced inlining of untyped private
     -- bindings, including the current prepared module. Only finalized lower
     -- ranks are visible; lookup of an unfinished predecessor defers the job.
@@ -553,6 +594,7 @@ buildModulesParallelWithObservation observer onReuse runner options coreFnModule
           , attemptMillis: 0.0
           }
       Nothing -> do
+        actual <- prepareFresh prepared
         instantiate <- liftEffect $ createBoundedMemo 512 (mkFn2 instantiateNeutralType)
         let lookupPurmeta = case observed of
               Nothing -> lookupRaw
@@ -561,7 +603,7 @@ buildModulesParallelWithObservation observer onReuse runner options coreFnModule
               Nothing -> Semantics.lookupDirective
               Just inputs -> inputs.directive
         let
-          Tuple steps backendMod = toBackendModuleWithLookups lookupPurmeta lookupDirective prepared
+          Tuple steps backendMod = toBackendModuleWithLookups lookupPurmeta lookupDirective actual
             { analyzeCustom: options.analyzeCustom
             , currentModule: m.name
             , instantiateNeutral: instantiate
@@ -585,7 +627,7 @@ buildModulesParallelWithObservation observer onReuse runner options coreFnModule
         attemptEnded <- liftEffect nowMillis
         pure
           { index: i
-          , coreFnModule: prepared
+          , coreFnModule: actual
           , backendMod
           , steps
           , cached: false
@@ -612,7 +654,11 @@ buildModulesParallelWithObservation observer onReuse runner options coreFnModule
       else
         pure (st { ready = Set.delete result.index st.ready, waiting = Map.insert result.index fresh st.waiting, stats = stats' })
     else do
-      liftEffect $ writePurmetaSync m.name result.backendMod.implementations
+      -- Lazy cached contributions remain private to this build. The parallel
+      -- resolver below consumes them directly, not the purmeta disk mirror.
+      case loadCached of
+        Just _ | result.cached -> pure unit
+        _ -> liftEffect $ writePurmetaSync m.name result.backendMod.implementations
       liftEffect trimPurmetaCache
       let
         woken = wake result.index st.waiting
@@ -629,7 +675,9 @@ buildModulesParallelWithObservation observer onReuse runner options coreFnModule
         , ready: foldl (flip Set.insert)
             (Set.union (Set.delete result.index st.ready) woken.ready)
             newlyReady
-        , finalized: Map.insert result.index result.backendMod.implementations st.finalized
+        , finalized: Map.insert result.index (\_ -> case loadCached of
+            Just load | result.cached -> unsafePerformEffect (load (unwrap m.name))
+            _ -> result.backendMod.implementations) st.finalized
         , contributions: Map.insert result.index result.backendMod.directives st.contributions
         , privateGlobals: Map.insert result.index (untypedPrivateGlobals result.coreFnModule) st.privateGlobals
         , accumulated: foldrWithIndex (insertEvalRefImpl evalRefCompare compare) st.accumulated result.backendMod.directives
@@ -691,6 +739,17 @@ createRankLookup
   -> Ref.Ref (Set Int)
   -> m PurmetaLookup
 createRankLookup view pendingRef = do
+  createLazyRankLookup (view { finalized = map const view.finalized }) pendingRef
+
+createLazyRankLookup
+  :: forall m. MonadEffect m
+  => { indexByName :: Map String Int
+     , currentIndex :: Int
+     , finalized :: Map Int (Unit -> BackendImplementations)
+     }
+  -> Ref.Ref (Set Int)
+  -> m PurmetaLookup
+createLazyRankLookup view pendingRef = do
   let
     raw moduleName ident =
       case Map.lookup moduleName view.indexByName of
@@ -698,8 +757,8 @@ createRankLookup view pendingRef = do
         Just other
           | other >= view.currentIndex -> ExternMissing
           | otherwise -> case Map.lookup other view.finalized of
-              Just impls ->
-                case lookupQualifiedIdentImpl qualifiedIdentCompare (Qualified (Just (ModuleName moduleName)) (Ident ident)) impls of
+              Just load ->
+                case lookupQualifiedIdentImpl qualifiedIdentCompare (Qualified (Just (ModuleName moduleName)) (Ident ident)) (load unit) of
                   Just impl -> ExternFound impl
                   Nothing -> ExternMissing
               Nothing -> unsafePerformEffect do
