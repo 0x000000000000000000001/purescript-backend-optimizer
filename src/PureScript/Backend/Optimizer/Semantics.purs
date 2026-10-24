@@ -42,7 +42,9 @@ module PureScript.Backend.Optimizer.Semantics
   , makeEffectBind
   , makeLet
   , build
+  , OptimizationProfile(..)
   , evalExternFromImpl
+  , evalExternFromImplWithProfile
   , evalExternRefFromImpl
   , freeze
   , optimize
@@ -1311,18 +1313,26 @@ memberResolved = go
   go (NeutAccessor _ _) = false
   go _ = true
 
+-- | Release preserves the historical heuristics. Dev keeps the normalization
+-- | machinery and explicit directives, but does not expand ordinary imported
+-- | implementations just because a size/call-site heuristic allows it.
+data OptimizationProfile = Release | Dev
+
 evalExternFromImpl :: Env -> Qualified Ident -> Tuple BackendAnalysis ExternImpl -> Array ExternSpine -> Maybe BackendSemantics
-evalExternFromImpl (Env e) qual (Tuple _ (ExternExpr _ _)) spine
+evalExternFromImpl = evalExternFromImplWithProfile Release
+
+evalExternFromImplWithProfile :: OptimizationProfile -> Env -> Qualified Ident -> Tuple BackendAnalysis ExternImpl -> Array ExternSpine -> Maybe BackendSemantics
+evalExternFromImplWithProfile _ (Env e) qual (Tuple _ (ExternExpr _ _)) spine
   | Just { head: ExternTypeApp _ } <- Array.uncons spine
   , Just InlineNever <- e.lookupDirective (EvalExtern qual) e.directives >>= Map.lookup InlineRef =
       Just $ neutralSpine (NeutStop qual) spine
-evalExternFromImpl env@(Env e) qual (Tuple analysis (ExternExpr group expr)) spine
+evalExternFromImplWithProfile profile env@(Env e) qual (Tuple analysis (ExternExpr group expr)) spine
   | Just { head: ExternTypeApp ty, tail } <- Array.uncons spine
   , Just instantiated <- e.instantiateNeutral ty expr =
-      evalExternFromImpl env qual (Tuple analysis (ExternExpr group instantiated)) tail
+      evalExternFromImplWithProfile profile env qual (Tuple analysis (ExternExpr group instantiated)) tail
 -- An identity only returns its caller's value. Reduce it without evaluating
 -- the annotated body, so no uninstantiated callee type enters the caller.
-evalExternFromImpl (Env e) qual (Tuple _ (ExternExpr _ expr@(NeutralExpr (Typed (ForAll _ _) _)))) spine@[ ExternApp [ arg ] ]
+evalExternFromImplWithProfile _ (Env e) qual (Tuple _ (ExternExpr _ expr@(NeutralExpr (Typed (ForAll _ _) _)))) spine@[ ExternApp [ arg ] ]
   | isIdentityImplementation expr =
       case e.lookupDirective (EvalExtern qual) e.directives >>= Map.lookup InlineRef of
         Just InlineNever -> Just $ neutralSpine (NeutStop qual) spine
@@ -1333,7 +1343,7 @@ evalExternFromImpl (Env e) qual (Tuple _ (ExternExpr _ expr@(NeutralExpr (Typed 
 -- instance member (`add semiringInt` becomes `intAdd`) instead of leaving a
 -- runtime dictionary dispatch, and sidesteps the generic-annotation rule below
 -- because the projection itself is not inlined.
-evalExternFromImpl env qual (Tuple _ (ExternExpr group expr)) spine
+evalExternFromImplWithProfile _ env qual (Tuple _ (ExternExpr group expr)) spine
   | Just member <- classAccessorField expr
   , Array.all isNotTypeApp spine
   , [ ExternApp args ] <- spine
@@ -1346,10 +1356,10 @@ evalExternFromImpl env qual (Tuple _ (ExternExpr group expr)) spine
 -- A value application does not instantiate the implementation's quantifiers.
 -- Inlining it would attach its generic annotations to caller expressions; a
 -- later caller substitution could capture those still-unbound type names.
-evalExternFromImpl _ _ (Tuple _ (ExternExpr _ (NeutralExpr (Typed (ForAll _ _) _)))) _ = Nothing
-evalExternFromImpl _ _ (Tuple _ (ExternExpr _ _)) spine
+evalExternFromImplWithProfile _ _ _ (Tuple _ (ExternExpr _ (NeutralExpr (Typed (ForAll _ _) _)))) _ = Nothing
+evalExternFromImplWithProfile _ _ _ (Tuple _ (ExternExpr _ _)) spine
   | Array.any (not <<< isNotTypeApp) spine = Nothing
-evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case Array.filter isNotTypeApp spine of
+evalExternFromImplWithProfile profile env@(Env e) qual (Tuple analysis impl) spine = case Array.filter isNotTypeApp spine of
   [] ->
     case impl of
       ExternExpr group expr -> do
@@ -1365,7 +1375,7 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case Array.fil
             case expr of
               NeutralExpr (Lit lit) | shouldInlineExternLiteral lit ->
                 Just $ eval (envForGroup env ref InlineRef group) expr
-              _ | shouldInlineExternReference qual analysis expr ->
+              _ | allowHeuristicInlining profile env qual && shouldInlineExternReference qual analysis expr ->
                 Just $ eval (envForGroup env ref InlineRef group) expr
               _ ->
                 Nothing
@@ -1447,7 +1457,7 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case Array.fil
                 Just $ evalApp env (eval (envForGroup env ref InlineRef group) expr) args
             | otherwise ->
                 Nothing
-          _ | shouldInlineExternApp qual analysis expr args ->
+          _ | allowHeuristicInlining profile env qual && shouldInlineExternApp qual analysis expr args ->
             Just $ evalApp env (eval (envForGroup env ref InlineRef group) expr) args
           _ ->
             Nothing
@@ -1548,6 +1558,18 @@ evalExternFromImpl env@(Env e) qual (Tuple analysis impl) spine = case Array.fil
       _ -> Nothing
   _ ->
     Nothing
+
+-- Dictionary member projections above deliberately keep their own heuristics:
+-- resolving a known dictionary is also needed by typed native backends. The
+-- current-module check preserves local simplification while imported ordinary
+-- functions keep a call boundary in dev mode. The profile is immutable and
+-- belongs to the conversion closure, so parallel attempts cannot interfere.
+allowHeuristicInlining :: OptimizationProfile -> Env -> Qualified Ident -> Boolean
+allowHeuristicInlining Release _ _ = true
+allowHeuristicInlining Dev (Env env) (Qualified owner _) =
+  case owner of
+    Just moduleName -> moduleName == env.currentModule
+    Nothing -> true
 
 isIdentityImplementation :: NeutralExpr -> Boolean
 isIdentityImplementation expr = case stripTyped expr of

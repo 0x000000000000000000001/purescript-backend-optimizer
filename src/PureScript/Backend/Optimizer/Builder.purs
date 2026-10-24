@@ -22,6 +22,7 @@ module PureScript.Backend.Optimizer.Builder
   , buildModulesWithReuse
   , BuildObservation
   , buildModulesWithObservation
+  , buildModulesWithObservationAndProfile
   , buildModulesParallel
   , buildModulesParallelWithReuse
   , buildModulesParallelWithObservation
@@ -31,6 +32,7 @@ module PureScript.Backend.Optimizer.Builder
   , buildModulesParallelWithRestoredHeaders
   , CachedBindingLookup
   , buildModulesParallelWithBindingLookup
+  , buildModulesParallelWithBindingLookupAndProfile
   , createRankLookup
   , effectiveDirectives
   ) where
@@ -57,11 +59,11 @@ import Effect.Unsafe (unsafePerformEffect)
 import PureScript.Backend.Optimizer.Analysis (BackendAnalysis)
 import PureScript.Backend.Optimizer.BoundedMemo (createBoundedMemo, createStringMemo)
 import PureScript.Backend.Optimizer.Cache (beginPurmetaBuild, nowMillis, trimPurmetaCache, writePurmetaSync)
-import PureScript.Backend.Optimizer.Convert (BackendImplementations, BackendModule, ExternLookup(..), OptimizationSteps, PurmetaLookup, lookupPurmetaImplementation, toBackendModuleWithLookups)
+import PureScript.Backend.Optimizer.Convert (BackendImplementations, BackendModule, ExternLookup(..), OptimizationSteps, PurmetaLookup, lookupPurmetaImplementation, toBackendModuleWithLookupsAndProfile)
 import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Binding(..), CaseAlternative(..), CaseGuard(..), Expr(..), Guard(..), Ident(..), Literal(..), Module(..), ModuleName(..), Prop(..), Qualified(..))
 import PureScript.Backend.Optimizer.CoreFn as CoreFn
 import PureScript.Backend.Optimizer.NativeMaps (evalRefCompare, insertEvalRefImpl, lookupQualifiedIdentImpl, memberEvalRefImpl, qualifiedIdentCompare)
-import PureScript.Backend.Optimizer.Semantics (BackendExpr, Ctx, EvalRef(..), ExternImpl, InlineAccessor(..), InlineDirective(..), InlineDirectiveMap, instantiateNeutralType)
+import PureScript.Backend.Optimizer.Semantics (BackendExpr, Ctx, EvalRef(..), ExternImpl, InlineAccessor(..), InlineDirective(..), InlineDirectiveMap, OptimizationProfile(..), instantiateNeutralType)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
 import PureScript.Backend.Optimizer.Semantics as Semantics
 import PureScript.Backend.Optimizer.Observation as Observation
@@ -159,7 +161,15 @@ buildModulesWithObservation
   => Maybe (BuildObservation m)
   -> (BuildEnv -> Module Ann -> BackendModule -> m Unit)
   -> BuildOptions m -> List (Module Ann) -> m Unit
-buildModulesWithObservation observer onReuse options coreFnModules = do
+buildModulesWithObservation = buildModulesWithObservationAndProfile Release
+
+buildModulesWithObservationAndProfile
+  :: forall m. MonadEffect m
+  => OptimizationProfile
+  -> Maybe (BuildObservation m)
+  -> (BuildEnv -> Module Ann -> BackendModule -> m Unit)
+  -> BuildOptions m -> List (Module Ann) -> m Unit
+buildModulesWithObservationAndProfile profile observer onReuse options coreFnModules = do
   liftEffect beginPurmetaBuild
   void $ go { directives: options.directives, implementations: Map.empty, moduleIndex: 0, exports: Map.empty, privateGlobals: Set.empty } coreFnModules
   where
@@ -209,7 +219,7 @@ buildModulesWithObservation observer onReuse options coreFnModules = do
               Nothing -> Semantics.lookupDirective
               Just inputs -> inputs.directive
         let
-          Tuple optimizationSteps backendMod = toBackendModuleWithLookups lookupPurmeta lookupDirective coreFnModule'
+          Tuple optimizationSteps backendMod = toBackendModuleWithLookupsAndProfile profile lookupPurmeta lookupDirective coreFnModule'
             { analyzeCustom: options.analyzeCustom
             , currentModule: name
             , instantiateNeutral: instantiate
@@ -392,7 +402,21 @@ buildModulesParallelWithBindingLookup
   -> (BuildEnv -> Module Ann -> BackendModule -> m Unit)
   -> { jobs :: Int, scheduler :: JobScheduler m, onStats :: Maybe (ParallelStats -> m Unit) }
   -> BuildOptions m -> List (Module Ann) -> m Unit
-buildModulesParallelWithBindingLookup loadBinding restoredHeaders schedulingHints prepareFresh loadCached observer onReuse runner options coreFnModules = do
+buildModulesParallelWithBindingLookup = buildModulesParallelWithBindingLookupAndProfile Release
+
+buildModulesParallelWithBindingLookupAndProfile
+  :: forall m. MonadEffect m
+  => OptimizationProfile
+  -> Maybe CachedBindingLookup
+  -> Map String BackendModule
+  -> Map String (Array String)
+  -> (Module Ann -> m (Module Ann))
+  -> Maybe (String -> Effect BackendImplementations)
+  -> Maybe (BuildObservation m)
+  -> (BuildEnv -> Module Ann -> BackendModule -> m Unit)
+  -> { jobs :: Int, scheduler :: JobScheduler m, onStats :: Maybe (ParallelStats -> m Unit) }
+  -> BuildOptions m -> List (Module Ann) -> m Unit
+buildModulesParallelWithBindingLookupAndProfile profile loadBinding restoredHeaders schedulingHints prepareFresh loadCached observer onReuse runner options coreFnModules = do
   liftEffect beginPurmetaBuild
   observations <- liftEffect (Ref.new Map.empty)
   go (initialState observations)
@@ -702,7 +726,7 @@ buildModulesParallelWithBindingLookup loadBinding restoredHeaders schedulingHint
               Nothing -> Semantics.lookupDirective
               Just inputs -> inputs.directive
         let
-          Tuple steps backendMod = toBackendModuleWithLookups lookupPurmeta lookupDirective actual
+          Tuple steps backendMod = toBackendModuleWithLookupsAndProfile profile lookupPurmeta lookupDirective actual
             { analyzeCustom: options.analyzeCustom
             , currentModule: m.name
             , instantiateNeutral: instantiate

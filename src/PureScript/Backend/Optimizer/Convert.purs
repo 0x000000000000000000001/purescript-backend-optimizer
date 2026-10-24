@@ -54,6 +54,7 @@ module PureScript.Backend.Optimizer.Convert
   , toBackendModule
   , toBackendModuleWithLookup
   , toBackendModuleWithLookups
+  , toBackendModuleWithLookupsAndProfile
   , lookupPurmetaImplementation
   ) where
 
@@ -88,7 +89,7 @@ import PureScript.Backend.Optimizer.CoreFn (Ann(..), Bind(..), Binder(..), Bindi
 import PureScript.Backend.Optimizer.Directives (DirectiveHeaderResult, parseDirectiveHeader)
 import PureScript.Backend.Optimizer.CoreFn.Usage (invalidateSourceUsageModule)
 import PureScript.Backend.Optimizer.NativeMaps (insertQualifiedIdentImpl, insertStringImpl, lookupQualifiedIdentImpl, lookupStringImpl, qualifiedIdentCompare, stringCompare)
-import PureScript.Backend.Optimizer.Semantics (BackendExpr(..), BackendSemantics, Ctx(..), DataTypeMeta, Env(..), EvalRef(..), ExternImpl(..), ExternSpine(..), InlineAccessor(..), InlineDirective(..), InlineDirectiveMap, NeutralExpr(..), build, evalExternFromImpl, evalExternRefFromImpl, freeze, optimize, unwrapSemTyped)
+import PureScript.Backend.Optimizer.Semantics (BackendExpr(..), BackendSemantics, Ctx(..), DataTypeMeta, Env(..), EvalRef(..), ExternImpl(..), ExternSpine(..), InlineAccessor(..), InlineDirective(..), InlineDirectiveMap, NeutralExpr(..), OptimizationProfile(..), build, evalExternFromImplWithProfile, evalExternRefFromImpl, freeze, optimize, unwrapSemTyped)
 import PureScript.Backend.Optimizer.Semantics.Foreign (ForeignEval)
 import PureScript.Backend.Optimizer.Semantics as Semantics
 import PureScript.Backend.Optimizer.Substitute (substituteExprType)
@@ -150,7 +151,8 @@ data ExternLookup
 type PurmetaLookup = String -> String -> ExternLookup
 
 type ConvertEnv =
-  { lookupPurmeta :: PurmetaLookup
+  { optimizationProfile :: OptimizationProfile
+  , lookupPurmeta :: PurmetaLookup
   , lookupDirective :: Semantics.DirectiveLookup
   | ConvertEnvFields
   }
@@ -167,9 +169,13 @@ toBackendModuleWithLookup :: PurmetaLookup -> Module Ann -> Record ConvertEnvFie
 toBackendModuleWithLookup lookupPurmeta = toBackendModuleWithLookups lookupPurmeta Semantics.lookupDirective
 
 toBackendModuleWithLookups :: PurmetaLookup -> Semantics.DirectiveLookup -> Module Ann -> Record ConvertEnvFields -> Tuple OptimizationSteps BackendModule
-toBackendModuleWithLookups lookupPurmeta lookupDirective source env =
+toBackendModuleWithLookups = toBackendModuleWithLookupsAndProfile Release
+
+toBackendModuleWithLookupsAndProfile :: OptimizationProfile -> PurmetaLookup -> Semantics.DirectiveLookup -> Module Ann -> Record ConvertEnvFields -> Tuple OptimizationSteps BackendModule
+toBackendModuleWithLookupsAndProfile optimizationProfile lookupPurmeta lookupDirective source env =
   toBackendModuleWithoutSourceUsage (invalidateSourceUsageModule source)
-    { lookupPurmeta
+    { optimizationProfile
+    , lookupPurmeta
     , lookupDirective
     , analyzeCustom: env.analyzeCustom
     , instantiateNeutral: env.instantiateNeutral
@@ -563,7 +569,7 @@ makeExternEvalSpine group conv env qual spine = do
       res = case result of
         Nothing -> do
           impl <- lookupImplementation conv qual
-          evalExternFromImpl (topEnv env) qual impl spine'
+          evalExternFromImplWithProfile conv.optimizationProfile (topEnv env) qual impl spine'
         _ ->
           result
     res
