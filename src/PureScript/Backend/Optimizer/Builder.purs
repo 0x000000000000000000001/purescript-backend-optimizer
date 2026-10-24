@@ -27,6 +27,10 @@ module PureScript.Backend.Optimizer.Builder
   , buildModulesParallelWithObservation
   , buildModulesParallelWithLazyContributions
   , buildModulesParallelWithLazyPreparation
+  , buildModulesParallelWithSchedulingHints
+  , buildModulesParallelWithRestoredHeaders
+  , CachedBindingLookup
+  , buildModulesParallelWithBindingLookup
   , createRankLookup
   , effectiveDirectives
   ) where
@@ -67,6 +71,15 @@ type BuildEnv =
   { implementations :: Map (Qualified Ident) (Tuple BackendAnalysis ExternImpl)
   , moduleCount :: Int
   , moduleIndex :: Int
+  }
+
+-- Nothing is an uncovered query; Just Nothing is a verified absence. This
+-- optional cache is consulted only for a finalized reused contribution.
+type CachedBindingLookup = String -> String -> String -> Effect (Maybe (Maybe (Tuple BackendAnalysis ExternImpl)))
+
+type FinalizedContribution =
+  { cached :: Boolean
+  , load :: Unit -> BackendImplementations
   }
 
 type BuildOptions m =
@@ -334,13 +347,69 @@ buildModulesParallelWithLazyPreparation
   -> (BuildEnv -> Module Ann -> BackendModule -> m Unit)
   -> { jobs :: Int, scheduler :: JobScheduler m, onStats :: Maybe (ParallelStats -> m Unit) }
   -> BuildOptions m -> List (Module Ann) -> m Unit
-buildModulesParallelWithLazyPreparation prepareFresh loadCached observer onReuse runner options coreFnModules = do
+buildModulesParallelWithLazyPreparation = buildModulesParallelWithSchedulingHints Map.empty
+
+-- Prior observations may recover scheduling edges omitted by inert headers.
+-- Hints only delay attempts; all reads still use the same rank/finality view.
+-- Missing, stale or future hints cannot prove reuse or reveal a contribution.
+buildModulesParallelWithSchedulingHints
+  :: forall m. MonadEffect m
+  => Map String (Array String)
+  -> (Module Ann -> m (Module Ann))
+  -> Maybe (String -> Effect BackendImplementations)
+  -> Maybe (BuildObservation m)
+  -> (BuildEnv -> Module Ann -> BackendModule -> m Unit)
+  -> { jobs :: Int, scheduler :: JobScheduler m, onStats :: Maybe (ParallelStats -> m Unit) }
+  -> BuildOptions m -> List (Module Ann) -> m Unit
+buildModulesParallelWithSchedulingHints = buildModulesParallelWithRestoredHeaders Map.empty
+
+-- The caller may decode independently proven cache hits in a batch. They are
+-- still finalized only at the canonical codegen front, using the same step as
+-- completed jobs. In particular, a future header is never visible early.
+-- These headers must correspond to the result of onPrepareModule, not an AST
+-- that the callback would transform. The historical APIs keep their ordinary
+-- per-attempt cache lookup and preparation behavior.
+buildModulesParallelWithRestoredHeaders
+  :: forall m. MonadEffect m
+  => Map String BackendModule
+  -> Map String (Array String)
+  -> (Module Ann -> m (Module Ann))
+  -> Maybe (String -> Effect BackendImplementations)
+  -> Maybe (BuildObservation m)
+  -> (BuildEnv -> Module Ann -> BackendModule -> m Unit)
+  -> { jobs :: Int, scheduler :: JobScheduler m, onStats :: Maybe (ParallelStats -> m Unit) }
+  -> BuildOptions m -> List (Module Ann) -> m Unit
+buildModulesParallelWithRestoredHeaders = buildModulesParallelWithBindingLookup Nothing
+
+buildModulesParallelWithBindingLookup
+  :: forall m. MonadEffect m
+  => Maybe CachedBindingLookup
+  -> Map String BackendModule
+  -> Map String (Array String)
+  -> (Module Ann -> m (Module Ann))
+  -> Maybe (String -> Effect BackendImplementations)
+  -> Maybe (BuildObservation m)
+  -> (BuildEnv -> Module Ann -> BackendModule -> m Unit)
+  -> { jobs :: Int, scheduler :: JobScheduler m, onStats :: Maybe (ParallelStats -> m Unit) }
+  -> BuildOptions m -> List (Module Ann) -> m Unit
+buildModulesParallelWithBindingLookup loadBinding restoredHeaders schedulingHints prepareFresh loadCached observer onReuse runner options coreFnModules = do
   liftEffect beginPurmetaBuild
   observations <- liftEffect (Ref.new Map.empty)
   go (initialState observations)
   where
   modules = Array.fromFoldable coreFnModules
   moduleCount = Array.length modules
+
+  restoredAt :: Int -> Maybe BackendModule
+  restoredAt i = do
+    Module m <- Array.index modules i
+    backend <- Map.lookup (unwrap m.name) restoredHeaders
+    if backend.name == m.name then Just backend else Nothing
+
+  needsJob :: Int -> Boolean
+  needsJob i = case restoredAt i of
+    Nothing -> true
+    Just _ -> false
 
   indexByName :: Map String Int
   indexByName = Map.fromFoldable $ Array.mapWithIndex
@@ -357,9 +426,13 @@ buildModulesParallelWithLazyPreparation prepareFresh loadCached observer onReuse
   refIndices :: Int -> Array Int
   refIndices i = case Array.index modules i of
     Nothing -> []
-    Just mod -> Array.mapMaybe
-      (\mn -> Map.lookup mn indexByName >>= keepIndex i)
-      (Set.toUnfoldable (referencedModules mod))
+    Just mod@(Module m) ->
+      let
+        references = Set.toUnfoldable (referencedModules mod)
+        owners = case Map.lookup (unwrap m.name) schedulingHints of
+          Nothing -> references
+          Just hints -> references <> hints
+      in Array.mapMaybe (\mn -> Map.lookup mn indexByName >>= keepIndex i) owners
 
   -- The TAST import list contains the module itself, as well as Prim modules
   -- absent from the corpus; neither is a scheduling dependency.
@@ -383,14 +456,24 @@ buildModulesParallelWithLazyPreparation prepareFresh loadCached observer onReuse
       (refIndices i)
 
   deps :: Map Int (Array Int)
-  deps = Map.fromFoldable $ Array.mapWithIndex
-    ( \i _ -> Tuple i (Array.nub (importIndices i <> fromMaybe [] (Map.lookup i pairWaits))) )
-    modules
+  deps = Map.fromFoldable $
+    if Map.isEmpty restoredHeaders then
+      Array.mapWithIndex (\i _ -> dependencies i) modules
+    else
+      map dependencies $ Array.filter needsJob $ Array.mapWithIndex (\i _ -> i) modules
+    where
+    dependencies i = Tuple i (Array.nub (importIndices i <> fromMaybe [] (Map.lookup i pairWaits)))
 
+  -- Restored headers advance only at the canonical front, so they never need
+  -- scheduling dependencies of their own. Retain every dependency of uncertain
+  -- jobs, including edges to restored owners: their ordinary step still wakes
+  -- the same readers when those owners become finalized.
   children :: Map Int (Array Int)
   children = foldl
     (\acc (Tuple i ds) -> foldl (\a d -> Map.insertWith (<>) d [ i ] a) acc ds)
-    (Map.fromFoldable $ Array.mapWithIndex (\i _ -> Tuple i []) modules)
+    (if Map.isEmpty restoredHeaders then
+      Map.fromFoldable $ Array.mapWithIndex (\i _ -> Tuple i []) modules
+    else Map.empty)
     (Map.toUnfoldable deps :: Array _)
 
   initialState observations =
@@ -484,7 +567,7 @@ buildModulesParallelWithLazyPreparation prepareFresh loadCached observer onReuse
           let
             pendingIndices = Set.toUnfoldable (Map.keys st.pending) :: Array Int
             readyToTry = Array.filter
-              (\i -> not (Map.member i st.waiting) && not (Set.member i st.inFlight))
+              (\i -> needsJob i && not (Map.member i st.waiting) && not (Set.member i st.inFlight))
               pendingIndices
           in
             case Array.find referencesReady readyToTry of
@@ -501,9 +584,22 @@ buildModulesParallelWithLazyPreparation prepareFresh loadCached observer onReuse
     referencesReady i = Array.all (\d -> Map.member d st.finalized)
       (fromMaybe [] (Map.lookup i pairWaits))
     firstFree indices =
-      Array.find (\i -> not (Set.member i st.inFlight)) (Set.toUnfoldable indices :: Array Int)
+      Array.find (\i -> needsJob i && not (Set.member i st.inFlight)) (Set.toUnfoldable indices :: Array Int)
 
-  go st = case pickModule st of
+  go st = case Map.lookup st.nextCodegen st.pending, restoredAt st.nextCodegen of
+    Just coreFnModule, Just backendMod -> do
+      started <- liftEffect nowMillis
+      let buildEnv = { implementations: Map.empty, moduleCount, moduleIndex: st.nextCodegen }
+      prepared <- options.onPrepareModule buildEnv coreFnModule
+      restored <- step st
+        { index: st.nextCodegen, coreFnModule: prepared, backendMod, steps: []
+        , cached: true, pendingDeps: Set.empty, attemptMillis: 0.0
+        }
+      ended <- liftEffect nowMillis
+      go (restored { stats = restored.stats { coordinatorMillis = restored.stats.coordinatorMillis + ended - started } })
+    _, _ -> dispatch st
+
+  dispatch st = case pickModule st of
     Just (Tuple i isFallback) -> case Map.lookup i st.pending of
       Nothing -> go st
       Just coreFnModule -> do
@@ -556,7 +652,7 @@ buildModulesParallelWithLazyPreparation prepareFresh loadCached observer onReuse
 
   mkUncachedJob st i prepared@(Module m) attemptStarted = do
     pendingRef <- liftEffect (Ref.new Set.empty)
-    lookupRaw <- createLazyRankLookup
+    lookupRaw <- createLazyRankLookup (map (\resolve -> resolve (unwrap m.name)) loadBinding)
       { indexByName
       , currentIndex: i
       , finalized: st.finalized
@@ -678,9 +774,14 @@ buildModulesParallelWithLazyPreparation prepareFresh loadCached observer onReuse
         , ready: foldl (flip Set.insert)
             (Set.union (Set.delete result.index st.ready) woken.ready)
             newlyReady
-        , finalized: Map.insert result.index (\_ -> case loadCached of
-            Just load | result.cached -> unsafePerformEffect (load (unwrap m.name))
-            _ -> result.backendMod.implementations) st.finalized
+        , finalized: Map.insert result.index
+            { cached: result.cached && case loadCached of
+                Just _ -> true
+                Nothing -> false
+            , load: \_ -> case loadCached of
+                Just load | result.cached -> unsafePerformEffect (load (unwrap m.name))
+                _ -> result.backendMod.implementations
+            } st.finalized
         , contributions: Map.insert result.index result.backendMod.directives st.contributions
         , privateGlobals: Map.insert result.index (untypedPrivateGlobals result.coreFnModule) st.privateGlobals
         , accumulated: foldrWithIndex (insertEvalRefImpl evalRefCompare compare) st.accumulated result.backendMod.directives
@@ -742,17 +843,18 @@ createRankLookup
   -> Ref.Ref (Set Int)
   -> m PurmetaLookup
 createRankLookup view pendingRef = do
-  createLazyRankLookup (view { finalized = map const view.finalized }) pendingRef
+  createLazyRankLookup Nothing (view { finalized = map (\value -> { cached: false, load: const value }) view.finalized }) pendingRef
 
 createLazyRankLookup
   :: forall m. MonadEffect m
-  => { indexByName :: Map String Int
+  => Maybe (String -> String -> Effect (Maybe (Maybe (Tuple BackendAnalysis ExternImpl))))
+  -> { indexByName :: Map String Int
      , currentIndex :: Int
-     , finalized :: Map Int (Unit -> BackendImplementations)
+     , finalized :: Map Int FinalizedContribution
      }
   -> Ref.Ref (Set Int)
   -> m PurmetaLookup
-createLazyRankLookup view pendingRef = do
+createLazyRankLookup loadBinding view pendingRef = do
   let
     raw moduleName ident =
       case Map.lookup moduleName view.indexByName of
@@ -760,8 +862,15 @@ createLazyRankLookup view pendingRef = do
         Just other
           | other >= view.currentIndex -> ExternMissing
           | otherwise -> case Map.lookup other view.finalized of
-              Just load ->
-                case lookupQualifiedIdentImpl qualifiedIdentCompare (Qualified (Just (ModuleName moduleName)) (Ident ident)) (load unit) of
+              Just contribution ->
+                let
+                  covered = case loadBinding of
+                    Just resolve | contribution.cached -> unsafePerformEffect (resolve moduleName ident)
+                    _ -> Nothing
+                  value = case covered of
+                    Just found -> found
+                    Nothing -> lookupQualifiedIdentImpl qualifiedIdentCompare (Qualified (Just (ModuleName moduleName)) (Ident ident)) (contribution.load unit)
+                in case value of
                   Just impl -> ExternFound impl
                   Nothing -> ExternMissing
               Nothing -> unsafePerformEffect do
