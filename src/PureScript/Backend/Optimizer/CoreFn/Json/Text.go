@@ -2005,12 +2005,9 @@ func tc_cndModulePrime(moduleName string, obj tc_ntObject, path string) gopurs_r
 		}
 		foreignList = append(foreignList, tc_cndTuple(gopurs_runtime.Str(ident.StrVal()), typeValue))
 	}
-	// Coupling: the foreign annotations map is built by the generated
-	// specialised Map.fromFoldable (the Map is an opaque native structure).
-	// Calling the Map FFI insert path directly would require the Ord String
-	// comparator as a Value; the generated helper is stable for a given PBO
-	// version and a rename fails the build loudly.
-	foreignMap := Call_Data_Map_Internal_fromFoldable__1911179134(gopurs_runtime.Array(foreignList))
+	// Use the public generic function: specialization names depend on the
+	// optimizer and must not be embedded in this native decoder.
+	foreignMap := gopurs_runtime.Apply3(Get_Data_Map_Internal_fromFoldable(), Get_Data_Ord_ordString(), Get_Data_Foldable_foldableArray(), gopurs_runtime.Array(foreignList))
 	comments := tc_cndArrayOfField(obj, "comments", tc_cndComment)
 	return gopurs_runtime.RecordDict(
 		[]string{"classDecls", "comments", "dataDecls", "decls", "exports", "foreign", "imports", "name", "path", "reExports", "span"},

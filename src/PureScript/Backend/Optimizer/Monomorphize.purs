@@ -243,6 +243,38 @@ extractFuncType = case _ of
   ConstrainedType _ body -> extractFuncType body
   _ -> Nothing
 
+-- Remaining constraints are runtime arguments too. Preserve their position
+-- and annotate each generated node with the type at that point in the spine.
+etaExpand :: Ann -> ExprType -> Expr Ann -> Expr Ann
+etaExpand ann ty expr =
+  let
+    parameters = Array.mapWithIndex (\index step -> step { ident = Ident ("__eta" <> show index) }) (steps ty)
+    typedAnn t = mapAnn (\_ -> t) ann
+    applied = foldl
+      (\fn parameter -> ExprApp (typedAnn parameter.resultType) fn
+        (ExprVar (typedAnn parameter.argType) (Qualified Nothing parameter.ident)))
+      expr parameters
+  in
+    Array.foldr (\parameter body -> ExprAbs (typedAnn parameter.functionType) parameter.ident body) applied parameters
+  where
+  steps = case _ of
+    ForAll _ body -> steps body
+    functionType@(ConstrainedType constraints body) -> case Array.uncons constraints of
+      Just { head: Tuple name args, tail } ->
+        let resultType = if Array.null tail then body else ConstrainedType tail body
+        in Array.cons
+          { ident: Ident "", argType: ADT (String.joinWith "." name) name args, functionType, resultType }
+          (steps resultType)
+      Nothing -> steps body
+    Func args ret -> Array.mapWithIndex
+      (\index argType ->
+        { ident: Ident ""
+        , argType
+        , functionType: Func (Array.drop index args) ret
+        , resultType: if index + 1 == Array.length args then ret else Func (Array.drop (index + 1) args) ret
+        }) args
+    _ -> []
+
 data SpineArg = SpineApp (Expr Ann) | SpineTypeApp ExprType
 
 collectSpine :: Expr Ann -> { f_var :: Expr Ann, spine :: Array SpineArg }
@@ -353,7 +385,7 @@ collectExpr globalAstMap modName acc expr = case expr of
              stripForAlls = case _ of
                ForAll _ b -> stripForAlls b
                x -> x
-             instType = stripTypeVariables (substituteExprType subst (stripForAlls genericType))
+             instType = stripQuantifiers (substituteExprType subst (stripForAlls genericType))
              { dictArgs, normalArgs } = partitionArgs genericType args
           in
              if not (hasTypeVariables genericType) then acc2
@@ -430,7 +462,7 @@ collectLocalExpr targets recs acc expr = case expr of
                 stripForAlls = case _ of
                   ForAll _ b -> stripForAlls b
                   x -> x
-                instType = stripTypeVariables (substituteExprType finalSubst (stripForAlls genericType))
+                instType = stripQuantifiers (substituteExprType finalSubst (stripForAlls genericType))
               in
                 if (hasTypeVariables genericType) && (hasTypeVariables instType && instType == stripForAlls genericType) then
                   acc
@@ -801,7 +833,10 @@ monomorphizeUsing lookupBody lookup ownInstantiations (Module m) =
                             exprWithDicts = applyStaticArgs info.dictArgs info.normalArgs expr
                             resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
 
-                            finalTy = stripTypeVariables (substFn info.instType)
+                            -- The call-site type may already omit dictionaries;
+                            -- the binding annotation retains the full runtime spine.
+                            finalTy = case ann of
+                              Ann bindingAnn -> substFn (fromMaybe info.instType bindingAnn.type)
 
                             -- Recursive calls need the same spine rewrite as other
                             -- calls, including removal of static dictionaries.
@@ -810,19 +845,7 @@ monomorphizeUsing lookupBody lookup ownInstantiations (Module m) =
                             etaExpandedExpr = case specializedExpr of
                               ExprAbs _ _ _ -> specializedExpr
                               _ | Array.length info.dictArgs == 0 && Array.length info.normalArgs == 0 -> specializedExpr
-                              _ ->
-                                let
-                                  monomorphizedAnn = mapAnn (\_ -> finalTy) ann
-                                in
-                                  case extractFuncType finalTy of
-                                    Just { fArgs } ->
-                                      let
-                                        idents = Array.mapWithIndex (\i _ -> Ident ("__eta" <> show i)) fArgs
-                                        vars = map (\id -> ExprVar monomorphizedAnn (Qualified Nothing id)) idents
-                                        app = foldl (\acc v -> ExprApp monomorphizedAnn acc v) specializedExpr vars
-                                      in
-                                        Array.foldr (\id acc -> ExprAbs monomorphizedAnn id acc) app idents
-                                    Nothing -> specializedExpr
+                              _ -> etaExpand ann finalTy specializedExpr
 
                             newName = Ident (name <> "__" <> hashString specKey)
                             -- Dynamic dictionaries still have runtime parameters.
@@ -948,7 +971,7 @@ monomorphizeExprWith modName lookup localDicts rootExpr = case rootExpr of
              stripForAlls = case _ of
                ForAll _ b -> stripForAlls b
                x -> x
-             instType = stripTypeVariables (substituteExprType subst (stripForAlls genericType))
+             instType = stripQuantifiers (substituteExprType subst (stripForAlls genericType))
              { dictArgs, normalArgs } = partitionArgs genericType args'
              qualName = unwrap mod <> "." <> name
              filteredArgs = Array.filter (\d -> not (isStatic d)) dictArgs <> normalArgs
@@ -1032,11 +1055,11 @@ monomorphizeExprWith modName lookup localDicts rootExpr = case rootExpr of
                        fixedExpr = injectType genericType bExpr
                        specs = Array.mapMaybe (\substType ->
                            let
-                             instType = stripTypeVariables (substituteExprType substType genericType)
+                             instType = stripQuantifiers (substituteExprType substType genericType)
                              specKey = mangleType (defaultToAny instType)
                              mangledId = Ident (unwrap id <> "__" <> hashString specKey)
-                             specExpr = rewriteExpr Map.empty Map.empty Map.empty (\t -> substituteExprType substType (stripTypeVariables t)) fixedExpr
-                             newBind = Binding (mapAnn (\t -> substituteExprType substType (stripTypeVariables t)) fixedAnn) mangledId specExpr
+                             specExpr = rewriteExpr Map.empty Map.empty Map.empty (\t -> substituteExprType substType (stripQuantifiers t)) fixedExpr
+                             newBind = Binding (mapAnn (\t -> substituteExprType substType (stripQuantifiers t)) fixedAnn) mangledId specExpr
                            in
                              Just { specKey, mangledId, newBind }
                        ) substList
@@ -1057,11 +1080,11 @@ monomorphizeExprWith modName lookup localDicts rootExpr = case rootExpr of
                            fixedExpr = injectType genericType bExpr
                            s = Array.mapMaybe (\substType ->
                                let
-                                 instType = stripTypeVariables (substituteExprType substType genericType)
+                                 instType = stripQuantifiers (substituteExprType substType genericType)
                                  specKey = mangleType (defaultToAny instType)
                                  mangledId = Ident (unwrap id <> "__" <> hashString specKey)
-                                 specExpr = rewriteExpr Map.empty Map.empty Map.empty (\t -> substituteExprType substType (stripTypeVariables t)) fixedExpr
-                                 newBind = Binding (mapAnn (\t -> substituteExprType substType (stripTypeVariables t)) fixedAnn) mangledId specExpr
+                                 specExpr = rewriteExpr Map.empty Map.empty Map.empty (\t -> substituteExprType substType (stripQuantifiers t)) fixedExpr
+                                 newBind = Binding (mapAnn (\t -> substituteExprType substType (stripQuantifiers t)) fixedAnn) mangledId specExpr
                                in
                                  Just { specKey, mangledId, newBind }
                            ) substList
@@ -1124,7 +1147,7 @@ monomorphizeExprWith modName lookup localDicts rootExpr = case rootExpr of
                       substType = unifySpine genericType args substFromTypeArgs
                     in
                         let
-                          instType = stripTypeVariables (substituteExprType substType genericType)
+                          instType = stripQuantifiers (substituteExprType substType genericType)
                           specKey = mangleType (defaultToAny instType)
                         in
                           case Map.lookup specKey insts of
@@ -1247,10 +1270,11 @@ hasTypeVariables (TypeLevelString _) = false
 hasTypeVariables (ADT _ _ args) = Array.any hasTypeVariables args
 hasTypeVariables Any = true
 
-stripTypeVariables :: ExprType -> ExprType
-stripTypeVariables (ForAll _ t) = stripTypeVariables t
-stripTypeVariables (ConstrainedType _ t) = stripTypeVariables t
-stripTypeVariables t = t
+-- Local specialization keeps dictionary arguments at runtime. Remove only
+-- quantifiers so applying a dictionary still leaves the ordinary function.
+stripQuantifiers :: ExprType -> ExprType
+stripQuantifiers (ForAll _ t) = stripQuantifiers t
+stripQuantifiers t = t
 
 resolveGlobals :: String -> Set Ident -> Expr Ann -> Expr Ann
 resolveGlobals definerMod = go
