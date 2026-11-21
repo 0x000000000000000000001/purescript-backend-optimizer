@@ -690,12 +690,24 @@ substituteVars subst = go
           (substituteVars subst' body)
     ExprConstructor ann t c idents -> ExprConstructor ann t c idents
     ExprTypeApp ann e t -> ExprTypeApp ann (go e) t
-    ExprCase ann exprs alts -> ExprCase ann (map go exprs) (map (\(CaseAlternative binders guard) -> CaseAlternative binders (goGuard subst guard)) alts)
+    ExprCase ann exprs alts -> ExprCase ann (map go exprs) (map (\(CaseAlternative binders guard) ->
+      let
+        bound = foldl (\acc binder -> Set.union acc (binderIdents binder)) Set.empty binders
+        branchSubst = Map.filterKeys (\ident -> not (Set.member ident bound)) subst
+      in CaseAlternative binders (goGuard branchSubst guard)) alts)
     ExprAccessor ann e prop -> ExprAccessor ann (go e) prop
     ExprUpdate ann e props -> ExprUpdate ann (go e) (map (\(Prop p v) -> Prop p (go v)) props)
 
   goGuard guardSubst (Unconditional e) = Unconditional (substituteVars guardSubst e)
   goGuard guardSubst (Guarded guards) = Guarded (map (\(Guard e1 e2) -> Guard (substituteVars guardSubst e1) (substituteVars guardSubst e2)) guards)
+
+-- The binding signature and its lambda body can use different scoped names
+-- for the same type variables. Match the body's own TAST type to the known
+-- instantiation before rewriting its annotations and recursive TypeApps.
+bodySubstitution :: Instantiation -> Expr Ann -> Map String ExprType
+bodySubstitution info expr = case inferExprType expr of
+  Just bodyType -> unify bodyType info.instType info.subst
+  Nothing -> info.subst
 
 applyStaticArgs :: Array (Expr Ann) -> Array (Expr Ann) -> Expr Ann -> Expr Ann
 applyStaticArgs dictArgs normalArgs functionBody =
@@ -828,7 +840,8 @@ monomorphizeUsing lookupBody lookup ownInstantiations (Module m) =
                               ForAll _ b -> stripForAlls b
                               x -> x
                             substFn t = stripStaticConstraints info.dictArgs (substituteExprType info.subst (stripForAlls t))
-                            astSubstFn t = substituteExprType info.subst (stripForAlls t)
+                            bodySubst = bodySubstitution info expr
+                            astSubstFn t = substituteExprType bodySubst (stripForAlls t)
 
                             exprWithDicts = applyStaticArgs info.dictArgs info.normalArgs expr
                             resolvedExpr = resolveGlobals definerMod Set.empty exprWithDicts
@@ -1182,7 +1195,9 @@ monomorphizeExprWith modName lookup localDicts rootExpr = case rootExpr of
           rewrittenE = go e
         in
           ExprLet ann (map (monomorphizeBindLocal modName lookup newLocalDicts) rewrittenBinds) (monomorphizeExprWith modName lookup newLocalDicts rewrittenE)
-  ExprCase ann exprs alts -> ExprCase ann (map (monomorphizeExprWith modName lookup localDicts) exprs) (map (monomorphizeAlt modName lookup localDicts) alts)
+  ExprCase ann exprs alts ->
+    let exprs' = map (monomorphizeExprWith modName lookup localDicts) exprs
+    in ExprCase ann exprs' (map (monomorphizeAlt modName lookup localDicts <<< staticCaseAliases exprs') alts)
   ExprConstructor ann t c ids -> ExprConstructor ann t c ids
   ExprAccessor ann e prop -> ExprAccessor ann (monomorphizeExprWith modName lookup localDicts e) prop
   ExprUpdate ann e props -> ExprUpdate ann (monomorphizeExprWith modName lookup localDicts e) (map (monomorphizeProp modName lookup localDicts) props)
@@ -1212,6 +1227,24 @@ monomorphizeBindLocal modName lookup localDicts (Rec bs) = Rec (map (monomorphiz
 monomorphizeBindingLocal :: String -> SpecializationLookup -> Map Ident (Expr Ann) -> Binding Ann -> Binding Ann
 monomorphizeBindingLocal modName lookup localDicts (Binding ann id e) =
   Binding ann id (monomorphizeExprWith modName lookup localDicts e)
+
+-- A variable pattern aliases its corresponding scrutinee exactly. Retain the
+-- case and its evaluation order, while exposing closed static arguments to
+-- recursive specialization. substituteVars respects nested lexical binders.
+staticCaseAliases :: Array (Expr Ann) -> CaseAlternative Ann -> CaseAlternative Ann
+staticCaseAliases exprs (CaseAlternative binders guard) =
+  let
+    aliases = foldl (\acc (Tuple binder expr) -> case binder of
+      BinderVar _ ident | isStatic expr -> Map.insert ident expr acc
+      _ -> acc) Map.empty (Array.zip binders exprs)
+  in if Map.isEmpty aliases then CaseAlternative binders guard
+     else
+       let
+         rewrite = substituteVars aliases
+         guard' = case guard of
+           Unconditional expr -> Unconditional (rewrite expr)
+           Guarded guards -> Guarded (map (\(Guard condition expr) -> Guard (rewrite condition) (rewrite expr)) guards)
+       in CaseAlternative binders guard'
 
 monomorphizeAlt :: String -> SpecializationLookup -> Map Ident (Expr Ann) -> CaseAlternative Ann -> CaseAlternative Ann
 monomorphizeAlt modName lookup localDicts (CaseAlternative binders cg) = CaseAlternative binders (monomorphizeCaseGuard modName lookup localDicts cg)
@@ -1541,7 +1574,8 @@ transitiveCollectWithReads runJobs globalAstMap initialMap =
       stripForAlls = case _ of
         ForAll _ b -> stripForAlls b
         x -> x
-      astSubstFn t = substituteExprType info.subst (stripForAlls t)
+      bodySubst = bodySubstitution info expr
+      astSubstFn t = substituteExprType bodySubst (stripForAlls t)
       cacheKey = Tuple qualName specKey
       previous = case Map.lookup cacheKey prepared of
         Just old | sameInstantiationInputs old.info info -> Just old
